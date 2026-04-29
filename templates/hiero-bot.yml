@@ -1,0 +1,118 @@
+# .github/hiero-bot.yml  ─────────────────────────────────────────
+# Hiero Maintainer Bot v2 — Repository Configuration
+# Add this file to any repo where the bot is installed.
+# Every workflow section is optional; omit what you don't need.
+# ─────────────────────────────────────────────────────────────────
+
+repo: "hiero/your-repo"
+
+difficulty_labels:
+  good_first_issue: "good first issue"
+  intermediate: "intermediate"
+  advanced: "advanced"
+
+teams:
+  maintainers: "maintainers"
+  committers: "committers"
+  junior_committers: "junior-committers"
+  mentors: "mentors"
+
+workflows:
+
+  # ── Onboarding ────────────────────────────────────────────────
+  onboarding:
+    enabled: true
+    check_human_contributors: true
+    require_signed_cla: false
+    minimum_account_age_days: 0       # 0 = no minimum
+    minimum_public_contributions: 0   # 0 = no minimum
+    auto_assign_mentor: false
+    mentor_assignment_strategy: round-robin  # round-robin | least-busy | expertise-match
+    welcome_message: |
+      We're thrilled to have you! Please read **CONTRIBUTING.md** before getting started.
+    onboarding_checklist:
+      - Read CONTRIBUTING.md
+      - Sign your commits (DCO)
+      - Join the Hiero Discord
+
+  # ── Pull Request ──────────────────────────────────────────────
+  pull_request:
+    enabled: true
+    reviewer_recommendation: true     # Suggest reviewers based on file history
+
+    ai_review:
+      enabled: false                  # Requires ANTHROPIC_API_KEY
+      model: "claude-sonnet-4-20250514"
+      max_comments: 5                 # 1–20
+      focus_areas: [security, logic]  # security | performance | style | logic | tests
+
+    quality_gates:
+      require_tests: true
+      require_dco: true
+      require_gpg_signature: false
+      min_reviewers: 1
+      # max_files_changed: 50
+      require_changelog_entry: false
+      require_linked_issue: false
+      # allowed_branch_pattern: "^(feat|fix|chore|docs)/"
+
+    auto_label: true
+    stale_pr_days: 30
+    auto_close_stale: false
+
+  # ── PR Health Scoring ─────────────────────────────────────────
+  pr_health:
+    enabled: true
+    score_weights:
+      has_tests: 0.25
+      has_linked_issue: 0.15
+      has_description: 0.15
+      dco_signed: 0.20
+      review_count: 0.15
+      small_diff: 0.10
+    comment_threshold: 60    # Post comment only if score < this
+    label_healthy_above: 75  # Apply "healthy" label if score >= this
+
+  # ── Developer Progression ─────────────────────────────────────
+  progression:
+    enabled: true
+    recommend_issues_after_merge: true
+    recommendation_count: 3
+    celebrate_milestones: true   # Celebrate 1st, 5th, 10th, 25th, 50th PRs
+
+    requirements_for_junior_committer:
+      min_merged_prs: 3
+      min_reviews_given: 2
+      min_months_active: 1
+      require_endorsement_from: committer
+
+    requirements_for_committer:
+      min_merged_prs: 15
+      min_reviews_given: 10
+      min_months_active: 6
+      require_endorsement_from: maintainer
+
+    requirements_for_maintainer:
+      min_merged_prs: 50
+      min_reviews_given: 30
+      min_months_active: 12
+      require_endorsement_from: maintainer
+
+  # ── Issue Management ──────────────────────────────────────────
+  issue_management:
+    enabled: true
+    stale_issue_days: 60
+    close_stale_after_days: 7
+    stale_label: "stale"
+    exempt_labels:
+      - pinned
+      - security
+      - in-progress
+    auto_unassign_inactive_days: 14
+    label_escalation_rules:
+      - label: "security"
+        notify_team: "security-team"
+        after_hours: 24
+      - label: "needs-maintainer"
+        notify_team: "maintainers"
+        after_hours: 48

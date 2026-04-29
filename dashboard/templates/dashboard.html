@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hiero Bot — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #21262d;
+    --text: #c9d1d9; --muted: #8b949e;
+    --blue: #58a6ff; --green: #3fb950; --yellow: #d29922;
+    --red: #f85149; --purple: #bc8cff;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
+  a { color: var(--blue); text-decoration: none; }
+
+  /* Layout */
+  .topbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 12px; }
+  .topbar .logo { font-weight: 700; font-size: 16px; color: var(--blue); }
+  .topbar .sub { color: var(--muted); font-size: 12px; }
+  .topbar .dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; display: inline-block; margin-left: auto; }
+  .topbar .dot-label { color: var(--green); font-size: 11px; }
+
+  main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+  .section-title { font-size: 11px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; margin-top: 28px; }
+
+  /* Stat cards */
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .stat-card .label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .stat-card .value { font-size: 28px; font-weight: 700; line-height: 1; }
+  .stat-card .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .stat-card.blue .value { color: var(--blue); }
+  .stat-card.green .value { color: var(--green); }
+  .stat-card.yellow .value { color: var(--yellow); }
+  .stat-card.red .value { color: var(--red); }
+  .stat-card.purple .value { color: var(--purple); }
+
+  /* Charts */
+  .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .chart-card h3 { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 16px; }
+  .chart-card canvas { max-height: 220px; }
+
+  /* Table */
+  .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .table-card table { width: 100%; border-collapse: collapse; }
+  .table-card th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .table-card td { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .table-card tr:last-child td { border-bottom: none; }
+  .table-card tr:hover td { background: rgba(88,166,255,0.04); }
+
+  /* Badges */
+  .badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 20px; }
+  .badge-green { background: rgba(63,185,80,.15); color: var(--green); }
+  .badge-yellow { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .badge-red { background: rgba(248,81,73,.15); color: var(--red); }
+  .badge-blue { background: rgba(88,166,255,.15); color: var(--blue); }
+  .badge-purple { background: rgba(188,140,255,.15); color: var(--purple); }
+  .badge-gray { background: rgba(139,148,158,.15); color: var(--muted); }
+
+  /* Score bar */
+  .score-bar { width: 80px; height: 6px; background: var(--border); border-radius: 3px; display: inline-block; vertical-align: middle; overflow: hidden; }
+  .score-fill { height: 100%; border-radius: 3px; }
+
+  /* Repo selector */
+  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+  .controls select, .controls input {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    padding: 7px 12px; border-radius: var(--radius); font-size: 13px; outline: none;
+  }
+  .controls select:focus, .controls input:focus { border-color: var(--blue); }
+  .btn { background: var(--blue); color: #000; border: none; padding: 7px 16px; border-radius: var(--radius); font-size: 13px; font-weight: 600; cursor: pointer; }
+  .btn:hover { opacity: 0.85; }
+
+  /* Loading / empty */
+  .empty { color: var(--muted); text-align: center; padding: 32px; font-size: 13px; }
+  .loading { opacity: 0.5; }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .chart-grid { grid-template-columns: 1fr; }
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">🤖 Hiero Maintainer Bot</span>
+  <span class="sub">Dashboard</span>
+  <span style="margin-left:auto; display:flex; align-items:center; gap:6px">
+    <span class="dot"></span>
+    <span class="dot-label">Live</span>
+  </span>
+</div>
+
+<main>
+
+  <div class="controls">
+    <select id="ownerInput" onchange="loadAll()">
+      <option value="">All owners</option>
+    </select>
+    <select id="repoInput" onchange="loadAll()">
+      <option value="">All repos</option>
+    </select>
+    <button class="btn" onclick="loadAll()">Refresh</button>
+    <span id="lastUpdated" style="color:var(--muted); font-size:12px; margin-left:8px"></span>
+  </div>
+
+  <div class="section-title">Overview</div>
+  <div class="stat-grid" id="statGrid">
+    <div class="stat-card blue"><div class="label">Avg PR Health</div><div class="value" id="avgScore">—</div><div class="sub">out of 100</div></div>
+    <div class="stat-card green"><div class="label">PRs Scored</div><div class="value" id="totalPRs">—</div><div class="sub">all time</div></div>
+    <div class="stat-card yellow"><div class="label">Stale Marked</div><div class="value" id="staleMarked">—</div><div class="sub">issues flagged</div></div>
+    <div class="stat-card red"><div class="label">Stale Closed</div><div class="value" id="staleClosed">—</div><div class="sub">auto-closed</div></div>
+    <div class="stat-card purple"><div class="label">Auto-unassigned</div><div class="value" id="autoUnassigned">—</div><div class="sub">inactive contributors</div></div>
+    <div class="stat-card green"><div class="label">Contributors Welcomed</div><div class="value" id="welcomed">—</div><div class="sub">first-timers</div></div>
+  </div>
+
+  <div class="section-title">PR Health Trends</div>
+  <div class="chart-grid">
+    <div class="chart-card">
+      <h3>Health Score Distribution</h3>
+      <canvas id="scoreDistChart"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>Signal Pass Rates</h3>
+      <canvas id="signalsChart"></canvas>
+    </div>
+  </div>
+
+  <div class="section-title">Recent PR Health Scores</div>
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr>
+          <th>PR</th><th>Author</th><th>Score</th><th>Tests</th><th>Linked Issue</th><th>DCO</th><th>Reviews</th><th>Files</th><th>Label</th><th>Date</th>
+        </tr>
+      </thead>
+      <tbody id="prHealthTable"><tr><td colspan="10" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section-title">Audit Log</div>
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr><th>Time</th><th>Action</th><th>Repo</th><th>Target</th><th>Reason</th></tr>
+      </thead>
+      <tbody id="auditTable"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section-title">Role Progression</div>
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr><th>Contributor</th><th>Repo</th><th>Merged PRs</th><th>Reviews</th><th>Months Active</th><th>Eligible For</th><th>Snapshot</th></tr>
+      </thead>
+      <tbody id="progressTable"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+</main>
+
+<script>
+const API = '/api/v1';
+let scoreDistChart, signalsChart;
+
+function owner() { return document.getElementById('ownerInput').value; }
+function repo() { return document.getElementById('repoInput').value; }
+
+async function api(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) return null;
+  return r.json();
+}
+
+function qs(params) {
+  const p = Object.entries(params).filter(([,v]) => v).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  return p ? '?' + p : '';
+}
+
+// ── Stats ──────────────────────────────────────────────────
+
+async function loadStats() {
+  const o = owner(), r = repo();
+  if (!o || !r) return;
+
+  const [stats, healthStats] = await Promise.all([
+    api(`/repos/stats?owner=${o}&repo=${r}`),
+    api(`/pr-health/stats?owner=${o}&repo=${r}`),
+  ]);
+
+  if (stats) {
+    document.getElementById('staleMarked').textContent = stats.total_stale_marked;
+    document.getElementById('staleClosed').textContent = stats.total_stale_closed;
+    document.getElementById('autoUnassigned').textContent = stats.total_auto_unassigned;
+    document.getElementById('welcomed').textContent = stats.total_contributors_welcomed;
+    document.getElementById('totalPRs').textContent = stats.total_prs_scored;
+  }
+  if (healthStats) {
+    document.getElementById('avgScore').textContent = healthStats.avg_score.toFixed(0);
+  }
+}
+
+// ── PR Health Table ────────────────────────────────────────
+
+async function loadPRHealth() {
+  const rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 30})}`);
+  const tbody = document.getElementById('prHealthTable');
+  if (!rows || !rows.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">No PR health records yet.</td></tr>';
+    return;
+  }
+
+  const scoreColor = s => s >= 80 ? '#3fb950' : s >= 60 ? '#d29922' : '#f85149';
+
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td><a href="#">#${r.pr_number}</a></td>
+      <td>@${r.pr_author}</td>
+      <td>
+        <span style="font-weight:700; color:${scoreColor(r.score)}">${r.score.toFixed(0)}</span>
+        <span class="score-bar"><span class="score-fill" style="width:${r.score}%;background:${scoreColor(r.score)}"></span></span>
+      </td>
+      <td>${r.has_tests ? '✅' : '❌'}</td>
+      <td>${r.has_linked_issue ? '✅' : '❌'}</td>
+      <td>${r.dco_signed ? '✅' : '❌'}</td>
+      <td>${r.review_count}</td>
+      <td>${r.files_changed}</td>
+      <td>${labelBadge(r.label_applied)}</td>
+      <td style="color:var(--muted)">${relativeTime(r.created_at)}</td>
+    </tr>
+  `).join('');
+}
+
+// ── Charts ─────────────────────────────────────────────────
+
+async function loadCharts() {
+  const rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 100})}`);
+  if (!rows || !rows.length) return;
+
+  // Distribution bucketing
+  const buckets = {'0–40': 0, '40–60': 0, '60–75': 0, '75–90': 0, '90–100': 0};
+  rows.forEach(r => {
+    if (r.score < 40) buckets['0–40']++;
+    else if (r.score < 60) buckets['40–60']++;
+    else if (r.score < 75) buckets['60–75']++;
+    else if (r.score < 90) buckets['75–90']++;
+    else buckets['90–100']++;
+  });
+
+  const chartOpts = {
+    responsive: true,
+    plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
+    scales: {
+      x: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      y: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+    },
+  };
+
+  if (scoreDistChart) scoreDistChart.destroy();
+  scoreDistChart = new Chart(document.getElementById('scoreDistChart'), {
+    type: 'bar',
+    data: {
+      labels: Object.keys(buckets),
+      datasets: [{
+        label: 'PRs',
+        data: Object.values(buckets),
+        backgroundColor: ['#f85149','#d29922','#d29922','#3fb950','#3fb950'],
+        borderRadius: 4,
+      }],
+    },
+    options: chartOpts,
+  });
+
+  // Signal pass rates
+  const signals = {
+    'Tests': rows.filter(r => r.has_tests).length,
+    'Linked Issue': rows.filter(r => r.has_linked_issue).length,
+    'Description': rows.filter(r => r.has_description).length,
+    'DCO': rows.filter(r => r.dco_signed).length,
+    'Has Review': rows.filter(r => r.review_count > 0).length,
+  };
+  const pct = v => Math.round(v / rows.length * 100);
+
+  if (signalsChart) signalsChart.destroy();
+  signalsChart = new Chart(document.getElementById('signalsChart'), {
+    type: 'bar',
+    data: {
+      labels: Object.keys(signals),
+      datasets: [{
+        label: '% of PRs passing',
+        data: Object.values(signals).map(pct),
+        backgroundColor: '#58a6ff88',
+        borderColor: '#58a6ff',
+        borderWidth: 1,
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      ...chartOpts,
+      scales: {
+        ...chartOpts.scales,
+        y: { ...chartOpts.scales.y, min: 0, max: 100,
+             ticks: { color: '#8b949e', callback: v => v + '%' } },
+      },
+    },
+  });
+}
+
+// ── Audit Log ──────────────────────────────────────────────
+
+async function loadAudit() {
+  const rows = await api(`/audit${qs({owner: owner(), repo: repo(), limit: 20})}`);
+  const tbody = document.getElementById('auditTable');
+  if (!rows || !rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No audit events yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td style="color:var(--muted); white-space:nowrap">${relativeTime(r.timestamp)}</td>
+      <td>${actionBadge(r.action)}</td>
+      <td style="color:var(--muted)">${r.owner}/${r.repo}</td>
+      <td>${r.target_login ? `@${r.target_login}` : ''}${r.target_number ? ` #${r.target_number}` : ''}</td>
+      <td style="color:var(--muted); font-size:12px">${r.reason}</td>
+    </tr>
+  `).join('');
+}
+
+// ── Progression ────────────────────────────────────────────
+
+async function loadProgression() {
+  const rows = await api(`/contributors${qs({owner: owner(), repo: repo(), limit: 20})}`);
+  const tbody = document.getElementById('progressTable');
+  if (!rows || !rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No contributor snapshots yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>@${r.login}</td>
+      <td style="color:var(--muted)">${r.repo}</td>
+      <td>${r.merged_prs}</td>
+      <td>${r.reviews_given}</td>
+      <td>${r.months_active}</td>
+      <td>${r.eligible_for ? `<span class="badge badge-green">${r.eligible_for}</span>` : '<span class="badge badge-gray">contributor</span>'}</td>
+      <td style="color:var(--muted); font-size:12px">${relativeTime(r.recorded_at)}</td>
+    </tr>
+  `).join('');
+}
+
+// ── Helpers ────────────────────────────────────────────────
+
+function relativeTime(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff/3600000) + 'h ago';
+  return Math.floor(diff/86400000) + 'd ago';
+}
+
+function labelBadge(label) {
+  if (!label) return '';
+  if (label.includes('healthy')) return `<span class="badge badge-green">healthy</span>`;
+  if (label.includes('needs work')) return `<span class="badge badge-yellow">needs work</span>`;
+  return `<span class="badge badge-gray">${label}</span>`;
+}
+
+function actionBadge(action) {
+  const map = {
+    'pr.reviewed': 'badge-blue', 'pr.labeled': 'badge-blue', 'pr.health_scored': 'badge-blue',
+    'pr.reviewer_recommended': 'badge-purple',
+    'issue.assigned': 'badge-green', 'contributor.welcomed': 'badge-green',
+    'contributor.role_suggested': 'badge-purple',
+    'issue.stale_marked': 'badge-yellow',
+    'issue.closed': 'badge-red', 'issue.unassigned': 'badge-red',
+    'workflow.error': 'badge-red',
+  };
+  const cls = map[action] || 'badge-gray';
+  return `<span class="badge ${cls}">${action}</span>`;
+}
+
+async function populateRepoDropdowns() {
+  const data = await api('/audit?limit=500');
+  if (!data) return;
+  const owners = [...new Set(data.map(r => r.owner))];
+  const repos = [...new Set(data.map(r => r.repo))];
+  const oSel = document.getElementById('ownerInput');
+  const rSel = document.getElementById('repoInput');
+  owners.forEach(o => oSel.innerHTML += `<option value="${o}">${o}</option>`);
+  repos.forEach(r => rSel.innerHTML += `<option value="${r}">${r}</option>`);
+}
+
+async function loadAll() {
+  await Promise.all([loadStats(), loadPRHealth(), loadCharts(), loadAudit(), loadProgression()]);
+  document.getElementById('lastUpdated').textContent = 'Updated ' + relativeTime(new Date().toISOString());
+}
+
+// Init
+(async () => {
+  await populateRepoDropdowns();
+  await loadAll();
+  setInterval(loadAll, 30000); // Auto-refresh every 30s
+})();
+</script>
+</body>
+</html>
