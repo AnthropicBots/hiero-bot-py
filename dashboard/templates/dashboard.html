@@ -185,7 +185,7 @@ function qs(params) {
   return p ? '?' + p : '';
 }
 
-// ── Stats ──────────────────────────────────────────────────
+//  Stats 
 
 async function loadStats() {
   const o = owner(), r = repo();
@@ -208,7 +208,7 @@ async function loadStats() {
   }
 }
 
-// ── PR Health Table ────────────────────────────────────────
+//  PR Health Table 
 
 async function loadPRHealth() {
   const rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 30})}`);
@@ -239,7 +239,7 @@ async function loadPRHealth() {
   `).join('');
 }
 
-// ── Charts ─────────────────────────────────────────────────
+//  Charts 
 
 async function loadCharts() {
   const rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 100})}`);
@@ -314,7 +314,7 @@ async function loadCharts() {
   });
 }
 
-// ── Audit Log ──────────────────────────────────────────────
+//Audit Log 
 
 async function loadAudit() {
   const rows = await api(`/audit${qs({owner: owner(), repo: repo(), limit: 20})}`);
@@ -334,7 +334,7 @@ async function loadAudit() {
   `).join('');
 }
 
-// ── Progression ────────────────────────────────────────────
+// Progression 
 
 async function loadProgression() {
   const rows = await api(`/contributors${qs({owner: owner(), repo: repo(), limit: 20})}`);
@@ -356,7 +356,7 @@ async function loadProgression() {
   `).join('');
 }
 
-// ── Helpers ────────────────────────────────────────────────
+// Helpers 
 
 function relativeTime(iso) {
   const diff = Date.now() - new Date(iso).getTime();
