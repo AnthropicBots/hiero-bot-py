@@ -37,7 +37,7 @@ workflows:
 
   #  Pull Request
   pull_request:
-    enabled: true
+    enabled: false
     reviewer_recommendation: true     # Suggest reviewers based on file history
 
     ai_review:
