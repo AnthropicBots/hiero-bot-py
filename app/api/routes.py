@@ -15,7 +15,7 @@ log = get_logger("api.routes")
 router = APIRouter(prefix="/api/v1", tags=["API"])
 
 
-# ── Response schemas ──────────────────────────────────────────
+# Response schemas
 
 class AuditEntry(BaseModel):
     id: int
@@ -78,14 +78,14 @@ class RepoStats(BaseModel):
     total_audit_events: int
 
 
-# ── Health ────────────────────────────────────────────────────
+#Health
 
 @router.get("/health")
 async def health():
     return {"status": "ok", "service": "hiero-maintainer-bot"}
 
 
-# ── Audit log ─────────────────────────────────────────────────
+#Audit log 
 
 @router.get("/audit", response_model=list[AuditEntry])
 async def get_audit_log(
@@ -124,7 +124,7 @@ async def get_audit_log(
     ]
 
 
-# ── PR Health ─────────────────────────────────────────────────
+# PR Health
 
 @router.get("/pr-health", response_model=list[PRHealthEntry])
 async def get_pr_health(
@@ -177,7 +177,7 @@ async def get_pr_health_stats(
     }
 
 
-# ── Contributors ──────────────────────────────────────────────
+# Contributors 
 
 @router.get("/contributors", response_model=list[ContributorEntry])
 async def get_contributors(
@@ -202,7 +202,7 @@ async def get_contributors(
     return result.scalars().all()
 
 
-# ── Repo stats ────────────────────────────────────────────────
+# Repo stats 
 
 @router.get("/repos/stats", response_model=RepoStats)
 async def get_repo_stats(
@@ -236,7 +236,7 @@ async def get_repo_stats(
     )
 
 
-# ── Stale log ─────────────────────────────────────────────────
+# Stale log 
 
 @router.get("/stale-log")
 async def get_stale_log(
