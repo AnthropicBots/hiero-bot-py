@@ -2,7 +2,7 @@
 # Hiero Maintainer Bot v2 — Repository Configuration
 # Add this file to any repo where the bot is installed.
 # Every workflow section is optional; omit what you don't need.
-# ─────────────────────────────────────────────────────────────────
+# 
 
 repo: "hiero/your-repo"
 
@@ -19,7 +19,7 @@ teams:
 
 workflows:
 
-  # ── Onboarding ────────────────────────────────────────────────
+  #  Onboarding 
   onboarding:
     enabled: true
     check_human_contributors: true
@@ -35,7 +35,7 @@ workflows:
       - Sign your commits (DCO)
       - Join the Hiero Discord
 
-  # ── Pull Request ──────────────────────────────────────────────
+  #  Pull Request
   pull_request:
     enabled: true
     reviewer_recommendation: true     # Suggest reviewers based on file history
@@ -60,7 +60,7 @@ workflows:
     stale_pr_days: 30
     auto_close_stale: false
 
-  # ── PR Health Scoring ─────────────────────────────────────────
+  #  PR Health Scoring
   pr_health:
     enabled: true
     score_weights:
@@ -73,7 +73,7 @@ workflows:
     comment_threshold: 60    # Post comment only if score < this
     label_healthy_above: 75  # Apply "healthy" label if score >= this
 
-  # ── Developer Progression ─────────────────────────────────────
+  #  Developer Progression
   progression:
     enabled: true
     recommend_issues_after_merge: true
@@ -98,7 +98,7 @@ workflows:
       min_months_active: 12
       require_endorsement_from: maintainer
 
-  # ── Issue Management ──────────────────────────────────────────
+  # Issue Management 
   issue_management:
     enabled: true
     stale_issue_days: 60
