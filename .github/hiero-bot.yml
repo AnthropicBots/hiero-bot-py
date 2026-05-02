@@ -1,0 +1,32 @@
+repo: "AnthropicBots/hiero-bot-py"
+
+workflows:
+  onboarding:
+    enabled: true
+    welcome_message: |
+      Welcome to Hiero! 🎉 Thanks for contributing.
+      Please read CONTRIBUTING.md before getting started.
+
+  pull_request:
+    enabled: true
+    quality_gates:
+      require_dco: true
+      require_linked_issue: false
+      require_tests: false
+    ai_review:
+      enabled: false
+    auto_label: true
+
+  pr_health:
+    enabled: true
+
+  progression:
+    enabled: true
+    recommend_issues_after_merge: true
+    celebrate_milestones: true
+
+  issue_management:
+    enabled: true
+    stale_issue_days: 30
+    close_stale_after_days: 7
+    auto_unassign_inactive_days: 14
