@@ -11,7 +11,7 @@ MentorStrategy = Literal["round-robin", "least-busy", "expertise-match"]
 Verdict = Literal["approve", "request_changes", "comment"]
 
 
-# ── Role requirements ──────────────────────────────────────────
+#  Role requirements 
 
 class RoleRequirements(BaseModel):
     min_merged_prs: int = Field(ge=0)
@@ -20,7 +20,7 @@ class RoleRequirements(BaseModel):
     require_endorsement_from: RoleLevel
 
 
-# ── Onboarding ────────────────────────────────────────────────
+#  Onboarding 
 
 class OnboardingConfig(BaseModel):
     enabled: bool = True
@@ -34,7 +34,7 @@ class OnboardingConfig(BaseModel):
     onboarding_checklist: list[str] = []
 
 
-# ── Pull Request ──────────────────────────────────────────────
+#  Pull Request
 
 class AIReviewConfig(BaseModel):
     enabled: bool = False
@@ -64,7 +64,7 @@ class PullRequestConfig(BaseModel):
     reviewer_recommendation: bool = True  # NEW
 
 
-# ── Progression ───────────────────────────────────────────────
+#  Progression
 
 class ProgressionConfig(BaseModel):
     enabled: bool = True
@@ -91,7 +91,7 @@ class ProgressionConfig(BaseModel):
     celebrate_milestones: bool = True
 
 
-# ── Issue Management ──────────────────────────────────────────
+# Issue Management 
 
 class LabelEscalationRule(BaseModel):
     label: str
@@ -110,7 +110,7 @@ class IssueManagementConfig(BaseModel):
     create_good_first_issues: bool = False
 
 
-# ── PR Health ─────────────────────────────────────────────────
+#  PR Health 
 
 class PRHealthConfig(BaseModel):          # NEW workflow
     enabled: bool = True
@@ -126,7 +126,7 @@ class PRHealthConfig(BaseModel):          # NEW workflow
     label_healthy_above: int = Field(default=75, ge=0, le=100)
 
 
-# ── Teams & Labels ────────────────────────────────────────────
+# Teams & Labels 
 
 class TeamsConfig(BaseModel):
     maintainers: str = "maintainers"
@@ -141,7 +141,7 @@ class DifficultyLabels(BaseModel):
     advanced: str = "advanced"
 
 
-# ── Root ──────────────────────────────────────────────────────
+#  Root 
 
 class WorkflowsConfig(BaseModel):
     onboarding: OnboardingConfig = Field(default_factory=OnboardingConfig)
