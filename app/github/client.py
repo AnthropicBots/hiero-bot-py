@@ -27,13 +27,22 @@ class GitHubClient:
             timeout=20.0,
         )
 
-    # ── Auth ──────────────────────────────────────────────────
-
+    #  Auth 
     def _make_jwt(self) -> str:
         now = int(time.time())
         payload = {"iat": now - 60, "exp": now + 600, "iss": settings.github_app_id}
-        private_key = settings.github_private_key.replace("\\n", "\n")
-        return jwt.encode(payload, private_key, algorithm="RS256")
+        raw = settings.github_private_key
+        # Handle all storage formats: literal \n, escaped \\n, or real newlines
+        private_key = raw.replace("\\n", "\n").replace("\\\\n", "\n").strip()
+        # If key has no newlines at all, it's likely stored as one long string
+        if "\n" not in private_key and "BEGIN" in private_key:
+            # Reconstruct proper PEM format
+            header = "-----BEGIN RSA PRIVATE KEY-----"
+            footer = "-----END RSA PRIVATE KEY-----"
+            body = private_key.replace(header, "").replace(footer, "").strip()
+            private_key = f"{header}\n{body}\n{footer}"
+        log.debug("JWT private key starts with: %s", private_key[:40])
+       return jwt.encode(payload, private_key, algorithm="RS256")
 
     async def _installation_token(self, installation_id: int) -> str:
         token, expires_at = self._installation_tokens.get(installation_id, ("", 0.0))
@@ -57,7 +66,7 @@ class GitHubClient:
         token = await self._installation_token(installation_id)
         return {"Authorization": f"token {token}"}
 
-    # ── Raw request ───────────────────────────────────────────
+    #  Raw request 
 
     async def request(
         self,
@@ -87,7 +96,7 @@ class GitHubClient:
     async def delete(self, path: str, installation_id: int, **kwargs: Any) -> Any:
         return await self.request("DELETE", path, installation_id, **kwargs)
 
-    # ── High-level helpers ────────────────────────────────────
+    #  High-level helpers 
 
     async def get_file_content(
         self, owner: str, repo: str, path: str, installation_id: int = 0
