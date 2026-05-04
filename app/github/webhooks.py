@@ -101,7 +101,7 @@ class WebhookRouter:
             log.error("Error in %s handler for %s/%s: %s", event, owner, repo, exc,
                       exc_info=True)
 
-    # ── Event handlers ────────────────────────────────────────
+    #  Event handlers 
 
     async def _handle_issues(self, action: str, payload: dict, ctx: dict) -> None:
         wf_onboard = OnboardingWorkflow(self._gh)
@@ -128,7 +128,7 @@ class WebhookRouter:
         elif action == "closed" and pr.get("merged"):
             await wf_prog.handle_merged_pr(ctx, payload)
 
-    # ── Slash commands ────────────────────────────────────────
+    #  Slash commands 
 
     async def _handle_slash_command(
         self, body: str, payload: dict, ctx: dict
@@ -205,7 +205,7 @@ class WebhookRouter:
 
         await self._gh.add_label(ctx["owner"], ctx["repo"], issue_number, label_name, inst)
 
-    # ── Signature verification ────────────────────────────────
+    #  Signature verification 
 
     @staticmethod
     def _verify_signature(request: Request, body: bytes) -> None:
