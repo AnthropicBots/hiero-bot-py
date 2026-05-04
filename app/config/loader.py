@@ -20,7 +20,7 @@ class ConfigLoader:
         self._client = github_client
         self._cache: dict[str, tuple[RepoConfig, float]] = {}
 
-    async def load(self, owner: str, repo: str) -> Optional[RepoConfig]:
+    async def load(self, owner: str, repo: str, installation_id: int = 0) -> Optional[RepoConfig]:
         """Load config, using cache if fresh. Returns None if no config file."""
         key = f"{owner}/{repo}"
         if key in self._cache:
@@ -29,7 +29,7 @@ class ConfigLoader:
                 return config
 
         try:
-            raw_b64 = await self._client.get_file_content(owner, repo, _CONFIG_PATH)
+            raw_b64 = await self._client.get_file_content(owner, repo, _CONFIG_PATH, installation_id)
             if raw_b64 is None:
                 return None
 
