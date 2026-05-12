@@ -61,7 +61,7 @@ class GitHubClient:
 
     async def _inst_headers(self, installation_id: int) -> dict[str, str]:
         token = await self._installation_token(installation_id)
-        return {"Authorization": f"token {token}"}
+        return {"Authorization": f"Bearer {token}"}
 
     #  Raw request 
 
