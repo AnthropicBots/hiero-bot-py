@@ -1,17 +1,32 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Environment / secrets
 .env
+*.pem
+
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Databases
 *.db
 *.db-shm
 *.db-wal
+
+# Build artifacts
 dist/
 build/
 *.egg-info/
+
+# Test / coverage
 .coverage
 htmlcov/
 coverage.xml
 .pytest_cache/
+
+# Tool caches
 .mypy_cache/
 .ruff_cache/
