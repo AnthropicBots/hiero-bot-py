@@ -156,7 +156,7 @@ tests/
 ```bash
 # 1. Clone and install
 git clone https://github.com/AnthropicBots/hiero-bot-py
-cd hiero-maintainer-bot
+cd hiero-bot-py
 pip install -r requirements.txt
 
 # 2. Configure
