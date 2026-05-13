@@ -28,7 +28,7 @@ HELP_TEXT = """## 🤖 Hiero Bot Help
 | `/label <name>` | Add a label to this issue (maintainers only) |
 | `/help` | Show this message |
 
-_Powered by [hiero-maintainer-bot](https://github.com/hiero)_"""
+_Powered by [hiero-maintainer-bot](https://github.com/AnthropicBots)_"""
 
 
 class WebhookRouter:
