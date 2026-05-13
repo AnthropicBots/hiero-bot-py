@@ -34,11 +34,7 @@ class OnboardingWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db = ctx["db"]
 
-        # Check first-time contributor
-        if not await self._is_first_time(owner, repo, login, inst):
-            return
-
-        # Welcome comment
+        # Welcome every human issue creator
         msg = self._build_welcome(login, cfg)
         await self._gh.post_comment(owner, repo, issue_number, msg, inst)
 

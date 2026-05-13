@@ -38,11 +38,11 @@ async def test_skips_dependabot_login(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
-async def test_skips_existing_contributor(mock_gh, ctx):
+async def test_welcomes_existing_contributor(mock_gh, ctx):
     mock_gh.get = AsyncMock(return_value=[{"login": "alice"}])
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_new_contributor(ctx, make_payload())
-    mock_gh.post_comment.assert_not_awaited()
+    mock_gh.post_comment.assert_awaited_once()
 
 
 @pytest.mark.asyncio
