@@ -1,28 +1,6 @@
 # 🤖 Hiero Maintainer Bot v2 (Python)
 
-> A production-ready FastAPI GitHub App that automates maintainer workflows across Hiero repositories — with a live dashboard, persistent audit trail, and REST API.
-
-[![CI](https://github.com/hiero/hiero-maintainer-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/hiero/hiero-maintainer-bot/actions)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-
----
-
-## What's New in v2 (Python)
-
-| Feature | Description |
-|---------|-------------|
-| **PR Health Scoring** | Automated 0–100 score for every PR across 6 weighted signals |
-| **Reviewer Recommendation** | Suggests reviewers based on recent file-history overlap |
-| **Live Dashboard** | Real-time metrics, charts, audit log, progression table |
-| **REST API** | Full `/api/v1` query API for all stored data |
-| **Persistent Storage** | SQLite (dev) / PostgreSQL (prod) via SQLAlchemy async |
-| **Scheduled Jobs** | APScheduler cron for daily stale scans and cache flushes |
-| **`/unassign` + `/label` commands** | New slash commands with role-based access |
-
----
-
-## Workflows
+> A production-ready FastAPI GitHub App that automates maintainer workflows across Hiero repositories — with a live dash
 
 ### 🤝 Onboarding
 - Detects first-time contributors and posts a welcome message with checklist
