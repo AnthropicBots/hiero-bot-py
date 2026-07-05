@@ -8,7 +8,7 @@ from app.db.models import AuditLog
 
 @pytest.mark.asyncio
 async def test_record_creates_db_entry(db):
-    entry = await record(
+    await record(
         db, action="issue.assigned", owner="hiero", repo="sdk-js",
         target_number=42, target_login="alice", reason="Self-assigned"
     )

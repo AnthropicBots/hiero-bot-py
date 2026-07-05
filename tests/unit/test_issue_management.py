@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from app.workflows.issuemanagement import IssueManagementWorkflow
 
 
@@ -12,8 +12,8 @@ def make_issue(number=1, updated_days_ago=65, labels=None, assignees=None, is_pr
         "number": number,
         "title": f"Issue #{number}",
         "updated_at": updated,
-        "labels": [{"name": l} for l in (labels or [])],
-        "assignees": [{"login": a} for a in (assignees or [])],
+        "labels": [{"name": label_name} for label_name in (labels or [])],
+        "assignees": [{"login": assignee} for assignee in (assignees or [])],
     }
     if is_pr:
         issue["pull_request"] = {"url": "https://github.com/..."}
