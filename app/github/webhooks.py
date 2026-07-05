@@ -188,12 +188,20 @@ class WebhookRouter:
         config = ctx["config"]
         org = ctx["owner"]
         inst = ctx["installation_id"]
-        allowed = False
+
+        # Permission check (write access + teams)
+        user = await self._gh.get_user(commenter, inst)
+
+        repo_perm = user.get("permissions", {}).get("push", False)
+
+        team_allowed = False
         for team in [config.teams.maintainers, config.teams.committers]:
             members = await self._gh.list_team_members(org, team, inst)
             if any(m["login"] == commenter for m in members):
-                allowed = True
+                team_allowed = True
                 break
+
+        allowed = repo_perm or team_allowed
 
         if not allowed:
             await self._gh.post_comment(
