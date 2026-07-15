@@ -3,11 +3,14 @@
 from __future__ import annotations
 import base64
 import time
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import yaml
 from pydantic import ValidationError
 from app.config.schema import RepoConfig
 from app.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from app.github.client import GitHubClient
 
 log = get_logger("config.loader")
 
@@ -16,7 +19,7 @@ _CACHE_TTL = 300  # 5 minutes
 
 
 class ConfigLoader:
-    def __init__(self, github_client: "GitHubClient") -> None:  # type: ignore[name-defined]
+    def __init__(self, github_client: GitHubClient) -> None:
         self._client = github_client
         self._cache: dict[str, tuple[RepoConfig, float]] = {}
 

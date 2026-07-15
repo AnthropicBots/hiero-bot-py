@@ -166,7 +166,6 @@ class IssueManagementWorkflow:
             )
 
     async def _log_stale(self, ctx: dict, issue_number: int, action: str) -> None:
-        updated_str = ""
         days_inactive = 0
         try:
             issue_data = await self._gh.get(

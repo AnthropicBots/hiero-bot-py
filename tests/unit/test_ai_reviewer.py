@@ -2,7 +2,7 @@
 
 import pytest
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from app.ai.reviewer import AIReviewer
 from app.config.schema import AIReviewConfig
 

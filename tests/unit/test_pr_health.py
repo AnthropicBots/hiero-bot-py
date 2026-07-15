@@ -125,7 +125,6 @@ def test_compute_signals_large_diff():
 
 
 def test_score_weights_sum_to_100():
-    weights = PRHealthWorkflow.__new__(PRHealthWorkflow)
     from app.config.schema import PRHealthConfig
     cfg = PRHealthConfig()
     total = sum(cfg.score_weights.values())
