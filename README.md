@@ -1,4 +1,4 @@
-# 🤖 Hiero Maintainer Bot v2 (Python)
+# Hiero Maintainer Bot — `hiero-bot-py`
 
 > A production-ready FastAPI GitHub App that automates maintainer workflows across Hiero repositories — with a live dash
 
@@ -47,93 +47,107 @@ Labels: `health: 💚 healthy` / `health: 🔧 needs work`
 
 ---
 
-## Slash Commands
+- **Commercial SaaS bots** (Mergify, CodeRabbit, Greptile, etc.) — capable, but closed-source. Your repository data, review history, and contributor metrics live on someone else's servers, behind a subscription that can change price or disappear.
+- **Single-purpose OSS bots** (probot apps, stale-bot, welcome-bot) — free and self-hostable, but each solves one narrow problem with no shared data model, no persistent history, and nothing that helps a project reason about its own contributor pipeline over time.
+
+Nobody has a self-hosted, open-source system that treats maintainer-ops as a whole — with a real database, an audit trail, and a data model for how contributors *grow* inside a project, not just whether a single PR passes a gate.
+
+## What this project does
+
+`hiero-bot-py` is a GitHub App (FastAPI + SQLAlchemy async + Postgres/SQLite) that runs entirely on infrastructure you control. It was built for and tested against the [Hiero](https://hiero.org) (Linux Foundation Decentralized Trust) ecosystem, and is designed to generalize to any GitHub-hosted open-source project via a single per-repo YAML config file.
+
+| Capability | What it does |
+|---|---|
+| **Onboarding** | Detects first-time contributors, posts a welcome checklist, validates account age / public-repo count before `/assign`, round-robins mentor assignment |
+| **PR quality gates** | DCO sign-off, GPG signature, test-file presence, linked-issue requirement, branch naming pattern, max file count — auto-labelled `quality: ✅` / `❌` |
+| **PR health scoring** | Every PR scored 0–100 across 6 configurable, weighted signals (tests, linked issue, description, DCO, approvals, diff size) |
+| **Reviewer recommendation** | Suggests reviewers based on recent file-history overlap, logged with a reason and confidence score |
+| **AI-assisted review** *(optional)* | Structured review (summary, verdict, line comments, severity) via the Anthropic SDK — disabled by default, never required |
+| **Contributor progression** | Tracks merged PRs, reviews given, months active; computes eligibility for `junior-committer → committer → maintainer`; celebrates merge milestones (1st, 5th, 10th, 25th, 50th) |
+| **Issue management** | Daily stale scan (cron), auto-unassign on inactivity, label-based escalation to specific teams |
+| **Live dashboard** | Real-time metrics, score-distribution and signal pass-rate charts, audit log, contributor progression table — auto-refreshes every 30s |
+| **REST API** (`/api/v1`) | Query every stored record — audit log, PR health, contributor snapshots, stale-action history, aggregate repo stats |
+| **Persistent audit trail** | Every bot action (label, comment, assign, close) is written to Postgres/SQLite with a reason — nothing is silent, everything is queryable later |
+| **Security** | HMAC-SHA256 webhook signature verification with constant-time comparison; the bot is completely silent in any repo without an explicit config file |
+
+The bot ships with **76 unit + integration tests** (`pytest-asyncio`, `httpx`, `respx`, in-memory SQLite) covering every workflow module and the full REST API surface.
+
+## Why it's different
+
+| | hiero-bot-py | Mergify | CodeRabbit / Greptile | probot / stale-bot / welcome-bot |
+|---|---|---|---|---|
+| License / hosting | **MIT, self-hosted** | Closed-source SaaS | Closed-source SaaS | Open source, but stateless |
+| Where your data lives | Your own Postgres/SQLite | Vendor's servers | Vendor's servers | N/A (no persistence) |
+| Contributor role progression | ✅ built-in model | ❌ | ❌ | ❌ |
+| PR health scoring | ✅ weighted & configurable | Partial (merge rules only) | ❌ | ❌ |
+| AI review | ✅ optional, off by default | ❌ | ✅ always-on, vendor-locked | ❌ |
+| Audit trail + REST API | ✅ | Limited to their UI | ❌ | ❌ |
+| Cost | Free, run anywhere | Paid tiers | Paid tiers | Free |
+
+## Architecture
+
+```
+app/
+├── main.py                     # FastAPI app + lifespan
+├── config/
+│   ├── schema.py                # Pydantic v2 config schema + validation
+│   └── loader.py                # YAML loader with TTL cache
+├── db/
+│   ├── database.py              # Async SQLAlchemy engine
+│   └── models.py                # AuditLog, PRHealthScore, ContributorSnapshot, StaleActionLog, ReviewerRecommendation
+├── github/
+│   ├── client.py                # Async GitHub App HTTP client
+│   └── webhooks.py               # HMAC-verified webhook router
+├── workflows/
+│   ├── onboarding.py             # First-time contributor flows
+│   ├── pullrequest.py            # Quality gates + AI review + reviewer rec.
+│   ├── prhealth.py               # PR health scoring
+│   ├── progression.py            # Role progression + issue recommendations
+│   └── issuemanagement.py        # Stale scan + escalation
+├── ai/
+│   └── reviewer.py                # Anthropic SDK integration (pluggable)
+├── scheduler/
+│   └── jobs.py                    # APScheduler cron jobs
+├── api/
+│   └── routes.py                  # REST API endpoints
+└── utils/
+    ├── audit.py, logger.py, settings.py
+dashboard/
+└── templates/dashboard.html       # Live metrics dashboard
+tests/
+├── unit/                          # workflow + schema tests
+└── integration/                   # httpx + in-memory SQLite API tests
+```
+
+## Slash commands
 
 | Command | Who | Description |
-|---------|-----|-------------|
+|---|---|---|
 | `/assign` | Anyone | Self-assign (eligibility checked) |
-| `/unassign` | Anyone | Remove yourself from issue |
-| `/check-eligibility` | Contributors | View role progression status |
-| `/label <name>` | Committers+ | Add label (role-gated) |
+| `/unassign` | Anyone | Remove yourself from an issue |
+| `/check-eligibility` | Contributors | View role progression breakdown |
+| `/label <name>` | Committers+ | Add a label (role-gated) |
 | `/help` | Anyone | Show all commands |
-
----
-
-## Dashboard
-
-Visit `/` after starting the server to access the live dashboard:
-
-- **Overview stats**: avg PR health, stale counts, contributors welcomed
-- **Score distribution chart**: bar chart bucketing PR health scores
-- **Signal pass-rates chart**: % of PRs passing each gate
-- **PR health table**: per-PR breakdown with signal indicators
-- **Audit log**: every bot action with reason and timestamp
-- **Progression table**: contributor snapshots and role eligibility
-
-Auto-refreshes every 30 seconds.
-
----
 
 ## REST API
 
 Base path: `/api/v1`
 
 | Endpoint | Description |
-|----------|-------------|
+|---|---|
 | `GET /health` | Service health check |
-| `GET /audit` | Query audit log (filter by owner, repo, action, login, since) |
+| `GET /audit` | Audit log (filter by owner, repo, action, login, since) |
 | `GET /pr-health` | PR health score records (filter by score range, author) |
-| `GET /pr-health/stats` | Aggregate stats for a repo (avg, min, max) |
+| `GET /pr-health/stats` | Aggregate stats for a repo |
 | `GET /contributors` | Contributor snapshots (filter by role eligibility) |
 | `GET /repos/stats` | Full repo summary |
 | `GET /stale-log` | Stale action history |
 
----
-
-## Project Structure
-
-```
-app/
-├── main.py                     # FastAPI app + lifespan
-├── config/
-│   ├── schema.py               # Pydantic v2 config schema
-│   └── loader.py               # YAML loader with TTL cache
-├── db/
-│   ├── database.py             # Async SQLAlchemy engine
-│   └── models.py               # AuditLog, PRHealthScore, ContributorSnapshot, ...
-├── github/
-│   ├── client.py               # Async GitHub App HTTP client
-│   └── webhooks.py             # HMAC-verified webhook router
-├── workflows/
-│   ├── onboarding.py           # First-time contributor flows
-│   ├── pullrequest.py          # Quality gates + AI review + reviewer rec.
-│   ├── prhealth.py             # PR health scoring (new)
-│   ├── progression.py          # Role progression + recommendations
-│   └── issuemanagement.py      # Stale + escalation
-├── ai/
-│   └── reviewer.py             # Anthropic SDK integration
-├── scheduler/
-│   └── jobs.py                 # APScheduler cron jobs
-├── api/
-│   └── routes.py               # REST API endpoints
-└── utils/
-    ├── audit.py                # Persistent audit trail
-    ├── logger.py               # Structured logging
-    └── settings.py             # Pydantic-settings env config
-dashboard/
-└── templates/dashboard.html    # Live metrics dashboard
-tests/
-├── unit/                       # 60 unit tests
-└── integration/                # 16 integration tests (httpx + SQLite)
-```
-
----
-
-## Quick Start
+## Quick start
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/AnthropicBots/hiero-bot-py
+git clone https://github.com/mohityadav8/hiero-bot-py
 cd hiero-bot-py
 pip install -r requirements.txt
 
@@ -148,35 +162,28 @@ uvicorn app.main:app --reload
 open http://localhost:8000
 ```
 
-## Deployment (Docker)
+### Docker
 
 ```bash
 docker build -t hiero-bot .
 docker run -p 8000:8000 --env-file .env hiero-bot
 ```
 
-## Tests
+### Tests
 
 ```bash
 python -m pytest tests/unit/ tests/integration/ -q          # 76 tests
 python -m pytest tests/ --cov=app --cov-report=term-missing  # with coverage
 ```
 
----
-
 ## Configuration
 
-Add `.github/hiero-bot.yml` to any repo where the app is installed.
-Full reference: [`templates/hiero-bot.yml`](templates/hiero-bot.yml)
+Add `.github/hiero-bot.yml` to any repo where the app is installed. Full reference: [`templates/hiero-bot.yml`](templates/hiero-bot.yml). The bot is **completely silent** if no config file exists — nothing runs by accident.
 
-The bot is **completely silent** if no config file exists.
-
----
-
-## Environment Variables
+## Environment variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+|---|---|---|
 | `GITHUB_APP_ID` | ✅ | From GitHub App settings |
 | `GITHUB_PRIVATE_KEY` | ✅ | RSA private key (use `\n` for newlines) |
 | `GITHUB_WEBHOOK_SECRET` | ✅ | Webhook secret set in App settings |
@@ -185,9 +192,28 @@ The bot is **completely silent** if no config file exists.
 | `PORT` | ❌ | Default: `8000` |
 | `LOG_LEVEL` | ❌ | `debug/info/warn/error` |
 | `ENVIRONMENT` | ❌ | `development` / `production` |
+| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | ❌ | Reserved for dashboard access control — **defined but not yet enforced; tracked in the roadmap below** |
 
----
+## Ecosystem & standing
+
+Originally built and validated against repositories in the [Hiero](https://hiero.org) ecosystem under Linux Foundation Decentralized Trust. The author is an active contributor to `hiero-sdk-python` and other Hiero-adjacent projects, and an ECWoC'26 Top Contributor. The config format is deliberately generic (any `owner/repo`, any team names) so the same bot can be installed on non-Hiero, GitHub-hosted FOSS projects without modification.
+
+## Roadmap
+
+This project is under active, ongoing development. See the full one-year roadmap for planned work on multi-forge support (GitLab/Gitea/Forgejo), pluggable local/open-weight AI review backends, portable contributor-reputation credentials, and a security-hardened 1.0 release.
+
+## Funding & support
+
+`hiero-bot-py` is currently a solo, unfunded open-source effort, built and maintained alongside full-time study. It is actively seeking grant support to fund the roadmap above as sustained, full-time work rather than nights-and-weekends progress. If you're a maintainer, funder, or organization interested in supporting or piloting this project, please open an issue or reach out via the links below.
+
+## Contributing
+
+Issues and PRs are welcome. Please sign your commits (DCO) and include tests for new workflow logic — see `tests/unit/` for the existing patterns before adding new ones.
+
+## Author
+
+**Mohit Yadav** ([@mohityadav8](https://github.com/mohityadav8)) — CS undergraduate (BE-CSE, Chandigarh University, 2024–2028), open-source contributor across NVIDIA/aicr, SHAP, pgmpy, hiero-sdk-python, and OWASP Nest. Portfolio: [mohityadav8.github.io](https://mohityadav8.github.io)
 
 ## License
 
-Apache License 2.0
+MIT License — see [LICENSE](LICENSE).
