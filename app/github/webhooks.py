@@ -179,29 +179,27 @@ class WebhookRouter:
     async def _handle_label_command(
         self, label_name: str, payload: dict, ctx: dict
     ) -> None:
-        issue_number = (payload.get("issue") or {}).get("number")
+        issue = payload.get("issue") or {}
+        issue_number = issue.get("number")
         commenter = (payload.get("comment") or {}).get("user", {}).get("login")
+
         if not issue_number or not commenter:
             return
 
-        # Only maintainers/committers can label
-        config = ctx["config"]
-        org = ctx["owner"]
         inst = ctx["installation_id"]
 
-        # Permission check (write access + teams)
-        user = await self._gh.get_user(commenter, inst)
+        issue_author = (issue.get("user") or {}).get("login")
 
-        repo_perm = user.get("permissions", {}).get("push", False)
-
-        team_allowed = False
-        for team in [config.teams.maintainers, config.teams.committers]:
-            members = await self._gh.list_team_members(org, team, inst)
-            if any(m["login"] == commenter for m in members):
-                team_allowed = True
-                break
-
-        allowed = repo_perm or team_allowed
+        if commenter == issue_author:
+            allowed = True
+        else:
+            permission = await self._gh.get_collaborator_permission(
+                ctx["owner"],
+                ctx["repo"],
+                commenter,
+                inst,
+            )
+            allowed = permission in {"admin", "maintain", "write"}
 
         if not allowed:
             await self._gh.post_comment(
