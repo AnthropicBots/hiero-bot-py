@@ -1,14 +1,16 @@
 # app/api/routes.py — Public REST API
 
 from __future__ import annotations
+
 from datetime import datetime
-from typing import Optional
+
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, desc
-from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.database import get_db
-from app.db.models import AuditLog, PRHealthScore, ContributorSnapshot, StaleActionLog
+from app.db.models import AuditLog, ContributorSnapshot, PRHealthScore, StaleActionLog
 from app.utils.logger import get_logger
 
 log = get_logger("api.routes")
@@ -24,10 +26,10 @@ class AuditEntry(BaseModel):
     owner: str
     repo: str
     actor: str
-    target_number: Optional[int]
-    target_login: Optional[str]
+    target_number: int | None
+    target_login: str | None
     reason: str
-    metadata: Optional[dict]
+    metadata: dict | None
 
     model_config = {"from_attributes": True}
 
@@ -46,7 +48,7 @@ class PRHealthEntry(BaseModel):
     dco_signed: bool
     review_count: int
     files_changed: int
-    label_applied: Optional[str]
+    label_applied: str | None
 
     model_config = {"from_attributes": True}
 
@@ -61,7 +63,7 @@ class ContributorEntry(BaseModel):
     reviews_given: int
     months_active: int
     current_role: str
-    eligible_for: Optional[str]
+    eligible_for: str | None
 
     model_config = {"from_attributes": True}
 
@@ -89,11 +91,11 @@ async def health():
 
 @router.get("/audit", response_model=list[AuditEntry])
 async def get_audit_log(
-    owner: Optional[str] = Query(None),
-    repo: Optional[str] = Query(None),
-    action: Optional[str] = Query(None),
-    target_login: Optional[str] = Query(None),
-    since: Optional[datetime] = Query(None),
+    owner: str | None = Query(None),
+    repo: str | None = Query(None),
+    action: str | None = Query(None),
+    target_login: str | None = Query(None),
+    since: datetime | None = Query(None),
     limit: int = Query(default=100, le=500),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -128,11 +130,11 @@ async def get_audit_log(
 
 @router.get("/pr-health", response_model=list[PRHealthEntry])
 async def get_pr_health(
-    owner: Optional[str] = Query(None),
-    repo: Optional[str] = Query(None),
-    pr_author: Optional[str] = Query(None),
-    min_score: Optional[float] = Query(None),
-    max_score: Optional[float] = Query(None),
+    owner: str | None = Query(None),
+    repo: str | None = Query(None),
+    pr_author: str | None = Query(None),
+    min_score: float | None = Query(None),
+    max_score: float | None = Query(None),
     limit: int = Query(default=50, le=200),
     db: AsyncSession = Depends(get_db),
 ):
@@ -181,10 +183,10 @@ async def get_pr_health_stats(
 
 @router.get("/contributors", response_model=list[ContributorEntry])
 async def get_contributors(
-    owner: Optional[str] = Query(None),
-    repo: Optional[str] = Query(None),
-    login: Optional[str] = Query(None),
-    eligible_for: Optional[str] = Query(None),
+    owner: str | None = Query(None),
+    repo: str | None = Query(None),
+    login: str | None = Query(None),
+    eligible_for: str | None = Query(None),
     limit: int = Query(default=50, le=200),
     db: AsyncSession = Depends(get_db),
 ):
@@ -240,9 +242,9 @@ async def get_repo_stats(
 
 @router.get("/stale-log")
 async def get_stale_log(
-    owner: Optional[str] = Query(None),
-    repo: Optional[str] = Query(None),
-    action: Optional[str] = Query(None),
+    owner: str | None = Query(None),
+    repo: str | None = Query(None),
+    action: str | None = Query(None),
     limit: int = Query(default=100, le=500),
     db: AsyncSession = Depends(get_db),
 ):

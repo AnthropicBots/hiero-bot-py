@@ -1,7 +1,9 @@
 # app/workflows/onboarding.py
 
 from __future__ import annotations
+
 from datetime import datetime, timezone
+
 from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger

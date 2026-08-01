@@ -1,8 +1,10 @@
 # app/utils/logger.py — Structured logging
 
 from __future__ import annotations
+
 import logging
 import sys
+
 from app.utils.settings import settings
 
 

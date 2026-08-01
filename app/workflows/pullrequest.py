@@ -1,9 +1,11 @@
 # app/workflows/pullrequest.py
 
 from __future__ import annotations
+
 import re
-from app.github.client import GitHubClient
+
 from app.ai.reviewer import AIReviewer
+from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
 
@@ -85,7 +87,7 @@ class PullRequestWorkflow:
         # Linked issue
         if gates.require_linked_issue:
             body = pr.get("body") or ""
-            linked = bool(re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.I))
+            linked = bool(re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.IGNORECASE))
             checks.append(QualityCheck(
                 "Linked Issue", linked,
                 "PR description references a closing issue ✅" if linked
@@ -155,7 +157,7 @@ class PullRequestWorkflow:
             if "files" not in dir(self):  # avoid re-fetching
                 files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
             has_cl = any(
-                re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.I)
+                re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
                 for f in files
             )
             checks.append(QualityCheck(

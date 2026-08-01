@@ -1,12 +1,14 @@
 # app/db/database.py — SQLAlchemy async engine + session factory
 
 from __future__ import annotations
+
 from sqlalchemy.ext.asyncio import (
-    create_async_engine,
     AsyncSession,
     async_sessionmaker,
+    create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+
 from app.utils.settings import settings
 
 engine = create_async_engine(

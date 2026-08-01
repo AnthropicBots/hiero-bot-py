@@ -2,8 +2,9 @@
 
 import pytest
 from sqlalchemy import select
-from app.utils.audit import record, VALID_ACTIONS
+
 from app.db.models import AuditLog
+from app.utils.audit import VALID_ACTIONS, record
 
 
 @pytest.mark.asyncio

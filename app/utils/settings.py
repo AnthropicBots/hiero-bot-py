@@ -1,7 +1,7 @@
 # app/utils/settings.py — Environment-based settings
 
 from __future__ import annotations
-from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     github_webhook_secret: str = ""
 
     # Anthropic
-    anthropic_api_key: Optional[str] = None
+    anthropic_api_key: str | None = None
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./hiero_bot.db"
@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     # Dashboard basic auth (optional)
-    dashboard_username: Optional[str] = None
-    dashboard_password: Optional[str] = None
+    dashboard_username: str | None = None
+    dashboard_password: str | None = None
 
     @property
     def is_production(self) -> bool:

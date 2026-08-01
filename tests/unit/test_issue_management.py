@@ -1,8 +1,10 @@
 # tests/unit/test_issue_management.py
 
-import pytest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
+
+import pytest
+
 from app.workflows.issuemanagement import IssueManagementWorkflow
 
 
