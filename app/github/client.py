@@ -189,6 +189,19 @@ class GitHubClient:
     async def get_user(self, login: str, installation_id: int) -> dict:
         return await self.get(f"/users/{login}", installation_id)
 
+    async def get_collaborator_permission(
+        self,
+        owner: str,
+        repo: str,
+        login: str,
+        installation_id: int,
+    ) -> str:
+        data = await self.get(
+            f"/repos/{owner}/{repo}/collaborators/{login}/permission",
+            installation_id,
+        )
+        return data.get("permission", "none")
+
     async def list_team_members(
         self, org: str, team_slug: str, installation_id: int
     ) -> list[dict]:
