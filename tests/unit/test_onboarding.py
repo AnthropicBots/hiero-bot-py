@@ -1,17 +1,18 @@
 # tests/unit/test_onboarding.py
 
 from unittest.mock import AsyncMock
-
-import pytest
-
+from datetime import datetime, timedelta, timezone
 from app.workflows.onboarding import OnboardingWorkflow
 
 
 def make_payload(login="alice", issue_number=1, sender_type="User", assignees=None):
     return {
         "sender": {"login": login, "type": sender_type},
-        "issue": {"number": issue_number, "user": {"login": login},
-                  "assignees": assignees or []},
+        "issue": {
+            "number": issue_number,
+            "user": {"login": login},
+            "assignees": assignees or [],
+        },
         "comment": {"user": {"login": login}, "body": "/assign"},
     }
 
@@ -86,12 +87,20 @@ async def test_self_assign_already_assigned(mock_gh, ctx):
 @pytest.mark.asyncio
 async def test_self_assign_blocked_by_min_age(mock_gh, ctx):
     ctx["config"].workflows.onboarding.minimum_account_age_days = 90
-    mock_gh.get_user = AsyncMock(return_value={
-        "login": "newbie",
-        "type": "User",
-        "created_at": "2026-06-01T00:00:00Z",
-        "public_repos": 5,
-    })
+
+    # Create a dynamic date that is exactly 10 days ago so this test never expires
+    recent_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    mock_gh.get_user = AsyncMock(
+        return_value={
+            "login": "newbie",
+            "type": "User",
+            "created_at": recent_date,
+            "public_repos": 5,
+        }
+    )
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(login="newbie", assignees=[]))
     mock_gh.add_assignees.assert_not_awaited()
@@ -101,7 +110,10 @@ async def test_self_assign_blocked_by_min_age(mock_gh, ctx):
 @pytest.mark.asyncio
 async def test_welcome_includes_checklist(mock_gh, ctx):
     mock_gh.get = AsyncMock(return_value=[])
-    ctx["config"].workflows.onboarding.onboarding_checklist = ["Read CONTRIBUTING.md", "Sign DCO"]
+    ctx["config"].workflows.onboarding.onboarding_checklist = [
+        "Read CONTRIBUTING.md",
+        "Sign DCO",
+    ]
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_new_contributor(ctx, make_payload())
     body = mock_gh.post_comment.call_args[0][3]
