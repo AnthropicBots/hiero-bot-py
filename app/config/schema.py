@@ -1,9 +1,10 @@
 # app/config/schema.py — Pydantic v2 config schema & validation
 
 from __future__ import annotations
-from typing import Literal, Optional
-from pydantic import BaseModel, Field, model_validator
 
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 RoleLevel = Literal["contributor", "junior-committer", "committer", "maintainer"]
 FocusArea = Literal["security", "performance", "style", "logic", "tests"]
@@ -30,7 +31,7 @@ class OnboardingConfig(BaseModel):
     minimum_public_contributions: int = Field(default=0, ge=0)
     auto_assign_mentor: bool = False
     mentor_assignment_strategy: MentorStrategy = "round-robin"
-    welcome_message: Optional[str] = None
+    welcome_message: str | None = None
     onboarding_checklist: list[str] = []
 
 
@@ -48,10 +49,10 @@ class QualityGatesConfig(BaseModel):
     require_dco: bool = True
     require_gpg_signature: bool = False
     min_reviewers: int = Field(default=1, ge=0)
-    max_files_changed: Optional[int] = Field(default=None, gt=0)
+    max_files_changed: int | None = Field(default=None, gt=0)
     require_changelog_entry: bool = False
     require_linked_issue: bool = False
-    allowed_branch_pattern: Optional[str] = None
+    allowed_branch_pattern: str | None = None
 
 
 class PullRequestConfig(BaseModel):
@@ -158,7 +159,7 @@ class RepoConfig(BaseModel):
     teams: TeamsConfig = Field(default_factory=TeamsConfig)
 
     @model_validator(mode="after")
-    def validate_stale_order(self) -> "RepoConfig":
+    def validate_stale_order(self) -> RepoConfig:
         im = self.workflows.issue_management
         if im.close_stale_after_days >= im.stale_issue_days:
             raise ValueError("close_stale_after_days must be less than stale_issue_days")

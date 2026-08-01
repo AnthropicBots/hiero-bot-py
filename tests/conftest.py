@@ -1,11 +1,13 @@
 # tests/conftest.py
 
+from unittest.mock import AsyncMock
+
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from app.db.database import Base
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
 from app.config.schema import RepoConfig
+from app.db.database import Base
 
 
 @pytest_asyncio.fixture

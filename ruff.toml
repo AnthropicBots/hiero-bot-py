@@ -1,0 +1,5 @@
+[lint]
+# B008: Allow function calls like Depends() in FastAPI routes
+# BLE001: Allow catching general Exception
+# S110: Allow try-except-pass
+ignore = ["B008", "BLE001", "S110"]

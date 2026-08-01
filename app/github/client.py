@@ -1,12 +1,15 @@
 # app/github/client.py — Async GitHub API client
 
 from __future__ import annotations
+
 import time
-import jwt
+from typing import Any
+
 import httpx
-from typing import Any, Optional
-from app.utils.settings import settings
+import jwt
+
 from app.utils.logger import get_logger
+from app.utils.settings import settings
 
 log = get_logger("github.client")
 
@@ -97,7 +100,7 @@ class GitHubClient:
 
     async def get_file_content(
         self, owner: str, repo: str, path: str, installation_id: int = 0
-    ) -> Optional[str]:
+    ) -> str | None:
         """Returns base64-encoded file content or None if not found."""
         try:
             if installation_id:

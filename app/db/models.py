@@ -1,10 +1,12 @@
 # app/db/models.py — ORM models
 
 from __future__ import annotations
+
 from datetime import datetime
-from typing import Optional
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, JSON, Text, Index
+
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
+
 from app.db.database import Base
 
 
@@ -17,10 +19,10 @@ class AuditLog(Base):
     owner: Mapped[str] = mapped_column(String(128), index=True)
     repo: Mapped[str] = mapped_column(String(128), index=True)
     actor: Mapped[str] = mapped_column(String(64), default="hiero-bot")
-    target_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    target_login: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    target_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_login: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     reason: Mapped[str] = mapped_column(Text)
-    metadata_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     __table_args__ = (
         Index("ix_audit_owner_repo", "owner", "repo"),
@@ -43,7 +45,7 @@ class PRHealthScore(Base):
     dco_signed: Mapped[bool] = mapped_column(Boolean, default=False)
     review_count: Mapped[int] = mapped_column(Integer, default=0)
     files_changed: Mapped[int] = mapped_column(Integer, default=0)
-    label_applied: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    label_applied: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         Index("ix_pr_health_owner_repo", "owner", "repo"),
@@ -62,7 +64,7 @@ class ContributorSnapshot(Base):
     reviews_given: Mapped[int] = mapped_column(Integer, default=0)
     months_active: Mapped[int] = mapped_column(Integer, default=0)
     current_role: Mapped[str] = mapped_column(String(32), default="contributor")
-    eligible_for: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    eligible_for: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class StaleActionLog(Base):

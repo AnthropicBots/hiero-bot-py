@@ -1,11 +1,12 @@
 # tests/unit/test_ai_reviewer.py
 
-import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from app.ai.reviewer import AIReviewer
 from app.config.schema import AIReviewConfig
-
 
 CFG = AIReviewConfig(enabled=True, max_comments=5, focus_areas=["security", "logic"])
 DIFFS = [{"path": "src/auth.py", "diff": "+password = 'admin123'"}]

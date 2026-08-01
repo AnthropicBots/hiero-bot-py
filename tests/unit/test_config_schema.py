@@ -2,8 +2,8 @@
 
 import pytest
 from pydantic import ValidationError
-from app.config.schema import RepoConfig
 
+from app.config.schema import RepoConfig
 
 MINIMAL = {"repo": "hiero/sdk-js", "workflows": {}}
 

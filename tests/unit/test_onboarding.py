@@ -1,7 +1,9 @@
 # tests/unit/test_onboarding.py
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
+
 from app.workflows.onboarding import OnboardingWorkflow
 
 
