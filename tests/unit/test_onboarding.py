@@ -85,8 +85,10 @@ async def test_self_assign_already_assigned(mock_gh, ctx):
 async def test_self_assign_blocked_by_min_age(mock_gh, ctx):
     ctx["config"].workflows.onboarding.minimum_account_age_days = 90
     mock_gh.get_user = AsyncMock(return_value={
-        "login": "newbie", "type": "User",
-        "created_at": "2026-04-25T00:00:00Z", "public_repos": 5,
+        "login": "newbie",
+        "type": "User",
+        "created_at": "2026-06-01T00:00:00Z",
+        "public_repos": 5,
     })
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(login="newbie", assignees=[]))
