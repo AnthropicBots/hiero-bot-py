@@ -1,10 +1,12 @@
 # app/ai/reviewer.py — Anthropic-powered code review
 
 from __future__ import annotations
+
 import json
 from typing import Any
-from app.utils.settings import settings
+
 from app.utils.logger import get_logger
+from app.utils.settings import settings
 
 log = get_logger("ai.reviewer")
 

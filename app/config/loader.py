@@ -1,11 +1,14 @@
 # app/config/loader.py — Per-repo YAML config loader with TTL cache
 
 from __future__ import annotations
+
 import base64
 import time
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
+
 import yaml
 from pydantic import ValidationError
+
 from app.config.schema import RepoConfig
 from app.utils.logger import get_logger
 
@@ -23,7 +26,7 @@ class ConfigLoader:
         self._client = github_client
         self._cache: dict[str, tuple[RepoConfig, float]] = {}
 
-    async def load(self, owner: str, repo: str, installation_id: int = 0) -> Optional[RepoConfig]:
+    async def load(self, owner: str, repo: str, installation_id: int = 0) -> RepoConfig | None:
         """Load config, using cache if fresh. Returns None if no config file."""
         key = f"{owner}/{repo}"
         if key in self._cache:

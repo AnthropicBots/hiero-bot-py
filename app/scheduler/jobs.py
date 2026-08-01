@@ -1,13 +1,15 @@
 # app/scheduler/jobs.py — Scheduled background jobs
 
 from __future__ import annotations
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from app.github.client import GitHubClient
+
 from app.config.loader import ConfigLoader
-from app.workflows.issuemanagement import IssueManagementWorkflow
 from app.db.database import AsyncSessionLocal
+from app.github.client import GitHubClient
 from app.utils.logger import get_logger
+from app.workflows.issuemanagement import IssueManagementWorkflow
 
 log = get_logger("scheduler")
 

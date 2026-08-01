@@ -1,20 +1,21 @@
 # app/main.py — FastAPI application
 
 from __future__ import annotations
+
+import pathlib
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Depends
+
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
-import pathlib
 
-from app.utils.auth import require_dashboard_auth, _auth_configured
-from app.db.database import init_db, get_db
-from app.github.client import GitHubClient
+from app.api.routes import router as api_router
 from app.config.loader import ConfigLoader
+from app.db.database import get_db, init_db
+from app.github.client import GitHubClient
 from app.github.webhooks import WebhookRouter
 from app.scheduler.jobs import BotScheduler
-from app.api.routes import router as api_router
 from app.utils.logger import get_logger
 from app.utils.settings import settings
 

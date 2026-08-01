@@ -1,10 +1,13 @@
 # app/workflows/issuemanagement.py
 
 from __future__ import annotations
-from datetime import datetime, timezone, timedelta
+
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.github.client import GitHubClient
+
 from app.db.models import StaleActionLog
+from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
 

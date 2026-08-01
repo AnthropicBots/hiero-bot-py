@@ -1,11 +1,14 @@
 # app/workflows/prhealth.py — PR health scoring (new workflow)
 
 from __future__ import annotations
+
 import re
-from sqlalchemy.ext.asyncio import AsyncSession
+
 from sqlalchemy import select
-from app.github.client import GitHubClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.models import PRHealthScore
+from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
 
@@ -100,7 +103,7 @@ class PRHealthWorkflow:
                 any(p.search(f["filename"]) for p in test_re) for f in files
             ),
             "has_linked_issue": bool(
-                re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.I)
+                re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.IGNORECASE)
             ),
             "has_description": len(body.strip()) >= 50,
             "dco_signed": dco_ok,

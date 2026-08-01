@@ -1,7 +1,9 @@
 # tests/unit/test_pr_health.py
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
+
 from app.workflows.prhealth import PRHealthWorkflow
 
 
@@ -37,6 +39,7 @@ async def test_score_persisted_to_db(mock_gh, ctx):
     await wf.score_pr(ctx, make_payload())
 
     from sqlalchemy import select
+
     from app.db.models import PRHealthScore
     result = await ctx["db"].execute(select(PRHealthScore))
     rows = result.scalars().all()

@@ -1,10 +1,13 @@
 # app/workflows/progression.py
 
 from __future__ import annotations
+
 from datetime import datetime, timezone
+
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.github.client import GitHubClient
+
 from app.db.models import ContributorSnapshot
+from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
 
