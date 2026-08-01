@@ -43,6 +43,11 @@ async def lifespan(app: FastAPI):
 
     if settings.is_production:
         _scheduler.start()
+        if not _auth_configured():
+            log.warning(
+                "DASHBOARD_USERNAME/DASHBOARD_PASSWORD are unset in production -"
+                "dashboard and /api/v1/* are UNAUTHENTICATED."
+            )
 
     log.info("Bot ready on port %d", settings.port)
     yield
@@ -61,10 +66,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(api_router)
+app.include_router(api_router, dependencies=[Depends(require_dashboard_auth)])
 
 
 # ── Webhook endpoint ──────────────────────────────────────────
+
 
 @app.post("/webhook")
 async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
@@ -75,12 +81,14 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
 # ── Dashboard ─────────────────────────────────────────────────
 
+
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request):
+async def dashboard(request: Request, _auth: None = Depends(require_dashboard_auth)):
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
 
 # ── Health ────────────────────────────────────────────────────
+
 
 @app.get("/healthz")
 async def healthz():

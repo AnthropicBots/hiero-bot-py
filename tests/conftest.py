@@ -40,6 +40,7 @@ def mock_gh():
         "created_at": "2020-01-01T00:00:00Z",
         "public_repos": 10,
     })
+    gh.get_collaborator_permission = AsyncMock(return_value="write")
     gh.list_team_members = AsyncMock(return_value=[{"login": "mentor1"}])
     gh.get = AsyncMock(return_value=[])
     return gh
