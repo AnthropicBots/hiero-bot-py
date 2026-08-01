@@ -65,7 +65,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(api_router, dependencies=[Depend(require_dashboard_auth)])
+app.include_router(api_router, dependencies=[Depends(require_dashboard_auth)])
 
 
 # ── Webhook endpoint ──────────────────────────────────────────
