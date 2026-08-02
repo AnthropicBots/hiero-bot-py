@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import time  # #5
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.loader import ConfigLoader
 from app.github.client import GitHubClient
+from app.github.replay_guard import is_replay  # #4
 from app.utils.logger import get_logger
 from app.utils.settings import settings
 from app.workflows.issuemanagement import IssueManagementWorkflow
@@ -43,6 +45,32 @@ class WebhookRouter:
         # Signature verification
         if settings.github_webhook_secret:
             self._verify_signature(request, await request.body())
+
+        # #4 — replay protection: reject deliveries we've already processed
+        delivery_id = request.headers.get("X-GitHub-Delivery", "")
+        if delivery_id and is_replay(delivery_id):
+            log.warning("Rejected replayed delivery %s", delivery_id)
+            raise HTTPException(status_code=409, detail="Duplicate delivery")
+
+        # #5 — skew check, defense-in-depth (secondary to signature + replay ID)
+        date_header = request.headers.get("Date")
+        if date_header:
+            try:
+                from email.utils import parsedate_to_datetime
+
+                sent_at = parsedate_to_datetime(date_header).timestamp()
+                skew = abs(time.time() - sent_at)
+                if skew > settings.webhook_max_skew_seconds:
+                    log.warning(
+                        "Webhook delivery %s exceeded max skew (%.0fs)",
+                        delivery_id,
+                        skew,
+                    )
+                    raise HTTPException(
+                        status_code=401, detail="Delivery timestamp out of range"
+                    )
+            except (TypeError, ValueError):
+                pass  # unparseable Date header — skip, don't fail the request
 
         event = request.headers.get("X-GitHub-Event", "")
         payload: dict[str, Any] = await request.json()
