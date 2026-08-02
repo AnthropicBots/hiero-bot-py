@@ -1,7 +1,8 @@
 # tests/unit/test_onboarding.py
 
-from unittest.mock import AsyncMock
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
+
 from app.workflows.onboarding import OnboardingWorkflow
 
 
