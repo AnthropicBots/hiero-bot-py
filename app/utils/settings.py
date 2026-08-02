@@ -6,12 +6,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # GitHub App
     github_app_id: str = ""
     github_private_key: str = ""
     github_webhook_secret: str = ""
+    github_webhook_secret_old: str | None = None
+    webhook_max_skew_seconds: int = 300
 
     # Anthropic
     anthropic_api_key: str | None = None

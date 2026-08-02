@@ -16,6 +16,7 @@ from app.db.database import get_db, init_db
 from app.github.client import GitHubClient
 from app.github.webhooks import WebhookRouter
 from app.scheduler.jobs import BotScheduler
+from app.utils.auth import _auth_configured, require_dashboard_auth
 from app.utils.logger import get_logger
 from app.utils.settings import settings
 
