@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +14,7 @@ class Settings(BaseSettings):
     github_app_id: str = ""
     github_private_key: str = ""
     github_webhook_secret: str = ""
-    github_webhook_secret_old: Optional[str] = None
+    github_webhook_secret_old: str | None = None
     webhook_max_skew_seconds: int = 300
 
     # Anthropic
