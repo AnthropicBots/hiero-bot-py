@@ -130,8 +130,13 @@ class WebhookRouter:
             else:
                 log.debug("No handler for event=%s", event)
 
-        except Exception as exc:
-            log.exception("Error in %s handler for %s/%s: %s", event, owner, repo, exc)
+        except Exception:
+            log.exception(
+                "Error in %s handler for %s/%s",
+                event,
+                owner,
+                repo,
+            )
 
     #  Event handlers
 

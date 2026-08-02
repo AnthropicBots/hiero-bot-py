@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,7 +46,7 @@ async def record(
         raise ValueError(f"Unknown audit action: {action!r}")
 
     entry = AuditLog(
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
         action=action,
         owner=owner,
         repo=repo,
