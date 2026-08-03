@@ -53,13 +53,24 @@ async def test_multiple_records_stored(db):
 
 @pytest.mark.asyncio
 async def test_timestamp_set_automatically(db):
-    from datetime import datetime
-    before = datetime.utcnow()
-    await record(db, action="issue.assigned", owner="o", repo="r", reason="t")
+    from datetime import datetime, timezone
+    before = datetime.now(timezone.utc)
+    await record(
+        db,
+        action="issue.assigned",
+        owner="o",
+        repo="r",
+        reason="t",
+    )
     await db.commit()
     result = await db.execute(select(AuditLog))
     row = result.scalars().first()
-    assert row.timestamp >= before
+
+    timestamp = row.timestamp
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+
+    assert timestamp >= before
 
 
 def test_valid_actions_set_is_not_empty():

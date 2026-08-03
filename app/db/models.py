@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -14,7 +14,11 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
     action: Mapped[str] = mapped_column(String(64), index=True)
     owner: Mapped[str] = mapped_column(String(128), index=True)
     repo: Mapped[str] = mapped_column(String(128), index=True)
@@ -33,7 +37,10 @@ class PRHealthScore(Base):
     __tablename__ = "pr_health_scores"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+    )
     owner: Mapped[str] = mapped_column(String(128), index=True)
     repo: Mapped[str] = mapped_column(String(128), index=True)
     pr_number: Mapped[int] = mapped_column(Integer)
@@ -56,7 +63,7 @@ class ContributorSnapshot(Base):
     __tablename__ = "contributor_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     owner: Mapped[str] = mapped_column(String(128), index=True)
     repo: Mapped[str] = mapped_column(String(128), index=True)
     login: Mapped[str] = mapped_column(String(128), index=True)
@@ -71,7 +78,7 @@ class StaleActionLog(Base):
     __tablename__ = "stale_action_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     owner: Mapped[str] = mapped_column(String(128))
     repo: Mapped[str] = mapped_column(String(128))
     issue_number: Mapped[int] = mapped_column(Integer)
@@ -87,7 +94,7 @@ class ReviewerRecommendation(Base):
     __tablename__ = "reviewer_recommendations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     owner: Mapped[str] = mapped_column(String(128))
     repo: Mapped[str] = mapped_column(String(128))
     pr_number: Mapped[int] = mapped_column(Integer)
