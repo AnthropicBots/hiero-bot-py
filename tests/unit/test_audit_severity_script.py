@@ -3,7 +3,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 SCRIPT = Path(__file__).resolve().parents[2] / ".github" / "scripts" / "check_audit_severity.py"
 
 
@@ -33,6 +32,7 @@ def test_audit_script_fails_when_high_or_critical_vulnerabilities_exist(tmp_path
         [sys.executable, str(SCRIPT), str(input_path)],
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert result.returncode == 1
@@ -65,6 +65,7 @@ def test_audit_script_passes_when_only_low_or_none_vulnerabilities_exist(tmp_pat
         [sys.executable, str(SCRIPT), str(input_path)],
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert result.returncode == 0

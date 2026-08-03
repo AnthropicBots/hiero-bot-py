@@ -12,8 +12,25 @@ HIGH_CRITICAL_THRESHOLD = 7.0
 
 
 def get_cvss_score(vuln):
-    for entry in vuln.get("severity", []) or []:
-        if entry.get("type", "").upper() in ("CVSS_V3", "CVSS_V4"):
+    severity = vuln.get("severity")
+
+    if isinstance(severity, str):
+        severity_name = severity.upper()
+        if severity_name in {"HIGH", "CRITICAL"}:
+            return HIGH_CRITICAL_THRESHOLD
+        return None
+
+    if isinstance(severity, dict):
+        severity_type = severity.get("type", "").upper()
+        if severity_type in ("CVSS_V3", "CVSS_V4"):
+            try:
+                return float(severity.get("score", 0))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    for entry in severity or []:
+        if isinstance(entry, dict) and entry.get("type", "").upper() in ("CVSS_V3", "CVSS_V4"):
             try:
                 return float(entry.get("score", 0))
             except (TypeError, ValueError):
@@ -31,9 +48,15 @@ def main(path):
     for dep in data.get("dependencies", []):
         for vuln in dep.get("vulns", []):
             score = get_cvss_score(vuln)
+            severity = vuln.get("severity")
+            if isinstance(severity, str):
+                severity_label = severity.upper()
+            else:
+                severity_label = "UNKNOWN"
+
             entry = (dep["name"], dep["version"], vuln["id"])
             if score is not None and score >= HIGH_CRITICAL_THRESHOLD:
-                flagged.append((*entry, score))
+                flagged.append((*entry, severity_label, score))
             elif score is None:
                 unscored.append(entry)
 
@@ -44,11 +67,11 @@ def main(path):
 
     if flagged:
         print("\nHigh/Critical vulnerabilities found:")
-        for name, version, vuln_id, score in flagged:
-            print(f"  {name}=={version}  {vuln_id}  CVSS {score}")
+        for name, version, vuln_id, severity_label, score in flagged:
+            print(f"  {name}=={version}  {vuln_id}  {severity_label}  CVSS {score}")
         sys.exit(1)
 
-    print("\nNo High/Critical vulnerabilities found.")
+    print("\nNo high or critical vulnerabilities found.")
     sys.exit(0)
 
 
