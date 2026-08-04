@@ -85,7 +85,10 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, _auth: None = Depends(require_dashboard_auth)):
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    return templates.TemplateResponse(
+        request,
+        "dashboard.html",
+    )
 
 
 # ── Health ────────────────────────────────────────────────────
