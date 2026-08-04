@@ -27,10 +27,23 @@ class AIReviewer:
 
     def _get_client(self):
         if self._client is None:
-            if not settings.anthropic_api_key:
-                raise RuntimeError("ANTHROPIC_API_KEY is not configured")
-            import anthropic
-            self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+            if settings.openai_api_key:
+                import openai
+
+                self._client = openai.AsyncOpenAI(
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                )
+                self._client_type = "openai"
+            elif settings.anthropic_api_key:
+                import anthropic
+
+                self._client = anthropic.AsyncAnthropic(
+                    api_key=settings.anthropic_api_key
+                )
+                self._client_type = "anthropic"
+            else:
+                raise RuntimeError("No AI API key configured")
         return self._client
 
     async def review(
@@ -46,13 +59,24 @@ class AIReviewer:
         prompt = self._build_prompt(pr_title, pr_body, diffs, cfg)
         try:
             client = self._get_client()
-            response = await client.messages.create(
-                model=cfg.model,
-                max_tokens=2048,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = response.content[0].text
+            if self._client_type == "openai":
+                response = await client.chat.completions.create(
+                    model=cfg.model,
+                    max_tokens=2048,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                text = response.choices[0].message.content
+            else:
+                response = await client.messages.create(
+                    model=cfg.model,
+                    max_tokens=2048,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = response.content[0].text
             return self._parse(text)
         except Exception as exc:
             log.error("AI review failed: %s", exc)
@@ -67,8 +91,7 @@ class AIReviewer:
     def _build_prompt(pr_title: str, pr_body: str, diffs: list, cfg) -> str:
         focus = ", ".join(cfg.focus_areas)
         diff_text = "\n\n".join(
-            f"**{d['path']}**\n```diff\n{d['diff'][:2000]}\n```"
-            for d in diffs[:10]
+            f"**{d['path']}**\n```diff\n{d['diff'][:2000]}\n```" for d in diffs[:10]
         )
         return f"""Review this pull request.
 
@@ -98,22 +121,33 @@ Respond with JSON only:
     @staticmethod
     def _parse(text: str) -> dict[str, Any]:
         try:
-            clean = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            clean = (
+                text.strip()
+                .removeprefix("```json")
+                .removeprefix("```")
+                .removesuffix("```")
+                .strip()
+            )
             parsed = json.loads(clean)
             return {
                 "summary": str(parsed.get("summary", "")),
-                "verdict": parsed.get("verdict", "comment")
-                           if parsed.get("verdict") in ("approve", "request_changes", "comment")
-                           else "comment",
+                "verdict": (
+                    parsed.get("verdict", "comment")
+                    if parsed.get("verdict")
+                    in ("approve", "request_changes", "comment")
+                    else "comment"
+                ),
                 "score": max(0, min(100, int(parsed.get("score", 50)))),
                 "comments": [
                     {
                         "path": str(c.get("path", "")),
                         "line": max(1, int(c.get("line", 1))),
                         "body": str(c.get("body", "")),
-                        "severity": c.get("severity", "info")
-                                    if c.get("severity") in ("info", "warning", "error")
-                                    else "info",
+                        "severity": (
+                            c.get("severity", "info")
+                            if c.get("severity") in ("info", "warning", "error")
+                            else "info"
+                        ),
                     }
                     for c in (parsed.get("comments") or [])[:20]
                     if c.get("path") and c.get("body")
@@ -121,4 +155,9 @@ Respond with JSON only:
             }
         except Exception as exc:
             log.warning("Failed to parse AI response: %s", exc)
-            return {"summary": text[:300], "verdict": "comment", "score": 50, "comments": []}
+            return {
+                "summary": text[:300],
+                "verdict": "comment",
+                "score": 50,
+                "comments": [],
+            }
