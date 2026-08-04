@@ -144,6 +144,19 @@ python -m pytest tests/unit/ tests/integration/ -q          # 76 tests
 python -m pytest tests/ --cov=app --cov-report=term-missing  # with coverage
 ```
 
+### Security audit
+
+Before pushing, check dependencies for known vulnerabilities:
+
+```bash
+pip install pip-audit
+pip-audit -r requirements.txt -f json -o audit-report.json
+python .github/scripts/check_audit_severity.py audit-report.json
+```
+
+CI runs the same check and fails the build on High/Critical CVSS findings.
+Note: `pip-audit` has no built-in severity flag — filtering is done by the script above against each finding's CVSS score.
+
 ## Configuration
 
 Add `.github/hiero-bot.yml` to any repo where the app is installed. Full reference: [`templates/hiero-bot.yml`](templates/hiero-bot.yml). The bot is **completely silent** if no config file exists — nothing runs by accident.
