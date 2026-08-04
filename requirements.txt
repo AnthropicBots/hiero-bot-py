@@ -1,6 +1,6 @@
 asyncpg==0.29.0
 cachetools==5.5.0
-fastapi==0.115.5
+fastapi==0.141.1
 uvicorn[standard]==0.32.1
 pydantic==2.10.3
 pydantic-settings==2.7.0
@@ -16,8 +16,8 @@ cryptography==50.0.0
 PyJWT>=2.7.0
 python-dotenv==1.2.2
 anthropic==0.42.0
-pytest==8.3.4
-pytest-asyncio==0.25.0
+pytest==9.0.3
+pytest-asyncio==1.4.0
 pytest-cov==6.0.0
 httpx==0.28.1
 respx==0.21.1
