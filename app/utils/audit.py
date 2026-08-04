@@ -23,6 +23,7 @@ VALID_ACTIONS = {
     "pr.labeled",
     "pr.closed_stale",
     "pr.reviewer_recommended",
+    "pr.reviewer_assigned",
     "contributor.mentor_assigned",
     "contributor.role_suggested",
     "contributor.welcomed",

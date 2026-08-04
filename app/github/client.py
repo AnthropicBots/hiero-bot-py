@@ -145,6 +145,24 @@ class GitHubClient:
         await self.post(f"/repos/{owner}/{repo}/issues/{number}/assignees",
                         installation_id, json={"assignees": assignees})
 
+    async def request_reviewers(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        reviewers: list[str],
+        installation_id: int,
+    ) -> None:
+        """Request reviews from one or more reviewers on a pull request."""
+        if not reviewers:
+            return
+
+        await self.post(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+            installation_id,
+            json={"reviewers": reviewers},
+        )
+
     async def remove_assignees(
         self, owner: str, repo: str, number: int,
         assignees: list[str], installation_id: int

@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, model_validator
 RoleLevel = Literal["contributor", "junior-committer", "committer", "maintainer"]
 FocusArea = Literal["security", "performance", "style", "logic", "tests"]
 MentorStrategy = Literal["round-robin", "least-busy", "expertise-match"]
+ReviewerAssignmentStrategy = Literal["round-robin", "random"]
+ReviewerNotifyComment = Literal["off", "mention"]
 Verdict = Literal["approve", "request_changes", "comment"]
 
 
@@ -126,6 +128,20 @@ class PRHealthConfig(BaseModel):          # NEW workflow
     comment_threshold: int = Field(default=60, ge=0, le=100)   # only comment if score < threshold
     label_healthy_above: int = Field(default=75, ge=0, le=100)
 
+class ReviewerAssignmentConfig(BaseModel):
+    enabled: bool = False
+
+    availability_file: str = ".github/reviewers.yml"
+
+    reviewers_count: int = Field(default=1, ge=1)
+
+    strategy: ReviewerAssignmentStrategy = "round-robin"
+
+    exclude_pr_author: bool = True
+
+    fallback_to_all_if_none_available: bool = True
+
+    notify_comment: ReviewerNotifyComment = "off"
 
 # Teams & Labels 
 
@@ -150,6 +166,9 @@ class WorkflowsConfig(BaseModel):
     progression: ProgressionConfig = Field(default_factory=ProgressionConfig)
     issue_management: IssueManagementConfig = Field(default_factory=IssueManagementConfig)
     pr_health: PRHealthConfig = Field(default_factory=PRHealthConfig)
+    reviewer_assignment: ReviewerAssignmentConfig = Field(
+        default_factory=ReviewerAssignmentConfig
+    )
 
 
 class RepoConfig(BaseModel):
