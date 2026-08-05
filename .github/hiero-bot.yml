@@ -17,6 +17,15 @@ workflows:
       enabled: true
     auto_label: true
 
+  reviewer_assignment:
+    enabled: true
+    availability_file: ".github/reviewers.yml"
+    reviewers_count: 1
+    strategy: "round-robin"
+    exclude_pr_author: true
+    fallback_to_all_if_none_available: true
+    notify_comment: "off"
+
   pr_health:
     enabled: true
 

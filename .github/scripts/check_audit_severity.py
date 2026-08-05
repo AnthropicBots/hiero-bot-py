@@ -76,7 +76,7 @@ def _parse_cvss_number(value: Any) -> float | None:
     try:
         if value.startswith("CVSS:4"):
             return CVSS4(value).base_score
-        if value.startswith("CVSS:3") or value.startswith("AV:"):
+        if value.startswith(("CVSS:3", "AV:")):
             # CVSS3() accepts either a bare metric string or one prefixed
             # with "CVSS:3.x/".
             return CVSS3(value).base_score

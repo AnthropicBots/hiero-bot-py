@@ -20,6 +20,7 @@ from app.workflows.onboarding import OnboardingWorkflow
 from app.workflows.prhealth import PRHealthWorkflow
 from app.workflows.progression import ProgressionWorkflow
 from app.workflows.pullrequest import PullRequestWorkflow
+from app.workflows.reviewerassignment import ReviewerAssignmentWorkflow
 
 log = get_logger("github.webhooks")
 
@@ -151,6 +152,7 @@ class WebhookRouter:
 
     async def _handle_pull_request(self, action: str, payload: dict, ctx: dict) -> None:
         wf_pr = PullRequestWorkflow(self._gh)
+        wf_reviewer = ReviewerAssignmentWorkflow(self._gh)
         wf_health = PRHealthWorkflow(self._gh)
         wf_prog = ProgressionWorkflow(self._gh)
 
@@ -160,6 +162,10 @@ class WebhookRouter:
 
         if action in ("opened", "synchronize", "reopened"):
             await wf_pr.handle_pr_opened(ctx, payload)
+
+            if action == "opened":
+                await wf_reviewer.handle_pr_opened(ctx, payload)
+
             await wf_health.score_pr(ctx, payload)
 
         elif action == "closed" and pr.get("merged"):
