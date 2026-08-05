@@ -30,7 +30,7 @@ class GitHubClient:
             timeout=20.0,
         )
 
-    #  Auth 
+    #  Auth
 
     def _make_jwt(self) -> str:
         now = int(time.time())
@@ -66,7 +66,7 @@ class GitHubClient:
         token = await self._installation_token(installation_id)
         return {"Authorization": f"Bearer {token}"}
 
-    #  Raw request 
+    #  Raw request
 
     async def request(
         self,
@@ -78,7 +78,9 @@ class GitHubClient:
         headers = await self._inst_headers(installation_id)
         resp = await self._http.request(method, path, headers=headers, **kwargs)
         if resp.status_code == 404:
-            raise httpx.HTTPStatusError("Not found", request=resp.request, response=resp)
+            raise httpx.HTTPStatusError(
+                "Not found", request=resp.request, response=resp
+            )
         resp.raise_for_status()
         if resp.content:
             return resp.json()
@@ -96,19 +98,30 @@ class GitHubClient:
     async def delete(self, path: str, installation_id: int, **kwargs: Any) -> Any:
         return await self.request("DELETE", path, installation_id, **kwargs)
 
-    #  High-level helpers 
+    #  High-level helpers
 
     async def get_file_content(
-        self, owner: str, repo: str, path: str, installation_id: int = 0
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        installation_id: int = 0,
+        ref: str | None = None,
     ) -> str | None:
         """Returns base64-encoded file content or None if not found."""
         try:
+            params = {"ref": ref} if ref else None
             if installation_id:
-                data = await self.get(f"/repos/{owner}/{repo}/contents/{path}", installation_id)
+                data = await self.get(
+                    f"/repos/{owner}/{repo}/contents/{path}",
+                    installation_id,
+                    params=params,
+                )
             else:
                 resp = await self._http.get(
                     f"/repos/{owner}/{repo}/contents/{path}",
                     headers=self._app_headers(),
+                    params=params,
                 )
                 if resp.status_code == 404:
                     return None
@@ -123,8 +136,11 @@ class GitHubClient:
     async def post_comment(
         self, owner: str, repo: str, number: int, body: str, installation_id: int
     ) -> None:
-        await self.post(f"/repos/{owner}/{repo}/issues/{number}/comments",
-                        installation_id, json={"body": body})
+        await self.post(
+            f"/repos/{owner}/{repo}/issues/{number}/comments",
+            installation_id,
+            json={"body": body},
+        )
 
     async def add_label(
         self, owner: str, repo: str, number: int, label: str, installation_id: int
@@ -133,61 +149,96 @@ class GitHubClient:
         try:
             await self.get(f"/repos/{owner}/{repo}/labels/{label}", installation_id)
         except httpx.HTTPStatusError:
-            await self.post(f"/repos/{owner}/{repo}/labels", installation_id,
-                            json={"name": label, "color": "ededed"})
-        await self.post(f"/repos/{owner}/{repo}/issues/{number}/labels",
-                        installation_id, json={"labels": [label]})
+            await self.post(
+                f"/repos/{owner}/{repo}/labels",
+                installation_id,
+                json={"name": label, "color": "ededed"},
+            )
+        await self.post(
+            f"/repos/{owner}/{repo}/issues/{number}/labels",
+            installation_id,
+            json={"labels": [label]},
+        )
 
     async def add_assignees(
-        self, owner: str, repo: str, number: int,
-        assignees: list[str], installation_id: int
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        assignees: list[str],
+        installation_id: int,
     ) -> None:
-        await self.post(f"/repos/{owner}/{repo}/issues/{number}/assignees",
-                        installation_id, json={"assignees": assignees})
+        await self.post(
+            f"/repos/{owner}/{repo}/issues/{number}/assignees",
+            installation_id,
+            json={"assignees": assignees},
+        )
 
     async def remove_assignees(
-        self, owner: str, repo: str, number: int,
-        assignees: list[str], installation_id: int
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        assignees: list[str],
+        installation_id: int,
     ) -> None:
-        await self.delete(f"/repos/{owner}/{repo}/issues/{number}/assignees",
-                          installation_id, json={"assignees": assignees})
+        await self.delete(
+            f"/repos/{owner}/{repo}/issues/{number}/assignees",
+            installation_id,
+            json={"assignees": assignees},
+        )
 
     async def close_issue(
         self, owner: str, repo: str, number: int, installation_id: int
     ) -> None:
-        await self.patch(f"/repos/{owner}/{repo}/issues/{number}",
-                         installation_id,
-                         json={"state": "closed", "state_reason": "not_planned"})
+        await self.patch(
+            f"/repos/{owner}/{repo}/issues/{number}",
+            installation_id,
+            json={"state": "closed", "state_reason": "not_planned"},
+        )
 
     async def list_issues(
         self, owner: str, repo: str, installation_id: int, **params: Any
     ) -> list[dict]:
-        return await self.get(f"/repos/{owner}/{repo}/issues",
-                              installation_id, params={"per_page": 100, **params})
+        return await self.get(
+            f"/repos/{owner}/{repo}/issues",
+            installation_id,
+            params={"per_page": 100, **params},
+        )
 
     async def list_pr_files(
         self, owner: str, repo: str, pr_number: int, installation_id: int
     ) -> list[dict]:
-        return await self.get(f"/repos/{owner}/{repo}/pulls/{pr_number}/files",
-                              installation_id, params={"per_page": 100})
+        return await self.get(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/files",
+            installation_id,
+            params={"per_page": 100},
+        )
 
     async def list_pr_commits(
         self, owner: str, repo: str, pr_number: int, installation_id: int
     ) -> list[dict]:
-        return await self.get(f"/repos/{owner}/{repo}/pulls/{pr_number}/commits",
-                              installation_id, params={"per_page": 100})
+        return await self.get(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/commits",
+            installation_id,
+            params={"per_page": 100},
+        )
 
     async def list_pr_reviews(
         self, owner: str, repo: str, pr_number: int, installation_id: int
     ) -> list[dict]:
-        return await self.get(f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
-                              installation_id, params={"per_page": 100})
+        return await self.get(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            installation_id,
+            params={"per_page": 100},
+        )
 
     async def get_combined_status(
         self, owner: str, repo: str, sha: str, installation_id: int
     ) -> dict:
-        return await self.get(f"/repos/{owner}/{repo}/commits/{sha}/status",
-                              installation_id)
+        return await self.get(
+            f"/repos/{owner}/{repo}/commits/{sha}/status", installation_id
+        )
 
     async def get_user(self, login: str, installation_id: int) -> dict:
         return await self.get(f"/users/{login}", installation_id)
@@ -209,34 +260,49 @@ class GitHubClient:
         self, org: str, team_slug: str, installation_id: int
     ) -> list[dict]:
         try:
-            return await self.get(f"/orgs/{org}/teams/{team_slug}/members",
-                                  installation_id, params={"per_page": 100})
+            return await self.get(
+                f"/orgs/{org}/teams/{team_slug}/members",
+                installation_id,
+                params={"per_page": 100},
+            )
         except Exception:
             return []
 
     async def list_installations(self) -> list[dict]:
-        resp = await self._http.get("/app/installations",
-                                    headers=self._app_headers(),
-                                    params={"per_page": 100})
+        resp = await self._http.get(
+            "/app/installations", headers=self._app_headers(), params={"per_page": 100}
+        )
         resp.raise_for_status()
         return resp.json()
 
     async def list_installation_repos(self, installation_id: int) -> list[dict]:
-        data = await self.get("/installation/repositories",
-                              installation_id, params={"per_page": 100})
+        data = await self.get(
+            "/installation/repositories", installation_id, params={"per_page": 100}
+        )
         return data.get("repositories", [])
 
     async def create_pr_review_comment(
-        self, owner: str, repo: str, pr_number: int,
-        body: str, path: str, line: int, commit_sha: str,
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        body: str,
+        path: str,
+        line: int,
+        commit_sha: str,
         installation_id: int,
     ) -> None:
         try:
             await self.post(
                 f"/repos/{owner}/{repo}/pulls/{pr_number}/comments",
                 installation_id,
-                json={"body": body, "path": path, "line": line,
-                      "side": "RIGHT", "commit_id": commit_sha},
+                json={
+                    "body": body,
+                    "path": path,
+                    "line": line,
+                    "side": "RIGHT",
+                    "commit_id": commit_sha,
+                },
             )
         except Exception as exc:
             log.warning("Inline comment failed (path=%s line=%d): %s", path, line, exc)

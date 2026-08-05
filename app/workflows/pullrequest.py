@@ -46,19 +46,23 @@ class PullRequestWorkflow:
 
         # Post quality report
         if checks:
-            await self._gh.post_comment(owner, repo, pr_number,
-                                        self._build_report(checks), inst)
+            await self._gh.post_comment(
+                owner, repo, pr_number, self._build_report(checks), inst
+            )
 
         # Label
         if cfg.auto_label:
             await self._gh.add_label(
-                owner, repo, pr_number,
-                LABEL_PASS if all_passed else LABEL_FAIL, inst
+                owner, repo, pr_number, LABEL_PASS if all_passed else LABEL_FAIL, inst
             )
 
         await audit.record(
-            db, action="pr.labeled", owner=owner, repo=repo,
-            target_number=pr_number, target_login=author,
+            db,
+            action="pr.labeled",
+            owner=owner,
+            repo=repo,
+            target_number=pr_number,
+            target_login=author,
             reason="Quality gates evaluated",
             metadata={
                 "passed": all_passed,
@@ -87,37 +91,64 @@ class PullRequestWorkflow:
         # Linked issue
         if gates.require_linked_issue:
             body = pr.get("body") or ""
-            linked = bool(re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.IGNORECASE))
-            checks.append(QualityCheck(
-                "Linked Issue", linked,
-                "PR description references a closing issue ✅" if linked
-                else 'Add `Closes #N` to your PR description ❌',
-            ))
+            linked = bool(
+                re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.IGNORECASE)
+            )
+            checks.append(
+                QualityCheck(
+                    "Linked Issue",
+                    linked,
+                    (
+                        "PR description references a closing issue ✅"
+                        if linked
+                        else "Add `Closes #N` to your PR description ❌"
+                    ),
+                )
+            )
 
         # Tests
         if gates.require_tests:
             files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
-            test_pats = [re.compile(p) for p in
-                         [r"\.test\.[jt]sx?$", r"\.spec\.[jt]sx?$",
-                          r"tests?/", r"test_.*\.py$", r".*_test\.py$"]]
+            test_pats = [
+                re.compile(p)
+                for p in [
+                    r"\.test\.[jt]sx?$",
+                    r"\.spec\.[jt]sx?$",
+                    r"tests?/",
+                    r"test_.*\.py$",
+                    r".*_test\.py$",
+                ]
+            ]
             has_tests = any(
                 any(p.search(f["filename"]) for p in test_pats) for f in files
             )
-            checks.append(QualityCheck(
-                "Tests", has_tests,
-                "Changes include test coverage ✅" if has_tests
-                else "Please add or update tests for your changes ❌",
-            ))
+            checks.append(
+                QualityCheck(
+                    "Tests",
+                    has_tests,
+                    (
+                        "Changes include test coverage ✅"
+                        if has_tests
+                        else "Please add or update tests for your changes ❌"
+                    ),
+                )
+            )
 
         # DCO
         if gates.require_dco:
             sha = pr.get("head", {}).get("sha", "")
             passed = await self._check_status(owner, repo, sha, "DCO", inst)
-            checks.append(QualityCheck(
-                "DCO Sign-off", passed,
-                "All commits are signed-off ✅" if passed
-                else "Sign your commits with `git commit -s` — see [DCO](https://developercertificate.org/) ❌",
-            ))
+            checks.append(
+                QualityCheck(
+                    "DCO Sign-off",
+                    passed,
+                    (
+                        "All commits are signed-off ✅"
+                        if passed
+                        else "Sign your commits with `git commit -s` — see [DCO](https://developercertificate.org/) ❌"
+                    ),
+                )
+            )
 
         # GPG
         if gates.require_gpg_signature:
@@ -126,31 +157,49 @@ class PullRequestWorkflow:
                 (c.get("commit") or {}).get("verification", {}).get("verified")
                 for c in commits
             )
-            checks.append(QualityCheck(
-                "GPG Signature", signed,
-                "All commits are GPG signed ✅" if signed
-                else "Commits must be GPG signed — see [GitHub Docs](https://docs.github.com/en/authentication/managing-commit-signature-verification) ❌",
-            ))
+            checks.append(
+                QualityCheck(
+                    "GPG Signature",
+                    signed,
+                    (
+                        "All commits are GPG signed ✅"
+                        if signed
+                        else "Commits must be GPG signed — see [GitHub Docs](https://docs.github.com/en/authentication/managing-commit-signature-verification) ❌"
+                    ),
+                )
+            )
 
         # Max files
         if gates.max_files_changed:
             n = pr.get("changed_files", 0)
             ok = n <= gates.max_files_changed
-            checks.append(QualityCheck(
-                "PR Size", ok,
-                f"PR size is fine ({n} files) ✅" if ok
-                else f"PR too large ({n} files > {gates.max_files_changed}). Please split ❌",
-            ))
+            checks.append(
+                QualityCheck(
+                    "PR Size",
+                    ok,
+                    (
+                        f"PR size is fine ({n} files) ✅"
+                        if ok
+                        else f"PR too large ({n} files > {gates.max_files_changed}). Please split ❌"
+                    ),
+                )
+            )
 
         # Branch pattern
         if gates.allowed_branch_pattern:
             branch = pr.get("head", {}).get("ref", "")
             ok = bool(re.match(gates.allowed_branch_pattern, branch))
-            checks.append(QualityCheck(
-                "Branch Name", ok,
-                f"Branch `{branch}` matches required pattern ✅" if ok
-                else f"Branch `{branch}` must match `{gates.allowed_branch_pattern}` ❌",
-            ))
+            checks.append(
+                QualityCheck(
+                    "Branch Name",
+                    ok,
+                    (
+                        f"Branch `{branch}` matches required pattern ✅"
+                        if ok
+                        else f"Branch `{branch}` must match `{gates.allowed_branch_pattern}` ❌"
+                    ),
+                )
+            )
 
         # Changelog
         if gates.require_changelog_entry:
@@ -160,11 +209,17 @@ class PullRequestWorkflow:
                 re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
                 for f in files
             )
-            checks.append(QualityCheck(
-                "Changelog", has_cl,
-                "CHANGELOG entry included ✅" if has_cl
-                else "Please add a CHANGELOG entry ❌",
-            ))
+            checks.append(
+                QualityCheck(
+                    "Changelog",
+                    has_cl,
+                    (
+                        "CHANGELOG entry included ✅"
+                        if has_cl
+                        else "Please add a CHANGELOG entry ❌"
+                    ),
+                )
+            )
 
         return checks
 
@@ -186,7 +241,11 @@ class PullRequestWorkflow:
             f"| {'✅' if c.passed else '❌'} | **{c.name}** | {c.detail} |"
             for c in checks
         )
-        status = "✅ All quality gates passed!" if all_passed else "❌ Some gates need attention."
+        status = (
+            "✅ All quality gates passed!"
+            if all_passed
+            else "❌ Some gates need attention."
+        )
         return f"""## 🔍 Quality Gate Report
 
 {status}
@@ -200,21 +259,44 @@ class PullRequestWorkflow:
     # ── AI Review ─────────────────────────────────────────────
 
     async def _run_ai_review(self, ctx: dict, pr: dict) -> None:
+        import base64
+
         cfg = ctx["config"].workflows.pull_request.ai_review
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         pr_number = pr["number"]
+        sha = pr.get("head", {}).get("sha", "")
 
         files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
         diffs = [
             {"path": f["filename"], "diff": f.get("patch", "")}
-            for f in files if f.get("patch")
+            for f in files
+            if f.get("patch")
         ][:15]
 
+        file_contents = []
+        for f in files[:8]:
+            if f.get("status") == "removed":
+                continue
+            try:
+                raw = await self._gh.get_file_content(
+                    owner, repo, f["filename"], inst, ref=sha
+                )
+                if raw:
+                    decoded = base64.b64decode(raw).decode("utf-8", errors="replace")
+                    if len(decoded) <= 15000:
+                        file_contents.append(
+                            {"path": f["filename"], "content": decoded}
+                        )
+            except Exception:
+                continue
+
         result = await self._ai.review(
-            cfg, pr.get("title", ""), pr.get("body") or "", diffs
+            cfg, pr.get("title", ""), pr.get("body") or "", diffs, file_contents
         )
 
-        emoji = "🟢" if result["score"] >= 80 else "🟡" if result["score"] >= 60 else "🔴"
+        emoji = (
+            "🟢" if result["score"] >= 80 else "🟡" if result["score"] >= 60 else "🔴"
+        )
         body = (
             f"## 🤖 AI Code Review\n\n"
             f"{emoji} **Score: {result['score']}/100** | `{result['verdict']}`\n\n"
@@ -223,17 +305,25 @@ class PullRequestWorkflow:
         )
         await self._gh.post_comment(owner, repo, pr_number, body, inst)
 
-        sha = pr.get("head", {}).get("sha", "")
-        for comment in result.get("comments", [])[:cfg.max_comments]:
+        for comment in result.get("comments", [])[: cfg.max_comments]:
             await self._gh.create_pr_review_comment(
-                owner, repo, pr_number,
+                owner,
+                repo,
+                pr_number,
                 f"{_sev_emoji(comment['severity'])} {comment['body']}",
-                comment["path"], comment["line"], sha, inst,
+                comment["path"],
+                comment["line"],
+                sha,
+                inst,
             )
 
         await audit.record(
-            ctx["db"], action="pr.reviewed", owner=owner, repo=repo,
-            target_number=pr_number, target_login=pr["user"]["login"],
+            ctx["db"],
+            action="pr.reviewed",
+            owner=owner,
+            repo=repo,
+            target_number=pr_number,
+            target_login=pr["user"]["login"],
             reason=f"AI review score={result['score']}",
             metadata={"score": result["score"], "verdict": result["verdict"]},
         )
@@ -252,18 +342,22 @@ class PullRequestWorkflow:
 
             # Get recent closed PRs touching same paths
             recent_prs = await self._gh.get(
-                f"/repos/{owner}/{repo}/pulls", inst,
-                params={"state": "closed", "per_page": 50}
+                f"/repos/{owner}/{repo}/pulls",
+                inst,
+                params={"state": "closed", "per_page": 50},
             )
 
             scores: dict[str, float] = {}
-            for rpr in (recent_prs or []):
+            for rpr in recent_prs or []:
                 reviewer = (rpr.get("user") or {}).get("login", "")
                 if not reviewer or reviewer == author:
                     continue
-                pr_files = await self._gh.list_pr_files(owner, repo, rpr["number"], inst)
+                pr_files = await self._gh.list_pr_files(
+                    owner, repo, rpr["number"], inst
+                )
                 overlap = sum(
-                    1 for f in pr_files
+                    1
+                    for f in pr_files
                     if any(f["filename"].rsplit("/", 1)[0] in p for p in touched_paths)
                 )
                 if overlap:
@@ -275,13 +369,18 @@ class PullRequestWorkflow:
             top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:2]
             names = ", ".join(f"@{r}" for r, _ in top)
             await self._gh.post_comment(
-                owner, repo, pr_number,
+                owner,
+                repo,
+                pr_number,
                 f"💡 **Suggested reviewers** based on relevant file history: {names}",
                 inst,
             )
 
             await audit.record(
-                ctx["db"], action="pr.reviewer_recommended", owner=owner, repo=repo,
+                ctx["db"],
+                action="pr.reviewer_recommended",
+                owner=owner,
+                repo=repo,
                 target_number=pr_number,
                 reason="Reviewer recommendation based on file overlap",
                 metadata={"recommendations": [r for r, _ in top]},
