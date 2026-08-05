@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from app.utils.logger import get_logger
@@ -62,7 +63,7 @@ class AIReviewer:
             if self._client_type == "openai":
                 response = await client.chat.completions.create(
                     model=cfg.model,
-                    max_tokens=2048,
+                    max_tokens=4096,
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
@@ -121,13 +122,8 @@ Respond with JSON only:
     @staticmethod
     def _parse(text: str) -> dict[str, Any]:
         try:
-            clean = (
-                text.strip()
-                .removeprefix("```json")
-                .removeprefix("```")
-                .removesuffix("```")
-                .strip()
-            )
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            clean = match.group(0) if match else text.strip()
             parsed = json.loads(clean)
             return {
                 "summary": str(parsed.get("summary", "")),

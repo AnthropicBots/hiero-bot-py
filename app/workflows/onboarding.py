@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from app.github.client import GitHubClient
@@ -9,6 +10,16 @@ from app.utils import audit
 from app.utils.logger import get_logger
 
 log = get_logger("workflow.onboarding")
+
+_assign_locks: dict[tuple[str, str, int], asyncio.Lock] = {}
+
+
+def _get_assign_lock(owner: str, repo: str, issue_number: int) -> asyncio.Lock:
+    key = (owner, repo, issue_number)
+    if key not in _assign_locks:
+        _assign_locks[key] = asyncio.Lock()
+    return _assign_locks[key]
+
 
 BOT_PATTERNS = ("bot", "dependabot", "renovate", "github-actions", "[bot]")
 
@@ -40,9 +51,15 @@ class OnboardingWorkflow:
         msg = self._build_welcome(login, cfg)
         await self._gh.post_comment(owner, repo, issue_number, msg, inst)
 
-        await audit.record(db, action="contributor.welcomed", owner=owner, repo=repo,
-                           target_number=issue_number, target_login=login,
-                           reason="First-time contributor")
+        await audit.record(
+            db,
+            action="contributor.welcomed",
+            owner=owner,
+            repo=repo,
+            target_number=issue_number,
+            target_login=login,
+            reason="First-time contributor",
+        )
         await db.commit()
 
         # Assign mentor
@@ -63,36 +80,52 @@ class OnboardingWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db = ctx["db"]
 
-        # Already assigned?
-        assignees = [a["login"] for a in (issue.get("assignees") or [])]
-        if login in assignees:
-            await self._gh.post_comment(owner, repo, issue_number,
-                                        f"@{login} You're already assigned! 🎉", inst)
-            return
+        async with _get_assign_lock(owner, repo, issue_number):
+            live_issue = await self._gh.get(
+                f"/repos/{owner}/{repo}/issues/{issue_number}", inst
+            )
+            assignees = [a["login"] for a in (live_issue.get("assignees") or [])]
 
-        # Eligibility check
-        ok, reason = await self._check_eligibility(ctx, login)
-        if not ok:
-            await self._gh.post_comment(owner, repo, issue_number, reason, inst)
-            return
+            if assignees:
+                if login in assignees:
+                    msg = f"@{login} You're already assigned! 🎉"
+                else:
+                    msg = f"@{login} This issue is already assigned to @{assignees[0]}. Try another one!"
+                await self._gh.post_comment(owner, repo, issue_number, msg, inst)
+                return
 
-        await self._gh.add_assignees(owner, repo, issue_number, [login], inst)
-        await self._gh.post_comment(
-            owner, repo, issue_number,
-            f"✅ @{login} has been assigned! Good luck — ask questions any time.", inst
-        )
-        await audit.record(db, action="issue.assigned", owner=owner, repo=repo,
-                           target_number=issue_number, target_login=login,
-                           reason="Self-assignment via /assign")
-        await db.commit()
+            ok, reason = await self._check_eligibility(ctx, login)
+            if not ok:
+                await self._gh.post_comment(owner, repo, issue_number, reason, inst)
+                return
+
+            await self._gh.add_assignees(owner, repo, issue_number, [login], inst)
+            await self._gh.post_comment(
+                owner,
+                repo,
+                issue_number,
+                f"✅ @{login} has been assigned! Good luck — ask questions any time.",
+                inst,
+            )
+            await audit.record(
+                db,
+                action="issue.assigned",
+                owner=owner,
+                repo=repo,
+                target_number=issue_number,
+                target_login=login,
+                reason="Self-assignment via /assign",
+            )
+            await db.commit()
 
     # ── Helpers ───────────────────────────────────────────────
 
-    async def _is_first_time(self, owner: str, repo: str, login: str, inst: int) -> bool:
+    async def _is_first_time(
+        self, owner: str, repo: str, login: str, inst: int
+    ) -> bool:
         try:
             contributors = await self._gh.get(
-                f"/repos/{owner}/{repo}/contributors", inst,
-                params={"per_page": 500}
+                f"/repos/{owner}/{repo}/contributors", inst, params={"per_page": 500}
             )
             return not any(c["login"] == login for c in (contributors or []))
         except Exception:
@@ -102,9 +135,7 @@ class OnboardingWorkflow:
         cfg = ctx["config"].workflows.onboarding
         try:
             user = await self._gh.get_user(login, ctx["installation_id"])
-            created = datetime.fromisoformat(
-                user["created_at"].replace("Z", "+00:00")
-            )
+            created = datetime.fromisoformat(user["created_at"].replace("Z", "+00:00"))
             age_days = (datetime.now(timezone.utc) - created).days
 
             if age_days < cfg.minimum_account_age_days:
@@ -122,7 +153,9 @@ class OnboardingWorkflow:
             pass  # Fail open
         return True, ""
 
-    async def _assign_mentor(self, ctx: dict, issue_number: int, contributor: str) -> None:
+    async def _assign_mentor(
+        self, ctx: dict, issue_number: int, contributor: str
+    ) -> None:
         org = ctx["owner"]
         team_slug = ctx["config"].teams.mentors
         inst = ctx["installation_id"]
@@ -139,17 +172,26 @@ class OnboardingWorkflow:
         else:
             mentor = members[0]["login"]
 
-        await self._gh.add_assignees(ctx["owner"], ctx["repo"], issue_number, [mentor], inst)
-        await self._gh.post_comment(
-            ctx["owner"], ctx["repo"], issue_number,
-            f"👋 @{mentor} has been assigned as mentor to support @{contributor}.",
-            inst
+        await self._gh.add_assignees(
+            ctx["owner"], ctx["repo"], issue_number, [mentor], inst
         )
-        await audit.record(db, action="contributor.mentor_assigned",
-                           owner=ctx["owner"], repo=ctx["repo"],
-                           target_number=issue_number, target_login=contributor,
-                           reason=f"Mentor @{mentor} assigned via {strategy}",
-                           metadata={"mentor": mentor})
+        await self._gh.post_comment(
+            ctx["owner"],
+            ctx["repo"],
+            issue_number,
+            f"👋 @{mentor} has been assigned as mentor to support @{contributor}.",
+            inst,
+        )
+        await audit.record(
+            db,
+            action="contributor.mentor_assigned",
+            owner=ctx["owner"],
+            repo=ctx["repo"],
+            target_number=issue_number,
+            target_login=contributor,
+            reason=f"Mentor @{mentor} assigned via {strategy}",
+            metadata={"mentor": mentor},
+        )
         await db.commit()
 
     @staticmethod
