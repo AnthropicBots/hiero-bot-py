@@ -72,7 +72,7 @@ async def test_assigns_mentor_when_enabled(mock_gh, ctx):
 
 @pytest.mark.asyncio
 async def test_self_assign_success(mock_gh, ctx):
-    mock_gh.get = AsyncMock(return_value=[])
+    mock_gh.get = AsyncMock(return_value={"assignees": []})
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(assignees=[]))
     mock_gh.add_assignees.assert_awaited_once()
@@ -81,6 +81,7 @@ async def test_self_assign_success(mock_gh, ctx):
 
 @pytest.mark.asyncio
 async def test_self_assign_already_assigned(mock_gh, ctx):
+    mock_gh.get = AsyncMock(return_value={"assignees": [{"login": "alice"}]})
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(assignees=[{"login": "alice"}]))
     mock_gh.add_assignees.assert_not_awaited()
@@ -90,6 +91,7 @@ async def test_self_assign_already_assigned(mock_gh, ctx):
 @pytest.mark.asyncio
 async def test_self_assign_blocked_by_min_age(mock_gh, ctx):
     ctx["config"].workflows.onboarding.minimum_account_age_days = 90
+    mock_gh.get = AsyncMock(return_value={"assignees": []})
 
     # Create a dynamic date that is exactly 10 days ago so this test never expires
     recent_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(

@@ -38,6 +38,7 @@ Rules:
 class AIReviewer:
     def __init__(self) -> None:
         self._client = None
+        self._client_type: str | None = None
 
     def _get_client(self):
         if self._client is None:
@@ -74,7 +75,16 @@ class AIReviewer:
         prompt = self._build_prompt(pr_title, pr_body, diffs, file_contents or [], cfg)
         try:
             client = self._get_client()
-            if self._client_type == "openai":
+
+            client_type = getattr(self, "_client_type", None)
+            if client_type is None:
+                client_type = (
+                    "openai"
+                    if hasattr(client, "chat") and hasattr(client.chat, "completions")
+                    else "anthropic"
+                )
+
+            if client_type == "openai":
                 response = await client.chat.completions.create(
                     model=cfg.model,
                     max_tokens=4096,

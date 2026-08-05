@@ -288,6 +288,12 @@ class PullRequestWorkflow:
                             {"path": f["filename"], "content": decoded}
                         )
             except Exception:
+                log.exception(
+                    "Failed to fetch file content for %s/%s: %s",
+                    owner,
+                    repo,
+                    f["filename"],
+                )
                 continue
 
         result = await self._ai.review(
