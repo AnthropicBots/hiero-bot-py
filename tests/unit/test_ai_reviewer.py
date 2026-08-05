@@ -38,6 +38,7 @@ async def test_returns_parsed_review():
     }))
     r = AIReviewer()
     r._client = mock_client
+    r._client_type = "anthropic"
     result = await r.review(CFG, "feat: auth", "Adds login", DIFFS)
     assert result["verdict"] == "request_changes"
     assert result["score"] == 35
@@ -51,6 +52,7 @@ async def test_graceful_fallback_on_api_error():
     mock_client.messages.create = AsyncMock(side_effect=Exception("Network error"))
     r = AIReviewer()
     r._client = mock_client
+    r._client_type = "anthropic"
     result = await r.review(CFG, "PR", "", DIFFS)
     assert result["verdict"] == "comment"
     assert result["comments"] == []
@@ -66,6 +68,7 @@ async def test_strips_markdown_fences():
     mock_client.messages.create = AsyncMock(return_value=mock_msg)
     r = AIReviewer()
     r._client = mock_client
+    r._client_type = "anthropic"
     result = await r.review(CFG, "PR", "", DIFFS)
     assert result["verdict"] == "approve"
     assert result["score"] == 90
