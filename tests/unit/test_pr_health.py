@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.workflows.prhealth import PRHealthWorkflow
+from app.workflows.prhealth import LABEL_NEEDS_WORK, PRHealthWorkflow
 
 
 def make_pr(number=1, author="alice", additions=100, deletions=50, body="Closes #1"):
@@ -102,6 +102,55 @@ async def test_no_comment_above_threshold(mock_gh, ctx):
     wf = PRHealthWorkflow(mock_gh)
     await wf.score_pr(ctx, make_payload(make_pr(body="Closes #5")))
     mock_gh.post_comment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_needs_work_label_posts_comment_for_boundary_score(mock_gh, ctx):
+    """
+    Regression test for issue #47: a PR whose score falls between
+    comment_threshold and label_healthy_above must still get both the
+    LABEL_NEEDS_WORK label AND the explanatory comment. Previously only
+    `score < comment_threshold` triggered a comment, so a PR scoring in
+    this gap got an unexplained "needs work" label with no comment.
+
+    Rather than trusting the fixture lands in the gap by luck, this test
+    recomputes the score with the workflow's own static methods (same
+    inputs used above) and asserts it is *actually* in the boundary,
+    so the test stays meaningful if score_weights or thresholds change.
+    """
+    files = [
+        {"filename": "tests/test_feature.py", "patch": "+def test_case(): pass"}
+    ]
+    reviews = []
+    status = {"statuses": []}
+
+    mock_gh.list_pr_files = AsyncMock(return_value=files)
+    mock_gh.get_combined_status = AsyncMock(return_value=status)
+    mock_gh.list_pr_reviews = AsyncMock(return_value=reviews)
+
+    wf = PRHealthWorkflow(mock_gh)
+    body = (
+        "Closes #5\n\nThis PR adds the requested feature and includes "
+        "enough detail for reviewers to understand the scope."
+    )
+    pr = make_pr(body=body)
+    await wf.score_pr(ctx, make_payload(pr))
+
+    cfg = ctx["config"].workflows.pr_health
+    signals = PRHealthWorkflow._compute_signals(pr, files, reviews, status)
+    score = PRHealthWorkflow._compute_score(signals, cfg.score_weights)
+
+    assert cfg.comment_threshold <= score < cfg.label_healthy_above, (
+        f"fixture score {score} is not between comment_threshold="
+        f"{cfg.comment_threshold} and label_healthy_above="
+        f"{cfg.label_healthy_above}; this test no longer covers the "
+        "boundary case from issue #47 — adjust the PR/files/reviews "
+        "fixture above so the score lands back in that gap."
+    )
+
+    label = mock_gh.add_label.call_args[0][3]
+    assert label == LABEL_NEEDS_WORK
+    mock_gh.post_comment.assert_awaited_once()
 
 
 @pytest.mark.asyncio
