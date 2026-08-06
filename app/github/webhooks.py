@@ -43,8 +43,8 @@ class WebhookRouter:
         self._config_loader = config_loader
 
     async def handle(self, request: Request, db: AsyncSession) -> dict:
-        # Signature verification
-        if settings.github_webhook_secret:
+        # Signature verification (supports current & rotated secret)
+        if settings.github_webhook_secret or settings.github_webhook_secret_old:
             self._verify_signature(request, await request.body())
 
         # #4 — replay protection: reject deliveries we've already processed
@@ -272,14 +272,18 @@ class WebhookRouter:
         if not sig_header:
             raise HTTPException(status_code=401, detail="Missing signature")
 
-        expected = (
-            "sha256="
-            + hmac.new(
-                settings.github_webhook_secret.encode(),
-                body,
-                hashlib.sha256,
-            ).hexdigest()
-        )
+        secrets = [s for s in (settings.github_webhook_secret, settings.github_webhook_secret_old) if s]
 
-        if not hmac.compare_digest(sig_header, expected):
-            raise HTTPException(status_code=401, detail="Invalid signature")
+        for secret in secrets:
+            expected = (
+                "sha256="
+                + hmac.new(
+                    secret.encode("utf-8"),
+                    body,
+                    hashlib.sha256,
+                ).hexdigest()
+            )
+            if hmac.compare_digest(sig_header, expected):
+                return
+
+        raise HTTPException(status_code=401, detail="Invalid signature")
