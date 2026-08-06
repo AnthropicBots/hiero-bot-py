@@ -1,3 +1,5 @@
+# app/ai/reviewer.py — Anthropic-powered code review
+
 from __future__ import annotations
 
 import json
@@ -38,7 +40,7 @@ Rules:
 class AIReviewer:
     def __init__(self) -> None:
         self._client = None
-        self._client_type: str | None = None
+        self._client_type = "anthropic"
 
     def _get_client(self):
         if self._client is None:
@@ -158,35 +160,38 @@ Respond with JSON only:
     @staticmethod
     def _parse(text: str) -> dict[str, Any]:
         try:
-            match = re.search(r"\{.*\}", text, re.DOTALL)
-            clean = match.group(0) if match else text.strip()
+            clean = (
+                text.strip()
+                .removeprefix("```json")
+                .removeprefix("```")
+                .removesuffix("```")
+                .strip()
+            )
+
+            match = re.search(r"\{.*\}", clean, re.DOTALL)
+            clean = match.group(0) if match else clean
             parsed = json.loads(clean)
             return {
                 "summary": str(parsed.get("summary", "")),
-                "verdict": (
-                    parsed.get("verdict", "comment")
-                    if parsed.get("verdict")
-                    in ("approve", "request_changes", "comment")
-                    else "comment"
-                ),
+                "verdict": parsed.get("verdict", "comment")
+                           if parsed.get("verdict") in ("approve", "request_changes", "comment")
+                           else "comment",
                 "score": max(0, min(100, int(parsed.get("score", 50)))),
                 "comments": [
                     {
                         "path": str(c.get("path", "")),
                         "line": max(1, int(c.get("line", 1))),
                         "body": str(c.get("body", "")),
-                        "severity": (
-                            c.get("severity", "info")
-                            if c.get("severity") in ("info", "warning", "error")
-                            else "info"
-                        ),
+                        "severity": c.get("severity", "info")
+                                    if c.get("severity") in ("info", "warning", "error")
+                                    else "info",
                     }
                     for c in (parsed.get("comments") or [])[:20]
                     if c.get("path") and c.get("body")
                 ],
             }
         except Exception as exc:
-            log.warning("Failed to parse AI response: %s", exc)
+            log.warning("Failed to parse AI response: %s | raw=%s", exc, text[:300])
             return {
                 "summary": "_AI review could not be parsed this time — the model's response wasn't valid JSON. This usually clears up on retry._",
                 "verdict": "comment",

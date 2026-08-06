@@ -1,8 +1,9 @@
 # app/github/client.py — Async GitHub API client
-
 from __future__ import annotations
 
+import asyncio
 import time
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -15,12 +16,71 @@ log = get_logger("github.client")
 
 GITHUB_API = "https://api.github.com"
 
+_PEM_MARKERS = [
+    (
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----END RSA PRIVATE KEY-----",
+    ),
+    (
+        "-----BEGIN PRIVATE KEY-----",
+        "-----END PRIVATE KEY-----",
+    ),
+    (
+        "-----BEGIN EC PRIVATE KEY-----",
+        "-----END EC PRIVATE KEY-----",
+    ),
+]
+
+
+def _normalize_private_key(raw: str) -> str:
+    """
+    Normalize GITHUB_PRIVATE_KEY into a valid multi-line PEM.
+
+    Supports:
+    - Already formatted PEM
+    - Escaped \n characters
+    - Flattened single-line PEM
+    - RSA, PKCS#8 and EC private keys
+    """
+
+    key = raw.replace("\\n", "\n").strip()
+
+    # Already a valid multi-line PEM
+    if "\n" in key and "BEGIN" in key and "END" in key:
+        return key
+
+    if "BEGIN" not in key or "END" not in key:
+        raise RuntimeError(
+            "Invalid GITHUB_PRIVATE_KEY. "
+            "Expected a PEM formatted private key."
+        )
+
+    for header, footer in _PEM_MARKERS:
+        if header in key and footer in key:
+            body = (
+                key.replace(header, "")
+                .replace(footer, "")
+                .strip()
+            )
+
+            return f"{header}\n{body}\n{footer}"
+
+    raise RuntimeError(
+        "Unsupported GITHUB_PRIVATE_KEY format. "
+        "Supported PEM types are:\n"
+        "- RSA PRIVATE KEY\n"
+        "- PRIVATE KEY\n"
+        "- EC PRIVATE KEY"
+    )
+
 
 class GitHubClient:
     """Async GitHub App client. Generates installation tokens on demand."""
 
     def __init__(self) -> None:
         self._installation_tokens: dict[int, tuple[str, float]] = {}
+        # Per-installation asyncio locks to prevent thundering herd / race conditions
+        self._refresh_locks: dict[int, asyncio.Lock] = {}
         self._http = httpx.AsyncClient(
             base_url=GITHUB_API,
             headers={
@@ -30,34 +90,68 @@ class GitHubClient:
             timeout=20.0,
         )
 
-    #  Auth
+    # Auth
 
     def _make_jwt(self) -> str:
         now = int(time.time())
-        payload = {"iat": now - 60, "exp": now + 600, "iss": settings.github_app_id}
-        raw = settings.github_private_key
-        private_key = raw.replace("\\n", "\n").strip()
-        if "\n" not in private_key and "BEGIN" in private_key:
-            header = "-----BEGIN RSA PRIVATE KEY-----"
-            footer = "-----END RSA PRIVATE KEY-----"
-            body = private_key.replace(header, "").replace(footer, "").strip()
-            private_key = header + "\n" + body + "\n" + footer
-        return jwt.encode(payload, private_key, algorithm="RS256")
+
+        payload = {
+            "iat": now - 60,
+            "exp": now + 600,
+            "iss": settings.github_app_id,
+        }
+
+        private_key = _normalize_private_key(
+            settings.github_private_key
+        )
+
+        return jwt.encode(
+            payload,
+            private_key,
+            algorithm="RS256",
+        )
 
     async def _installation_token(self, installation_id: int) -> str:
+        # Initial cache check outside lock
         token, expires_at = self._installation_tokens.get(installation_id, ("", 0.0))
         if token and time.time() < expires_at - 60:
             return token
 
-        resp = await self._http.post(
-            f"/app/installations/{installation_id}/access_tokens",
-            headers={"Authorization": f"Bearer {self._make_jwt()}"},
+        # Fetch or create lock for this specific installation
+        lock = self._refresh_locks.setdefault(
+            installation_id,
+            asyncio.Lock(),
         )
-        resp.raise_for_status()
-        data = resp.json()
-        token = data["token"]
-        self._installation_tokens[installation_id] = (token, time.time() + 3600)
-        return token
+
+        async with lock:
+            # Double-check cache inside lock in case another request refreshed it while waiting
+            token, expires_at = self._installation_tokens.get(installation_id, ("", 0.0))
+            if token and time.time() < expires_at - 60:
+                return token
+
+            # Execute refresh request only if token is still expired
+            resp = await self._http.post(
+                f"/app/installations/{installation_id}/access_tokens",
+                headers={"Authorization": f"Bearer {self._make_jwt()}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            token = data["token"]
+
+            # Parse exact expires_at from GitHub API response
+            expires_at_str = data.get("expires_at")
+            try:
+                if expires_at_str:
+                    expiry = datetime.fromisoformat(
+                        expires_at_str.replace("Z", "+00:00")
+                    ).timestamp()
+                else:
+                    expiry = time.time() + 3600
+            except (ValueError, TypeError):
+                expiry = time.time() + 3600
+
+            self._installation_tokens[installation_id] = (token, expiry)
+            return token
 
     def _app_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._make_jwt()}"}
@@ -66,7 +160,7 @@ class GitHubClient:
         token = await self._installation_token(installation_id)
         return {"Authorization": f"Bearer {token}"}
 
-    #  Raw request
+    # Raw request
 
     async def request(
         self,
@@ -98,7 +192,7 @@ class GitHubClient:
     async def delete(self, path: str, installation_id: int, **kwargs: Any) -> Any:
         return await self.request("DELETE", path, installation_id, **kwargs)
 
-    #  High-level helpers
+    # High-level helpers
 
     async def get_file_content(
         self,
