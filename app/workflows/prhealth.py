@@ -64,8 +64,8 @@ class PRHealthWorkflow:
         # Label the PR
         await self._gh.add_label(owner, repo, pr_number, label, inst)
 
-        # Comment if score is below threshold
-        if score < cfg.comment_threshold:
+        # Comment when below threshold or when the PR is labeled needs work
+        if score < cfg.comment_threshold or label == LABEL_NEEDS_WORK:
             await self._gh.post_comment(
                 owner, repo, pr_number,
                 self._build_health_comment(score, signals, cfg.label_healthy_above),
