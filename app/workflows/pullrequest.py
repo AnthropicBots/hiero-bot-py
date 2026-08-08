@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from turtle import st
 
 from app.ai.reviewer import AIReviewer
 from app.github.client import GitHubClient
@@ -77,14 +76,12 @@ class PullRequestWorkflow:
         )
 
         # AI review
-        if action in ("opened", "reopened"):
-            if cfg.ai_review.enabled:
-                await self._run_ai_review(ctx, pr)
+        if action in ("opened", "reopened") and cfg.ai_review.enabled:
+            await self._run_ai_review(ctx, pr)
 
-            # Reviewer recommendation
-        if action in ("opened", "reopened"): 
-            if cfg.reviewer_recommendation:
-                await self._recommend_reviewers(ctx, pr)
+# Reviewer recommendation
+        if action in ("opened", "reopened") and cfg.reviewer_recommendation:
+            await self._recommend_reviewers(ctx, pr)
 
         await db.commit()
 
@@ -213,21 +210,7 @@ class PullRequestWorkflow:
         if gates.require_changelog_entry:
             if "files" not in dir(self):  # avoid re-fetching
                 files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
-            has_cl = any(
-                re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
-                for f in files
-            )
-            checks.append(
-                QualityCheck(
-                    "Changelog",
-                    has_cl,
-                    (
-                        "CHANGELOG entry included ✅"
-                        if has_cl
-                        else "Please add a CHANGELOG entry ❌"
-                    ),
-                )
-            )
+           
             if "files" not in dir(self):  # avoid re-fetching
                 files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
             else:
