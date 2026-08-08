@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from turtle import st
 
 from app.ai.reviewer import AIReviewer
 from app.github.client import GitHubClient
@@ -207,8 +206,6 @@ class PullRequestWorkflow:
         if gates.require_changelog_entry:
             if "files" not in dir(self):  # avoid re-fetching
                 files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
-            else:
-                files = self.files # type: ignore
             has_cl = any(
                 re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
                 for f in files
