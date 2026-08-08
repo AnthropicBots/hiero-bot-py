@@ -27,7 +27,7 @@ class PullRequestWorkflow:
         self._gh = gh
         self._ai = AIReviewer()
 
-    async def handle_pr_opened(self, ctx: dict, payload: dict) -> None:
+    async def handle_pr_opened(self, ctx: dict, payload: dict , action:str) -> None:
         cfg = ctx["config"].workflows.pull_request
         if not cfg.enabled:
             return
@@ -71,12 +71,13 @@ class PullRequestWorkflow:
         )
 
         # AI review
-        if cfg.ai_review.enabled:
-            await self._run_ai_review(ctx, pr)
+        if action in ("opened", "reopened"):
+            if cfg.ai_review.enabled:
+                await self._run_ai_review(ctx, pr)
 
-        # Reviewer recommendation
-        if cfg.reviewer_recommendation:
-            await self._recommend_reviewers(ctx, pr)
+            # Reviewer recommendation
+            if cfg.reviewer_recommendation:
+                await self._recommend_reviewers(ctx, pr)
 
         await db.commit()
 
