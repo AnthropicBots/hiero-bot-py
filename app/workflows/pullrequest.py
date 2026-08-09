@@ -44,7 +44,6 @@ class PullRequestWorkflow:
         checks = await self._run_quality_checks(ctx, pr)
         all_passed = all(c.passed for c in checks)
 
-        # Post quality report
         # Post or update quality report
         if checks:
             report = self._build_report(checks)
@@ -56,7 +55,7 @@ class PullRequestWorkflow:
                 (
                     comment
                     for comment in comments
-                    if "Quality Gate Report" in comment.get("body", "")
+                    if comment.get("body", "").startswith("## 🔍 Quality Gate Report")
                 ),
                 None,
             )
@@ -78,25 +77,25 @@ class PullRequestWorkflow:
                     inst,
                 )
 
-            # Label
-            if cfg.auto_label:
-                await self._gh.add_label(
-                    owner, repo, pr_number, LABEL_PASS if all_passed else LABEL_FAIL, inst
-                )
-
-            await audit.record(
-                db,
-                action="pr.labeled",
-                owner=owner,
-                repo=repo,
-                target_number=pr_number,
-                target_login=author,
-                reason="Quality gates evaluated",
-                metadata={
-                    "passed": all_passed,
-                    "failed_checks": [c.name for c in checks if not c.passed],
-                },
+        # Label
+        if cfg.auto_label:
+            await self._gh.add_label(
+                owner, repo, pr_number, LABEL_PASS if all_passed else LABEL_FAIL, inst
             )
+
+        await audit.record(
+            db,
+            action="pr.labeled",
+            owner=owner,
+            repo=repo,
+            target_number=pr_number,
+            target_login=author,
+            reason="Quality gates evaluated",
+            metadata={
+                "passed": all_passed,
+                "failed_checks": [c.name for c in checks if not c.passed],
+            },
+        )
 
         # AI review
         if action in ("opened", "reopened") and cfg.ai_review.enabled:
@@ -231,13 +230,7 @@ class PullRequestWorkflow:
 
         # Changelog
         if gates.require_changelog_entry:
-            if "files" not in dir(self):  # avoid re-fetching
-                files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
-           
-            if "files" not in dir(self):  # avoid re-fetching
-                files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
-            else:
-                files = self.files  # type: ignore
+            files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
             has_cl = any(
                 re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
                 for f in files
