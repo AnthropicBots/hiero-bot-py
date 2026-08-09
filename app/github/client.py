@@ -235,6 +235,33 @@ class GitHubClient:
             installation_id,
             json={"body": body},
         )
+    async def list_issue_comments(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        installation_id: int,
+    ) -> list[dict]:
+        result = await self.get(
+            f"/repos/{owner}/{repo}/issues/{number}/comments",
+            installation_id,
+            params={"per_page": 100},
+        )
+        return result if isinstance(result, list) else []
+
+    async def update_comment(
+        self,
+        owner: str,
+        repo: str,
+        comment_id: int,
+        body: str,
+        installation_id: int,
+    ) -> None:
+        await self.patch(
+            f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            installation_id,
+            json={"body": body},
+        )
 
     async def add_label(
         self, owner: str, repo: str, number: int, label: str, installation_id: int
