@@ -26,6 +26,8 @@ def mock_gh():
     gh = AsyncMock()
     gh.post_comment = AsyncMock()
     gh.request_reviewers = AsyncMock()
+    gh.list_issue_comments = AsyncMock(return_value=[])
+    gh.update_comment = AsyncMock()
     gh.add_label = AsyncMock()
     gh.add_assignees = AsyncMock()
     gh.remove_assignees = AsyncMock()
@@ -45,6 +47,7 @@ def mock_gh():
     gh.list_team_members = AsyncMock(return_value=[{"login": "mentor1"}])
     gh.get_file_content = AsyncMock(return_value=None)
     gh.get = AsyncMock(return_value=[])
+    
     return gh
 
 

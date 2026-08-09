@@ -45,35 +45,58 @@ class PullRequestWorkflow:
         all_passed = all(c.passed for c in checks)
 
         # Post quality report
+        # Post or update quality report
         if checks:
-            await self._gh.post_comment(
-                owner, repo, pr_number, self._build_report(checks), inst
+            report = self._build_report(checks)
+            comments = await self._gh.list_issue_comments(
+                owner, repo, pr_number, inst
             )
 
-        # Label
-        if cfg.auto_label:
-            await self._gh.add_label(
-                owner, repo, pr_number, LABEL_PASS if all_passed else LABEL_FAIL, inst
+            existing_comment = next(
+                (
+                    comment
+                    for comment in comments
+                    if "Quality Gate Report" in comment.get("body", "")
+                ),
+                None,
             )
+
+            if existing_comment:
+                await self._gh.update_comment(
+                    owner,
+                    repo,
+                    existing_comment["id"],
+                    report,
+                    inst,
+                )
+            else:
+                await self._gh.post_comment(
+                    owner,
+                    repo,
+                    pr_number,
+                    report,
+                    inst,
+                )
+
             # Label
             if cfg.auto_label:
                 await self._gh.add_label(
                     owner, repo, pr_number, LABEL_PASS if all_passed else LABEL_FAIL, inst
                 )
 
-        await audit.record(
-            db,
-            action="pr.labeled",
-            owner=owner,
-            repo=repo,
-            target_number=pr_number,
-            target_login=author,
-            reason="Quality gates evaluated",
-            metadata={
-                "passed": all_passed,
-                "failed_checks": [c.name for c in checks if not c.passed],
-            },
-        )
+            await audit.record(
+                db,
+                action="pr.labeled",
+                owner=owner,
+                repo=repo,
+                target_number=pr_number,
+                target_login=author,
+                reason="Quality gates evaluated",
+                metadata={
+                    "passed": all_passed,
+                    "failed_checks": [c.name for c in checks if not c.passed],
+                },
+            )
 
         # AI review
         if action in ("opened", "reopened") and cfg.ai_review.enabled:
@@ -319,7 +342,13 @@ class PullRequestWorkflow:
             f"{result['summary']}\n\n"
             f"---\n_Automated AI review — a human maintainer will also review._"
         )
-        await self._gh.post_comment(owner, repo, pr_number, body, inst)
+        await self._gh.post_comment(
+            owner,
+            repo,
+            pr_number,
+            body,
+            inst,
+        )
 
         for comment in result.get("comments", [])[: cfg.max_comments]:
             await self._gh.create_pr_review_comment(
