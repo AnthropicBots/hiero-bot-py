@@ -44,11 +44,38 @@ class PullRequestWorkflow:
         checks = await self._run_quality_checks(ctx, pr)
         all_passed = all(c.passed for c in checks)
 
-        # Post quality report
+        # Post or update quality report
         if checks:
-            await self._gh.post_comment(
-                owner, repo, pr_number, self._build_report(checks), inst
+            report = self._build_report(checks)
+            comments = await self._gh.list_issue_comments(
+                owner, repo, pr_number, inst
             )
+
+            existing_comment = next(
+                (
+                    comment
+                    for comment in comments
+                    if comment.get("body", "").startswith("## 🔍 Quality Gate Report")
+                ),
+                None,
+            )
+
+            if existing_comment:
+                await self._gh.update_comment(
+                    owner,
+                    repo,
+                    existing_comment["id"],
+                    report,
+                    inst,
+                )
+            else:
+                await self._gh.post_comment(
+                    owner,
+                    repo,
+                    pr_number,
+                    report,
+                    inst,
+                )
 
         # Label
         if cfg.auto_label:
@@ -71,13 +98,12 @@ class PullRequestWorkflow:
         )
 
         # AI review
-        if action in ("opened", "reopened"):
-            if cfg.ai_review.enabled:
-                await self._run_ai_review(ctx, pr)
+        if action in ("opened", "reopened") and cfg.ai_review.enabled:
+            await self._run_ai_review(ctx, pr)
 
-            # Reviewer recommendation
-            if cfg.reviewer_recommendation:
-                await self._recommend_reviewers(ctx, pr)
+# Reviewer recommendation
+        if action in ("opened", "reopened") and cfg.reviewer_recommendation:
+            await self._recommend_reviewers(ctx, pr)
 
         await db.commit()
 
@@ -204,8 +230,7 @@ class PullRequestWorkflow:
 
         # Changelog
         if gates.require_changelog_entry:
-            if "files" not in dir(self):  # avoid re-fetching
-                files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
+            files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
             has_cl = any(
                 re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
                 for f in files
@@ -257,7 +282,7 @@ class PullRequestWorkflow:
 
 {"" if all_passed else "> Please address failing checks before requesting a review."}"""
 
-    # ── AI Review ─────────────────────────────────────────────
+    # ── AI Review & Recommendation ───────────────────────────────────────────── 
 
     async def _run_ai_review(self, ctx: dict, pr: dict) -> None:
         import base64
@@ -310,7 +335,13 @@ class PullRequestWorkflow:
             f"{result['summary']}\n\n"
             f"---\n_Automated AI review — a human maintainer will also review._"
         )
-        await self._gh.post_comment(owner, repo, pr_number, body, inst)
+        await self._gh.post_comment(
+            owner,
+            repo,
+            pr_number,
+            body,
+            inst,
+        )
 
         for comment in result.get("comments", [])[: cfg.max_comments]:
             await self._gh.create_pr_review_comment(

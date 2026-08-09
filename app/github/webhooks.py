@@ -161,7 +161,7 @@ class WebhookRouter:
             return
 
         if action in ("opened", "synchronize", "reopened"):
-            await wf_pr.handle_pr_opened(ctx, payload , action) 
+            await wf_pr.handle_pr_opened(ctx, payload, action) 
 
             if action == "opened":
                 await wf_reviewer.handle_pr_opened(ctx, payload)
