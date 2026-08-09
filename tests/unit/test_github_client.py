@@ -111,3 +111,47 @@ async def test_installation_token_cache_hit():
     mock_post.assert_not_called()
 
     await client.close()
+
+@pytest.mark.asyncio
+async def test_list_issue_comments_paginates():
+    client = GitHubClient()
+
+    first_page = [
+        {"id": i, "body": f"Comment {i}"}
+        for i in range(100)
+    ]
+    second_page = [
+        {
+            "id": 12345,
+            "body": "## 🔍 Quality Gate Report\n\nPrevious report",
+        }
+    ]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(side_effect=[first_page, second_page]),
+    ) as mock_get:
+        comments = await client.list_issue_comments(
+            "hiero",
+            "sdk-js",
+            1,
+            123,
+        )
+
+    assert len(comments) == 101
+    assert comments[-1]["id"] == 12345
+
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/issues/1/comments",
+        123,
+        params={"per_page": 100, "page": 1},
+    )
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/issues/1/comments",
+        123,
+        params={"per_page": 100, "page": 2},
+    )
+    assert mock_get.await_count == 2
+
+    await client.close()
