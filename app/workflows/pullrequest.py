@@ -289,7 +289,7 @@ class PullRequestWorkflow:
 
 {"" if all_passed else "> Please address failing checks before requesting a review."}"""
 
-    # ── AI Review ─────────────────────────────────────────────
+    # ── AI Review & Recommendation ───────────────────────────────────────────── 
 
     async def _run_ai_review(self, ctx: dict, pr: dict) -> None:
         import base64
