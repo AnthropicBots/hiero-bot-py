@@ -499,6 +499,32 @@ class GitHubClient:
     async def get_user(self, login: str, installation_id: int) -> dict:
         return await self.get(f"/users/{login}", installation_id)
 
+    async def search_issues(
+        self,
+        query: str,
+        installation_id: int,
+        *,
+        per_page: int = 1,
+        sort: str | None = None,
+        order: str | None = None,
+    ) -> dict:
+        """
+        Run an issue/PR search and return the raw response.
+
+        The useful part is `total_count`: it answers "how many PRs did this
+        person get merged?" in a single request, where walking `/pulls` would
+        take one request per hundred PRs in the repository's entire history.
+        Search has its own, much tighter rate limit, so callers should treat a
+        failure here as "fall back to REST" rather than as fatal.
+        """
+        params: dict[str, Any] = {"q": query, "per_page": per_page}
+        if sort:
+            params["sort"] = sort
+        if order:
+            params["order"] = order
+
+        return await self.get("/search/issues", installation_id, params=params)
+
     async def get_collaborator_permission(
         self,
         owner: str,
