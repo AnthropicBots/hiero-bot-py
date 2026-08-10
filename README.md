@@ -163,17 +163,36 @@ Add `.github/hiero-bot.yml` to any repo where the app is installed. Full referen
 
 ## Environment variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `GITHUB_APP_ID` | ✅ | From GitHub App settings |
-| `GITHUB_PRIVATE_KEY` | ✅ | RSA private key (use `\n` for newlines) |
-| `GITHUB_WEBHOOK_SECRET` | ✅ | Webhook secret set in App settings |
-| `ANTHROPIC_API_KEY` | AI review only | Anthropic API key |
-| `DATABASE_URL` | ❌ | Default: `sqlite+aiosqlite:///./hiero_bot.db` |
-| `PORT` | ❌ | Default: `8000` |
-| `LOG_LEVEL` | ❌ | `debug/info/warn/error` |
-| `ENVIRONMENT` | ❌ | `development` / `production` |
-| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | ❌ | Reserved for dashboard access control — **defined but not yet enforced; tracked in the roadmap below** |
+Full annotated reference: [`.env.example`](.env.example).
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `GITHUB_APP_ID` | ✅ | — | From GitHub App settings |
+| `GITHUB_PRIVATE_KEY` | ✅ | — | RSA/PKCS#8/EC private key (use `\n` for newlines) |
+| `GITHUB_WEBHOOK_SECRET` | ✅ | — | Webhook secret set in App settings |
+| `GITHUB_WEBHOOK_SECRET_OLD` | ❌ | unset | Second accepted secret, for zero-downtime rotation |
+| `WEBHOOK_MAX_SKEW_SECONDS` | ❌ | `300` | Reject deliveries whose `Date` is further off than this |
+| `ANTHROPIC_API_KEY` | AI review only | unset | Anthropic API key |
+| `OPENAI_API_KEY` | AI review only | unset | OpenAI-compatible key; takes precedence over Anthropic |
+| `OPENAI_BASE_URL` | ❌ | unset | Point at any OpenAI-compatible endpoint (vLLM, Ollama, a gateway) |
+| `DATABASE_URL` | ❌ | `sqlite+aiosqlite:///./hiero_bot.db` | Use an async driver for Postgres (`postgresql+asyncpg://…`) |
+| `HOST` | ❌ | `0.0.0.0` | Bind address |
+| `PORT` | ❌ | `8000` | Bind port |
+| `LOG_LEVEL` | ❌ | `info` | `debug` / `info` / `warn` / `error` |
+| `ENVIRONMENT` | ❌ | `development` | `production` starts the scheduler and warns on unauthenticated dashboards |
+| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | ❌ | unset | HTTP Basic auth for the dashboard and `/api/v1/*`. **Leave both blank and those surfaces are unauthenticated.** |
+| `RATE_LIMIT_ENABLED` | ❌ | `true` | Per-caller token-bucket limiting on `/webhook` and `/api/v1/*` |
+| `RATE_LIMIT_WEBHOOK_PER_MINUTE` | ❌ | `600` | Webhook budget per caller, per process |
+| `RATE_LIMIT_API_PER_MINUTE` | ❌ | `120` | API budget per caller, per process |
+| `RATE_LIMIT_BURST` | ❌ | `0` | `0` = burst equals the per-minute budget |
+| `TRUSTED_PROXY_HOPS` | ❌ | `0` | Proxies in front of the app. `0` ignores `X-Forwarded-For` — clients can forge it |
+
+## Security
+
+Reporting a vulnerability, the threat model behind the webhook and config
+handling, and a hardening checklist for self-hosters are all in
+[SECURITY.md](SECURITY.md). Please report security issues privately rather than
+in a public issue.
 
 ## Ecosystem & standing
 
