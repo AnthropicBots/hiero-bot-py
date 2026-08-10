@@ -1,19 +1,51 @@
 # Hiero Maintainer Bot — `hiero-bot-py`
 
-> A self-hostable, open-source automation platform for open-source maintainers — PR health scoring, reviewer recommendation, contributor progression tracking, and optional AI-assisted review, with a persistent audit trail and REST API. No SaaS lock-in, no vendor hosting your repository data.
+> A production-ready FastAPI GitHub App that automates maintainer workflows across Hiero repositories — with a live dash
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-76%20passing-brightgreen)](tests/)
-[![FastAPI](https://img.shields.io/badge/framework-FastAPI-009688)](https://fastapi.tiangolo.com/)
+### 🤝 Onboarding
+- Detects first-time contributors and posts a welcome message with checklist
+- Validates account age and public repo count before allowing `/assign`
+- Round-robin mentor assignment from the mentors GitHub team
+
+### 🔍 Pull Request Quality Gates
+- DCO sign-off status check
+- GPG signature verification
+- Test file presence detection
+- Linked issue (`Closes #N`) requirement
+- Branch naming pattern enforcement
+- Configurable max file count
+- Auto-labels: `quality: ✅ passed` / `quality: ❌ needs work`
+- Optional AI review via Anthropic (claude-sonnet-4)
+- Reviewer recommendation based on file history
+
+### 📊 PR Health Scoring *(new)*
+Scores every PR 0–100 across six weighted signals:
+
+| Signal | Default Weight |
+|--------|---------------|
+| Has test coverage | 25% |
+| Has linked issue | 15% |
+| Has description ≥50 chars | 15% |
+| DCO signed | 20% |
+| Has approvals | 15% |
+| Diff size < 400 lines | 10% |
+
+Labels: `health: 💚 healthy` / `health: 🔧 needs work`
+
+### 📈 Progression
+- Recommends next issues after each merged PR
+- Celebrates milestones (1st, 5th, 10th, 25th, 50th merged PR)
+- Announces role eligibility (Junior Committer → Committer → Maintainer)
+- `/check-eligibility` command shows full stats breakdown
+
+### 🧹 Issue Management
+- Daily stale scan (via APScheduler cron at 02:00 UTC)
+- Marks issues stale after N days of inactivity
+- Closes stale issues after additional N days
+- Auto-unassigns inactive contributors
+- Label escalation: notify specific teams when label is applied
 
 ---
-
-## The problem
-
-Every healthy open-source project eventually runs into the same bottleneck: a small number of unpaid maintainers doing manual, repetitive triage — checking DCO sign-off, screening first-time contributors, chasing stale issues, deciding who's ready to become a committer, recommending a reviewer who actually knows the file being changed. None of this is written down anywhere; it lives in a maintainer's head until they burn out and it's lost.
-
-The tools that exist to help fall into two camps:
 
 - **Commercial SaaS bots** (Mergify, CodeRabbit, Greptile, etc.) — capable, but closed-source. Your repository data, review history, and contributor metrics live on someone else's servers, behind a subscription that can change price or disappear.
 - **Single-purpose OSS bots** (probot apps, stale-bot, welcome-bot) — free and self-hostable, but each solves one narrow problem with no shared data model, no persistent history, and nothing that helps a project reason about its own contributor pipeline over time.
