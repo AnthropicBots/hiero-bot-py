@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config.loader import ConfigLoader
+from app.config.loader import ConfigInvalid, ConfigLoader
 from app.github.client import GitHubClient
 from app.github.replay_guard import is_replay  # #4
 from app.utils.logger import get_logger
@@ -85,7 +85,15 @@ class WebhookRouter:
         repo = repo_data["name"]
         installation_id = installation_data["id"]
 
-        config = await self._config_loader.load(owner, repo, installation_id)
+        try:
+            config = await self._config_loader.load(owner, repo, installation_id)
+        except ConfigInvalid as exc:
+            # A broken config is the repository's problem, not a delivery
+            # failure. Returning 200 stops GitHub retrying the same delivery
+            # for hours against a file that will not parse until a human edits it.
+            log.error("Skipping %s/%s: %s", owner, repo, exc.detail)
+            return {"ok": True, "skipped": "invalid config"}
+
         if config is None:
             log.debug("No config for %s/%s — skipping", owner, repo)
             return {"ok": True, "skipped": "no config"}
