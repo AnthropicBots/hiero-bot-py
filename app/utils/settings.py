@@ -35,6 +35,19 @@ class Settings(BaseSettings):
     dashboard_username: str | None = None
     dashboard_password: str | None = None
 
+    # Rate limiting (per process, per caller). The webhook budget is generous
+    # because a busy org can legitimately burst deliveries; the API budget is
+    # tighter because it is the surface a stranger can reach.
+    rate_limit_enabled: bool = True
+    rate_limit_webhook_per_minute: int = 600
+    rate_limit_api_per_minute: int = 120
+    rate_limit_burst: int = 0  # 0 = burst equals the per-minute budget
+
+    # Number of proxies in front of this app. Above 0, X-Forwarded-For is
+    # trusted for caller identity; at 0 it is ignored, because a client that
+    # can forge it can hand itself an unlimited number of buckets.
+    trusted_proxy_hops: int = 0
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"

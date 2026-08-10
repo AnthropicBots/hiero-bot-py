@@ -18,6 +18,7 @@ from app.github.webhooks import WebhookRouter
 from app.scheduler.jobs import BotScheduler
 from app.utils.auth import _auth_configured, require_dashboard_auth
 from app.utils.logger import get_logger
+from app.utils.ratelimit import RateLimitMiddleware
 from app.utils.settings import settings
 
 log = get_logger("main")
@@ -66,6 +67,8 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(RateLimitMiddleware)
 
 app.include_router(api_router, dependencies=[Depends(require_dashboard_auth)])
 
