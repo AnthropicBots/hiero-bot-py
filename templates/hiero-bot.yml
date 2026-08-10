@@ -41,10 +41,18 @@ workflows:
     reviewer_recommendation: true     # Suggest reviewers based on file history
 
     ai_review:
-      enabled: false                  # Requires ANTHROPIC_API_KEY
+      enabled: false
+      # auto     — first backend with credentials (openai → anthropic → ollama)
+      # anthropic— ANTHROPIC_API_KEY
+      # openai   — OPENAI_API_KEY and/or OPENAI_BASE_URL (vLLM, LM Studio, …)
+      # ollama   — OLLAMA_BASE_URL; a local open-weight model, so no source
+      #            code leaves your infrastructure
+      provider: auto
       model: "claude-sonnet-4-20250514"
       max_comments: 5                 # 1–20
       focus_areas: [security, logic]  # security | performance | style | logic | tests
+      max_retries: 2                  # transient failures only; 0–5
+      timeout_seconds: 60             # raise this for slow local models
 
     quality_gates:
       require_tests: true

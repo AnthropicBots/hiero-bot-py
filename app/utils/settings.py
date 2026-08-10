@@ -17,10 +17,14 @@ class Settings(BaseSettings):
     github_webhook_secret_old: str | None = None
     webhook_max_skew_seconds: int = 300
 
-    # Anthropic
+    # AI review backends. All optional — AI review is off by default, and each
+    # backend is only built when the repo config selects it.
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    # A local Ollama endpoint, e.g. http://localhost:11434. The one backend
+    # that keeps source code on your own infrastructure.
+    ollama_base_url: str | None = None
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./hiero_bot.db"
