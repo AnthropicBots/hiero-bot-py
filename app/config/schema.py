@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 RoleLevel = Literal["contributor", "junior-committer", "committer", "maintainer"]
 FocusArea = Literal["security", "performance", "style", "logic", "tests"]
+AIProvider = Literal["auto", "anthropic", "openai", "ollama"]
 MentorStrategy = Literal["round-robin", "least-busy", "expertise-match"]
 ReviewerAssignmentStrategy = Literal["round-robin", "random"]
 ReviewerNotifyComment = Literal["off", "mention"]
@@ -44,6 +45,18 @@ class AIReviewConfig(BaseModel):
     model: str = "claude-sonnet-4-20250514"
     max_comments: int = Field(default=5, ge=1, le=20)
     focus_areas: list[FocusArea] = ["security", "logic"]
+
+    # Which model backend answers. "auto" picks the first one the environment
+    # has credentials for; naming one explicitly fails loudly if it is not
+    # configured, rather than quietly reviewing with a different model.
+    provider: AIProvider = "auto"
+
+    # Retries apply to transient backend failures only — a missing API key is
+    # never retried.
+    max_retries: int = Field(default=2, ge=0, le=5)
+
+    # Local open-weight models are slow; give them room.
+    timeout_seconds: int = Field(default=60, ge=5, le=600)
 
 
 class QualityGatesConfig(BaseModel):

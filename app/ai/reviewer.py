@@ -1,15 +1,31 @@
-# app/ai/reviewer.py — Anthropic-powered code review
+# app/ai/reviewer.py — Structured code review over a pluggable model backend
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
 
+from app.ai.backends import (
+    BackendError,
+    BackendUnavailable,
+    CompletionRequest,
+    ReviewBackend,
+    build_backend,
+)
 from app.utils.logger import get_logger
-from app.utils.settings import settings
 
 log = get_logger("ai.reviewer")
+
+
+def _unavailable() -> dict[str, Any]:
+    return {
+        "summary": "_AI review unavailable at this time._",
+        "verdict": "comment",
+        "score": 50,
+        "comments": [],
+    }
 
 SYSTEM_PROMPT = """You are a senior staff engineer doing a rigorous code review for the Hiero open source project. You take this seriously — sloppy or generic reviews waste contributors' time.
 
@@ -37,31 +53,28 @@ Rules:
 - Respond with valid JSON ONLY — no markdown fences, no preamble, no reasoning shown"""
 
 
+MAX_TOKENS = 4096
+
+# Backoff between retries, in seconds. Overridable so tests don't sleep.
+RETRY_BASE_DELAY = 1.0
+
+
 class AIReviewer:
-    def __init__(self) -> None:
-        self._client = None
-        self._client_type = "anthropic"
+    """
+    Turns a pull request into a structured review.
 
-    def _get_client(self):
-        if self._client is None:
-            if settings.openai_api_key:
-                import openai
+    Owns prompt construction, retry policy and response parsing. Which model
+    answers is the backend's business — see `app/ai/backends/`.
+    """
 
-                self._client = openai.AsyncOpenAI(
-                    api_key=settings.openai_api_key,
-                    base_url=settings.openai_base_url,
-                )
-                self._client_type = "openai"
-            elif settings.anthropic_api_key:
-                import anthropic
+    def __init__(self, backend: ReviewBackend | None = None) -> None:
+        self._backend = backend
 
-                self._client = anthropic.AsyncAnthropic(
-                    api_key=settings.anthropic_api_key
-                )
-                self._client_type = "anthropic"
-            else:
-                raise RuntimeError("No AI API key configured")
-        return self._client
+    def _get_backend(self, cfg) -> ReviewBackend:
+        if self._backend is None:
+            self._backend = build_backend(getattr(cfg, "provider", "auto"))
+            log.info("AI review using the %s backend", self._backend.name)
+        return self._backend
 
     async def review(
         self,
@@ -75,44 +88,54 @@ class AIReviewer:
             raise ValueError("AI review is disabled in config")
 
         prompt = self._build_prompt(pr_title, pr_body, diffs, file_contents or [], cfg)
+        request = CompletionRequest(
+            system=SYSTEM_PROMPT,
+            prompt=prompt,
+            model=cfg.model,
+            max_tokens=MAX_TOKENS,
+            timeout_seconds=getattr(cfg, "timeout_seconds", 60),
+        )
+
         try:
-            client = self._get_client()
-
-            client_type = getattr(self, "_client_type", None)
-            if client_type is None:
-                client_type = (
-                    "openai"
-                    if hasattr(client, "chat") and hasattr(client.chat, "completions")
-                    else "anthropic"
-                )
-
-            if client_type == "openai":
-                response = await client.chat.completions.create(
-                    model=cfg.model,
-                    max_tokens=4096,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-                text = response.choices[0].message.content
-            else:
-                response = await client.messages.create(
-                    model=cfg.model,
-                    max_tokens=4096,
-                    system=SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                text = response.content[0].text
-            return self._parse(text)
-        except Exception as exc:
+            text = await self._complete_with_retries(cfg, request)
+        except BackendUnavailable as exc:
+            # Misconfiguration, not a transient failure — retrying a missing
+            # API key just wastes the PR author's time waiting.
+            log.error("AI review backend unavailable: %s", exc)
+            return _unavailable()
+        except BackendError as exc:
             log.error("AI review failed: %s", exc)
-            return {
-                "summary": "_AI review unavailable at this time._",
-                "verdict": "comment",
-                "score": 50,
-                "comments": [],
-            }
+            return _unavailable()
+        except Exception:
+            log.exception("Unexpected AI review failure")
+            return _unavailable()
+
+        return self._parse(text)
+
+    async def _complete_with_retries(self, cfg, request: CompletionRequest) -> str:
+        backend = self._get_backend(cfg)
+        attempts = getattr(cfg, "max_retries", 2) + 1
+        last_error: BackendError | None = None
+
+        for attempt in range(attempts):
+            try:
+                return await backend.complete(request)
+            except BackendUnavailable:
+                raise  # Retrying a missing API key never helps.
+            except BackendError as exc:
+                last_error = exc
+                if attempt + 1 < attempts:
+                    delay = RETRY_BASE_DELAY * (2**attempt)
+                    log.warning(
+                        "AI review attempt %d/%d failed (%s) — retrying in %.1fs",
+                        attempt + 1,
+                        attempts,
+                        exc,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+
+        raise last_error or BackendError("AI review produced no response")
 
     @staticmethod
     def _build_prompt(
@@ -198,3 +221,7 @@ Respond with JSON only:
                 "score": 50,
                 "comments": [],
             }
+
+    async def close(self) -> None:
+        if self._backend is not None:
+            await self._backend.close()
