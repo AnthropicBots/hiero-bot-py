@@ -155,3 +155,180 @@ async def test_list_issue_comments_paginates():
     assert mock_get.await_count == 2
 
     await client.close()
+
+
+# ── Pagination ────────────────────────────────────────────────
+
+
+def page(size, start=0):
+    return [{"number": start + i} for i in range(size)]
+
+
+@pytest.mark.asyncio
+async def test_paginate_stops_on_short_page():
+    client = GitHubClient()
+
+    with patch.object(
+        client, "get", new=AsyncMock(side_effect=[page(100), page(7, 100)])
+    ) as mock_get:
+        items = await client.paginate("/repos/hiero/sdk-js/issues", 1)
+
+    assert len(items) == 107
+    assert mock_get.await_count == 2
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paginate_single_short_page_makes_one_request():
+    client = GitHubClient()
+
+    with patch.object(client, "get", new=AsyncMock(return_value=page(3))) as mock_get:
+        items = await client.paginate("/repos/hiero/sdk-js/issues", 1)
+
+    assert len(items) == 3
+    assert mock_get.await_count == 1
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paginate_empty_first_page():
+    client = GitHubClient()
+
+    with patch.object(client, "get", new=AsyncMock(return_value=[])) as mock_get:
+        items = await client.paginate("/repos/hiero/sdk-js/issues", 1)
+
+    assert items == []
+    assert mock_get.await_count == 1
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paginate_respects_max_pages_cap():
+    client = GitHubClient()
+
+    with patch.object(client, "get", new=AsyncMock(return_value=page(100))) as mock_get:
+        items = await client.paginate("/repos/hiero/sdk-js/issues", 1, max_pages=3)
+
+    assert len(items) == 300
+    assert mock_get.await_count == 3
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paginate_preserves_caller_params():
+    client = GitHubClient()
+
+    with patch.object(client, "get", new=AsyncMock(return_value=page(2))) as mock_get:
+        await client.paginate(
+            "/repos/hiero/sdk-js/issues", 9, params={"state": "open"}
+        )
+
+    mock_get.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/issues",
+        9,
+        params={"state": "open", "per_page": 100, "page": 1},
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paginate_extracts_wrapped_collection():
+    client = GitHubClient()
+
+    responses = [
+        {"total_count": 101, "repositories": page(100)},
+        {"total_count": 101, "repositories": page(1, 100)},
+    ]
+
+    with patch.object(client, "get", new=AsyncMock(side_effect=responses)):
+        repos = await client.paginate(
+            "/installation/repositories", 5, extract="repositories"
+        )
+
+    assert len(repos) == 101
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paginate_breaks_on_unexpected_payload():
+    client = GitHubClient()
+
+    with patch.object(client, "get", new=AsyncMock(return_value={"message": "nope"})):
+        items = await client.paginate("/repos/hiero/sdk-js/issues", 1)
+
+    assert items == []
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_issues_walks_every_page():
+    """Regression for #46 — repos with >100 open issues got partial stale scans."""
+    client = GitHubClient()
+
+    with patch.object(
+        client, "get", new=AsyncMock(side_effect=[page(100), page(100, 100), page(5, 200)])
+    ) as mock_get:
+        issues = await client.list_issues(
+            "hiero", "sdk-js", 42, state="open", sort="updated"
+        )
+
+    assert len(issues) == 205
+    assert mock_get.await_count == 3
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/issues",
+        42,
+        params={"state": "open", "sort": "updated", "per_page": 100, "page": 3},
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_installation_repos_unwraps_and_paginates():
+    client = GitHubClient()
+
+    responses = [
+        {"repositories": [{"full_name": f"hiero/repo-{i}"} for i in range(100)]},
+        {"repositories": [{"full_name": "hiero/last"}]},
+    ]
+
+    with patch.object(client, "get", new=AsyncMock(side_effect=responses)):
+        repos = await client.list_installation_repos(7)
+
+    assert len(repos) == 101
+    assert repos[-1]["full_name"] == "hiero/last"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_installations_paginates_with_app_auth():
+    client = GitHubClient()
+
+    first = Mock()
+    first.raise_for_status = Mock()
+    first.json = Mock(return_value=[{"id": i} for i in range(100)])
+
+    second = Mock()
+    second.raise_for_status = Mock()
+    second.json = Mock(return_value=[{"id": 100}])
+
+    with (
+        patch.object(client, "_make_jwt", return_value="fake_jwt"),
+        patch.object(
+            client._http, "get", new=AsyncMock(side_effect=[first, second])
+        ) as mock_get,
+    ):
+        installations = await client.list_installations()
+
+    assert len(installations) == 101
+    assert mock_get.await_count == 2
+
+    await client.close()
