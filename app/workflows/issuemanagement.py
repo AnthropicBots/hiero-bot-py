@@ -55,21 +55,23 @@ class IssueManagementWorkflow:
             )
             is_stale = cfg.stale_label in labels
 
+            days_inactive = (now - updated).days
+
             # Auto-unassign
             assignees = [a["login"] for a in (issue.get("assignees") or []) if a]
             if assignees and updated < unassign_cutoff:
-                await self._unassign_inactive(ctx, issue, assignees)
+                await self._unassign_inactive(ctx, issue, assignees, days_inactive)
                 counts["unassigned"] += len(assignees)
 
             # Close stale
             if is_stale and updated < close_cutoff:
-                await self._close_stale(ctx, issue)
+                await self._close_stale(ctx, issue, days_inactive)
                 counts["closed"] += 1
                 continue
 
             # Mark stale
             if not is_stale and updated < stale_cutoff:
-                await self._mark_stale(ctx, issue, cfg.stale_label)
+                await self._mark_stale(ctx, issue, cfg.stale_label, days_inactive)
                 counts["stale_marked"] += 1
 
         await db.commit()
@@ -112,7 +114,7 @@ class IssueManagementWorkflow:
 
     # ── Private helpers ───────────────────────────────────────
 
-    async def _mark_stale(self, ctx: dict, issue: dict, stale_label: str) -> None:
+    async def _mark_stale(self, ctx: dict, issue: dict, stale_label: str, days_inactive: int = 0) -> None:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
 
@@ -125,13 +127,13 @@ class IssueManagementWorkflow:
             inst,
         )
 
-        await self._log_stale(ctx, number, "marked_stale")
+        await self._log_stale(ctx, number, "marked_stale", days_inactive)
         await audit.record(
             ctx["db"], action="issue.stale_marked", owner=owner, repo=repo,
             target_number=number, reason="No activity within stale period",
         )
 
-    async def _close_stale(self, ctx: dict, issue: dict) -> None:
+    async def _close_stale(self, ctx: dict, issue: dict, days_inactive: int = 0) -> None:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
 
@@ -142,13 +144,13 @@ class IssueManagementWorkflow:
             inst,
         )
         await self._gh.close_issue(owner, repo, number, inst)
-        await self._log_stale(ctx, number, "closed")
+        await self._log_stale(ctx, number, "closed", days_inactive)
         await audit.record(
             ctx["db"], action="issue.closed", owner=owner, repo=repo,
             target_number=number, reason="Closed after stale period expired",
         )
 
-    async def _unassign_inactive(self, ctx: dict, issue: dict, assignees: list[str]) -> None:
+    async def _unassign_inactive(self, ctx: dict, issue: dict, assignees: list[str], days_inactive: int = 0) -> None:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
         mentions = " ".join(f"@{a}" for a in assignees)
@@ -160,7 +162,7 @@ class IssueManagementWorkflow:
             f"Re-assign yourself with `/assign` if you're still working on this!",
             inst,
         )
-        await self._log_stale(ctx, number, "unassigned")
+        await self._log_stale(ctx, number, "unassigned", days_inactive)
         for login in assignees:
             await audit.record(
                 ctx["db"], action="issue.unassigned", owner=owner, repo=repo,
@@ -168,20 +170,7 @@ class IssueManagementWorkflow:
                 reason="Auto-unassigned due to inactivity",
             )
 
-    async def _log_stale(self, ctx: dict, issue_number: int, action: str) -> None:
-        days_inactive = 0
-        try:
-            issue_data = await self._gh.get(
-                f"/repos/{ctx['owner']}/{ctx['repo']}/issues/{issue_number}",
-                ctx["installation_id"],
-            )
-            updated = datetime.fromisoformat(
-                issue_data["updated_at"].replace("Z", "+00:00")
-            )
-            days_inactive = (datetime.now(timezone.utc) - updated).days
-        except Exception:
-            pass
-
+    async def _log_stale(self, ctx: dict, issue_number: int, action: str, days_inactive: int = 0) -> None:
         record = StaleActionLog(
             owner=ctx["owner"],
             repo=ctx["repo"],
