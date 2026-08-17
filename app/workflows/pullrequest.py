@@ -27,7 +27,7 @@ class PullRequestWorkflow:
         self._gh = gh
         self._ai = AIReviewer()
 
-    async def handle_pr_opened(self, ctx: dict, payload: dict , action:str) -> None:
+    async def handle_pr_opened(self, ctx: dict, payload: dict, action: str = "opened") -> None:
         cfg = ctx["config"].workflows.pull_request
         if not cfg.enabled:
             return

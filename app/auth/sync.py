@@ -90,8 +90,8 @@ async def get_user_authorized_accounts(
         .join(AccountUser, Account.id == AccountUser.account_id)
         .where(AccountUser.user_id == user.id, AccountUser.authorized == True)
     )
-    res = await db.execute(stmt)
-    accounts = res.scalars().all()
+    db_res = await db.execute(stmt)
+    accounts = db_res.scalars().all()
 
     if not accounts:
         _SYNC_CACHE[user.id] = (now, [])
