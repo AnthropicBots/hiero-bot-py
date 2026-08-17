@@ -5,9 +5,19 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.auth.dependencies import get_current_user, get_current_user_optional
 from app.db.database import Base, get_db
-from app.db.models import AuditLog, ContributorSnapshot, PRHealthScore
+from app.db.models import (
+    Account,
+    AccountRepo,
+    AccountUser,
+    AuditLog,
+    ContributorSnapshot,
+    PRHealthScore,
+    User,
+)
 from app.main import app
+from app.utils.access import get_authorized_owners
 
 
 @pytest_asyncio.fixture
@@ -17,13 +27,31 @@ async def test_db():
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
+        # Seed test user and accounts
+        user = User(id=1, github_user_id=1001, github_login="test_user")
+        session.add(user)
+        acc_hiero = Account(id=1, github_installation_id=111, org_login="hiero", plan_tier="free")
+        acc_other = Account(id=2, github_installation_id=222, org_login="other", plan_tier="free")
+        session.add_all([acc_hiero, acc_other])
+        await session.commit()
+        session.add_all([
+            AccountUser(account_id=1, user_id=1, authorized=True),
+            AccountUser(account_id=2, user_id=1, authorized=True),
+            AccountRepo(account_id=1, repo_name="sdk"),
+            AccountRepo(account_id=2, repo_name="other-repo"),
+        ])
+        await session.commit()
         yield session
     await engine.dispose()
 
 
 @pytest_asyncio.fixture
 async def client(test_db):
+    test_user = User(id=1, github_user_id=1001, github_login="test_user")
     app.dependency_overrides[get_db] = lambda: test_db
+    app.dependency_overrides[get_current_user] = lambda: test_user
+    app.dependency_overrides[get_current_user_optional] = lambda: test_user
+    app.dependency_overrides[get_authorized_owners] = lambda: {"hiero", "other"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
     app.dependency_overrides.clear()

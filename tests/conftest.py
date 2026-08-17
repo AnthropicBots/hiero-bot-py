@@ -6,12 +6,14 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.auth.sync import clear_sync_cache
 from app.config.schema import RepoConfig
 from app.db.database import Base
 
 
 @pytest_asyncio.fixture
 async def db():
+    clear_sync_cache()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -19,6 +21,7 @@ async def db():
     async with factory() as session:
         yield session
     await engine.dispose()
+    clear_sync_cache()
 
 
 @pytest.fixture
