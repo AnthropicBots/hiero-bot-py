@@ -6,13 +6,21 @@ from app.utils.settings import Settings
 
 def test_production_settings_validation():
     # Dev settings should pass
-    dev_settings = Settings(environment="development")
+    dev_settings = Settings(_env_file=None, environment="development")
     assert dev_settings.is_production is False
+
+    # Production without GITHUB_APP_ID should fail
+    with pytest.raises(ValueError) as exc_info:
+        Settings(_env_file=None, environment="production")
+    assert "GITHUB_APP_ID" in str(exc_info.value)
 
     # Production with dev secrets should fail validation
     with pytest.raises(ValueError) as exc_info:
         Settings(
+            _env_file=None,
             environment="production",
+            github_app_id=123456,
+            github_private_key="test-private-key",
             session_secret_key="dev-secret-key-32-bytes-minimum-length-change-in-prod",
             token_encryption_key="dev-token-encryption-key-32b-change-in-prod=",
             github_webhook_secret="sec",
