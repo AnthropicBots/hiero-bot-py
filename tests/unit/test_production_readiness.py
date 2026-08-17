@@ -19,7 +19,7 @@ def test_production_settings_validation():
         Settings(
             _env_file=None,
             environment="production",
-            github_app_id=123456,
+            github_app_id="123456",
             github_private_key="test-private-key",
             session_secret_key="dev-secret-key-32-bytes-minimum-length-change-in-prod",
             token_encryption_key="dev-token-encryption-key-32b-change-in-prod=",
