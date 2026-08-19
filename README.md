@@ -29,7 +29,8 @@ Nobody has a self-hosted, open-source system that treats maintainer-ops as a who
 | **Onboarding** | Detects first-time contributors, posts a welcome checklist, validates account age / public-repo count before `/assign`, round-robins mentor assignment |
 | **PR quality gates** | DCO sign-off, GPG signature, test-file presence, linked-issue requirement, branch naming pattern, max file count — auto-labelled `quality: ✅` / `❌` |
 | **PR health scoring** | Every PR scored 0–100 across 6 configurable, weighted signals (tests, linked issue, description, DCO, approvals, diff size) |
-| **Reviewer recommendation** | Suggests reviewers based on recent file-history overlap, logged with a reason and confidence score |
+| **Reviewer assignment** | Automatically requests reviewers on newly opened, non-draft PRs using a repo-local `.github/reviewers.yml` availability file and configurable `round-robin` or `random` selection |
+| **Reviewer recommendation** | Suggests reviewers based on recent file-history overlap, logged with a reason and confidence score; posts a comment-only recommendation rather than requesting a review |
 | **AI-assisted review** *(optional)* | Structured review (summary, verdict, line comments, severity) via the Anthropic SDK — disabled by default, never required |
 | **Contributor progression** | Tracks merged PRs, reviews given, months active; computes eligibility for `junior-committer → committer → maintainer`; celebrates merge milestones (1st, 5th, 10th, 25th, 50th) |
 | **Issue management** | Daily stale scan (cron), auto-unassign on inactivity, label-based escalation to specific teams |
