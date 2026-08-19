@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import re
 
+from sqlalchemy import select
+
 from app.ai.reviewer import AIReviewer
 from app.db.models import ReviewerRecommendation
 from app.github.client import GitHubClient
@@ -418,20 +420,36 @@ class PullRequestWorkflow:
             best = top[0][1]
 
             for login, hits in top:
-                ctx["db"].add(
-                    ReviewerRecommendation(
-                        owner=owner,
-                        repo=repo,
-                        pr_number=pr_number,
-                        recommended_reviewer=login,
-                        reason=(
-                            f"{hits} recent commit(s) in "
-                            f"{', '.join(sorted(directories))}"
-                        ),
-                        score=round(hits / best, 3),
-                        was_assigned=False,
+                reason = (
+                    f"{hits} recent commit(s) in "
+                    f"{', '.join(sorted(directories))}"
+                )
+                score = round(hits / best, 3)
+
+                existing = await ctx["db"].scalar(
+                    select(ReviewerRecommendation).where(
+                        ReviewerRecommendation.owner == owner,
+                        ReviewerRecommendation.repo == repo,
+                        ReviewerRecommendation.pr_number == pr_number,
+                        ReviewerRecommendation.recommended_reviewer == login,
                     )
                 )
+
+                if existing is None:
+                    ctx["db"].add(
+                        ReviewerRecommendation(
+                            owner=owner,
+                            repo=repo,
+                            pr_number=pr_number,
+                            recommended_reviewer=login,
+                            reason=reason,
+                            score=score,
+                            was_assigned=False,
+                        )
+                    )
+                else:
+                    existing.reason = reason
+                    existing.score = score
 
             names = ", ".join(f"@{login}" for login, _ in top)
             await self._gh.post_comment(
@@ -475,13 +493,17 @@ def _touched_directories(files: list[dict]) -> list[str]:
         directory = filename.rsplit("/", 1)[0]
         counts[directory] = counts.get(directory, 0) + 1
 
-    ranked = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    ranked = sorted(
+        counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
     return [directory for directory, _ in ranked[:MAX_PATHS_QUERIED]]
 
 
 def _score_candidates(histories: list, exclude: str) -> dict[str, int]:
-    """Count commits per author across the fetched histories, skipping bots."""
+    """Count unique commits per author across the fetched histories, skipping bots."""
     scores: dict[str, int] = {}
+    seen_shas: set[str] = set()
 
     for history in histories:
         if isinstance(history, BaseException):
@@ -489,6 +511,12 @@ def _score_candidates(histories: list, exclude: str) -> dict[str, int]:
             continue
 
         for commit in history or []:
+            sha = commit.get("sha")
+            if sha:
+                if sha in seen_shas:
+                    continue
+                seen_shas.add(sha)
+
             login = ((commit.get("author") or {}).get("login") or "").strip()
             if not login or login == exclude:
                 continue

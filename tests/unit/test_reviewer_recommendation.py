@@ -46,6 +46,25 @@ def test_directories_ranked_by_change_count():
     assert _touched_directories(changed)[0] == "app/github"
 
 
+def test_directories_use_deterministic_tie_breaking():
+    changed = files(
+        "pkg/zeta/mod.py",
+        "pkg/alpha/mod.py",
+        "pkg/gamma/mod.py",
+        "pkg/beta/mod.py",
+        "pkg/epsilon/mod.py",
+        "pkg/delta/mod.py",
+    )
+
+    assert _touched_directories(changed) == [
+        "pkg/alpha",
+        "pkg/beta",
+        "pkg/delta",
+        "pkg/epsilon",
+        "pkg/gamma",
+    ]
+
+
 def test_root_level_files_are_dropped():
     assert _touched_directories(files("README.md", "setup.py")) == []
 
@@ -65,6 +84,23 @@ def test_missing_filename_is_tolerated():
 def test_scores_count_commits_per_author():
     scores = _score_candidates([commits("bob", "bob", "carol")], exclude="alice")
     assert scores == {"bob": 2, "carol": 1}
+
+
+def test_duplicate_commits_across_histories_are_counted_once():
+    duplicate = {
+        "sha": "abc123",
+        "author": {"login": "bob"},
+    }
+
+    scores = _score_candidates(
+        [
+            [duplicate],
+            [duplicate],
+        ],
+        exclude="alice",
+    )
+
+    assert scores == {"bob": 1}
 
 
 def test_pr_author_is_excluded():
@@ -113,6 +149,33 @@ async def test_one_request_per_directory_not_per_pr(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
+async def test_recommendation_has_hard_six_request_api_ceiling(mock_gh, ctx):
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=files(
+            "pkg0/mod.py",
+            "pkg1/mod.py",
+            "pkg2/mod.py",
+            "pkg3/mod.py",
+            "pkg4/mod.py",
+            "pkg5/mod.py",
+            "pkg6/mod.py",
+        )
+    )
+    mock_gh.list_commits = AsyncMock(return_value=commits("bob"))
+
+    wf = PullRequestWorkflow(mock_gh)
+    await wf._recommend_reviewers(ctx, pr())
+
+    assert mock_gh.list_pr_files.await_count == 1
+    assert mock_gh.list_commits.await_count == MAX_PATHS_QUERIED
+    assert (
+        mock_gh.list_pr_files.await_count
+        + mock_gh.list_commits.await_count
+        == MAX_PATHS_QUERIED + 1
+    )
+
+
+@pytest.mark.asyncio
 async def test_suggests_the_most_active_committers(mock_gh, ctx):
     mock_gh.list_pr_files = AsyncMock(return_value=files("app/github/client.py"))
     mock_gh.list_commits = AsyncMock(
@@ -144,6 +207,75 @@ async def test_recommendations_are_persisted(mock_gh, ctx, db):
     top = next(row for row in rows if row.recommended_reviewer == "bob")
     assert top.score == 1.0
     assert "app/github" in top.reason
+
+
+@pytest.mark.asyncio
+async def test_recommendations_are_updated_on_repeat(
+    mock_gh,
+    ctx,
+    db,
+):
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=files("app/github/client.py")
+    )
+    mock_gh.list_commits = AsyncMock(
+        return_value=commits("bob", "bob", "carol")
+    )
+
+    wf = PullRequestWorkflow(mock_gh)
+
+    await wf._recommend_reviewers(ctx, pr(number=7))
+    await db.commit()
+
+    first_rows = (
+        await db.execute(
+            select(ReviewerRecommendation).where(
+                ReviewerRecommendation.pr_number == 7
+            )
+        )
+    ).scalars().all()
+
+    first_bob = next(
+        row for row in first_rows
+        if row.recommended_reviewer == "bob"
+    )
+    first_carol = next(
+        row for row in first_rows
+        if row.recommended_reviewer == "carol"
+    )
+
+    assert len(first_rows) == 2
+    assert first_bob.score == 1.0
+    assert first_carol.score == 0.5
+
+    mock_gh.list_commits = AsyncMock(
+        return_value=commits("bob", "carol", "carol")
+    )
+
+    await wf._recommend_reviewers(ctx, pr(number=7))
+    await db.commit()
+
+    rows = (
+        await db.execute(
+            select(ReviewerRecommendation).where(
+                ReviewerRecommendation.pr_number == 7
+            )
+        )
+    ).scalars().all()
+
+    assert len(rows) == 2
+
+    bob = next(
+        row for row in rows
+        if row.recommended_reviewer == "bob"
+    )
+    carol = next(
+        row for row in rows
+        if row.recommended_reviewer == "carol"
+    )
+
+    assert bob.score == 0.5
+    assert carol.score == 1.0
 
 
 @pytest.mark.asyncio
