@@ -22,8 +22,22 @@ workflows:
   #  Onboarding 
   onboarding:
     enabled: true
+
+    # true  → skip bots GitHub reports as `type: Bot` *and* logins that match
+    #         known automation accounts (dependabot[bot], renovate, ...)
+    # false → skip only accounts GitHub itself reports as bots
     check_human_contributors: true
+
+    # Post the welcome comment only for genuine first-time contributors.
+    # Set false to greet every issue opener.
+    welcome_first_time_only: true
+
+    # Gate /assign on the contributor appearing in the CLA signature file.
+    # Fails closed: a missing or unreadable file blocks assignment.
     require_signed_cla: false
+    cla_signatures_file: ".github/cla-signatures.json"
+    # cla_document_url: "https://example.org/cla"
+
     minimum_account_age_days: 0       # 0 = no minimum
     minimum_public_contributions: 0   # 0 = no minimum
     auto_assign_mentor: false
