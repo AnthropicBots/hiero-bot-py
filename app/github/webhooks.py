@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time  # #5
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException, Request
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.loader import ConfigLoader
+from app.db.models import Account, AccountRepo
 from app.github.client import GitHubClient
 from app.github.replay_guard import is_replay  # #4
 from app.utils.logger import get_logger
@@ -44,7 +47,7 @@ class WebhookRouter:
 
     async def handle(self, request: Request, db: AsyncSession) -> dict:
         # Signature verification (supports current & rotated secret)
-        if settings.github_webhook_secret or settings.github_webhook_secret_old:
+        if settings.github_webhook_secret or settings.github_webhook_secret_old or settings.is_production:
             self._verify_signature(request, await request.body())
 
         # #4 — replay protection: reject deliveries we've already processed
@@ -75,6 +78,12 @@ class WebhookRouter:
 
         event = request.headers.get("X-GitHub-Event", "")
         payload: dict[str, Any] = await request.json()
+
+        # Handle installation lifecycle events (which do not require repository payload)
+        if event == "installation":
+            return await self._handle_installation(payload, db)
+        elif event == "installation_repositories":
+            return await self._handle_installation_repositories(payload, db)
 
         repo_data = payload.get("repository")
         installation_data = payload.get("installation")
@@ -119,12 +128,13 @@ class WebhookRouter:
                         await self._handle_slash_command(body, payload, ctx)
 
             elif event == "push":
-                # Invalidate config cache if bot config changed
+                # Invalidate config cache if bot config added/modified/removed
                 commits = payload.get("commits", [])
-                if any(
-                    ".github/hiero-bot.yml" in (c.get("modified") or [])
+                config_changed = any(
+                    ".github/hiero-bot.yml" in (c.get("modified", []) + c.get("added", []) + c.get("removed", []))
                     for c in commits
-                ):
+                )
+                if config_changed:
                     self._config_loader.invalidate(owner, repo)
                     log.info("Config cache invalidated for %s/%s", owner, repo)
 
@@ -161,7 +171,7 @@ class WebhookRouter:
             return
 
         if action in ("opened", "synchronize", "reopened"):
-            await wf_pr.handle_pr_opened(ctx, payload, action) 
+            await wf_pr.handle_pr_opened(ctx, payload, action)
 
             if action == "opened":
                 await wf_reviewer.handle_pr_opened(ctx, payload)
@@ -287,3 +297,113 @@ class WebhookRouter:
                 return
 
         raise HTTPException(status_code=401, detail="Invalid signature")
+
+    # ── Installation Webhook Handlers ──────────────────────────
+
+    async def _handle_installation(self, payload: dict, db: AsyncSession) -> dict:
+        action = payload.get("action", "")
+        inst = payload.get("installation", {})
+        inst_id = inst.get("id")
+
+        if not inst_id:
+            return {"ok": True, "skipped": "no installation id"}
+
+        if action in ("created", "unsuspended"):
+            account_info = inst.get("account", {})
+            org_login = account_info.get("login", "")
+            github_account_id = account_info.get("id")
+            account_type = account_info.get("type", "Organization")
+
+            stmt = select(Account).where(Account.github_installation_id == inst_id)
+            res = await db.execute(stmt)
+            acc = res.scalar_one_or_none()
+
+            if acc:
+                acc.org_login = org_login
+                acc.github_account_id = github_account_id
+                acc.account_type = account_type
+                acc.suspended_at = None
+            else:
+                acc = Account(
+                    github_installation_id=inst_id,
+                    github_account_id=github_account_id,
+                    org_login=org_login,
+                    account_type=account_type,
+                    plan_tier="free",
+                )
+                db.add(acc)
+
+            await db.commit()
+            await db.refresh(acc)
+
+            # Sync repos if provided
+            repos = payload.get("repositories", [])
+            for r in repos:
+                repo_name = r.get("name")
+                if repo_name:
+                    repo_stmt = select(AccountRepo).where(
+                        AccountRepo.account_id == acc.id,
+                        AccountRepo.repo_name == repo_name,
+                    )
+                    repo_res = await db.execute(repo_stmt)
+                    if not repo_res.scalar_one_or_none():
+                        db.add(AccountRepo(account_id=acc.id, repo_name=repo_name))
+            await db.commit()
+            log.info("Installation %s (%s) upserted with %d repos", inst_id, org_login, len(repos))
+
+        elif action == "deleted" or action == "suspend":
+            stmt = select(Account).where(Account.github_installation_id == inst_id)
+            res = await db.execute(stmt)
+            acc = res.scalar_one_or_none()
+            if acc:
+                acc.suspended_at = datetime.now(timezone.utc)
+                await db.commit()
+                log.info("Installation %s suspended/deleted", inst_id)
+
+        return {"ok": True, "action": action}
+
+    async def _handle_installation_repositories(self, payload: dict, db: AsyncSession) -> dict:
+        action = payload.get("action", "")
+        inst_id = payload.get("installation", {}).get("id")
+
+        if not inst_id:
+            return {"ok": True, "skipped": "no installation id"}
+
+        stmt = select(Account).where(Account.github_installation_id == inst_id)
+        res = await db.execute(stmt)
+        acc = res.scalar_one_or_none()
+
+        if not acc:
+            log.warning("Installation %s not found for repository event", inst_id)
+            return {"ok": True, "skipped": "account not found"}
+
+        if action == "added":
+            repos_added = payload.get("repositories_added", [])
+            for r in repos_added:
+                repo_name = r.get("name")
+                if repo_name:
+                    repo_stmt = select(AccountRepo).where(
+                        AccountRepo.account_id == acc.id,
+                        AccountRepo.repo_name == repo_name,
+                    )
+                    repo_res = await db.execute(repo_stmt)
+                    if not repo_res.scalar_one_or_none():
+                        db.add(AccountRepo(account_id=acc.id, repo_name=repo_name))
+            await db.commit()
+            log.info("Added %d repos to installation %s", len(repos_added), inst_id)
+
+        elif action == "removed":
+            repos_removed = payload.get("repositories_removed", [])
+            for r in repos_removed:
+                repo_name = r.get("name")
+                if repo_name:
+                    await db.execute(
+                        delete(AccountRepo).where(
+                            AccountRepo.account_id == acc.id,
+                            AccountRepo.repo_name == repo_name,
+                        )
+                    )
+            await db.commit()
+            log.info("Removed %d repos from installation %s", len(repos_removed), inst_id)
+
+        return {"ok": True, "action": action}

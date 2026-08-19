@@ -38,7 +38,7 @@ class PullRequestWorkflow:
         self._gh = gh
         self._ai = AIReviewer()
 
-    async def handle_pr_opened(self, ctx: dict, payload: dict , action:str) -> None:
+    async def handle_pr_opened(self, ctx: dict, payload: dict, action: str = "opened") -> None:
         cfg = ctx["config"].workflows.pull_request
         if not cfg.enabled:
             return
@@ -125,6 +125,13 @@ class PullRequestWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         pr_number = pr["number"]
         checks: list[QualityCheck] = []
+        _cached_files: list[dict] | None = None
+
+        async def get_files() -> list[dict]:
+            nonlocal _cached_files
+            if _cached_files is None:
+                _cached_files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
+            return _cached_files
 
         # Linked issue
         if gates.require_linked_issue:
@@ -146,7 +153,7 @@ class PullRequestWorkflow:
 
         # Tests
         if gates.require_tests:
-            files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
+            files = await get_files()
             test_pats = [
                 re.compile(p)
                 for p in [
@@ -241,7 +248,7 @@ class PullRequestWorkflow:
 
         # Changelog
         if gates.require_changelog_entry:
-            files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
+            files = await get_files()
             has_cl = any(
                 re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
                 for f in files

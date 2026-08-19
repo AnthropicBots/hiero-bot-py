@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,9 +36,38 @@ class Settings(BaseSettings):
     dashboard_username: str | None = None
     dashboard_password: str | None = None
 
+    # GitHub OAuth & Session Security
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    session_secret_key: str = "dev-secret-key-32-bytes-minimum-length-change-in-prod"
+    token_encryption_key: str = "dev-token-encryption-key-32b-change-in-prod="
+    legacy_basic_auth_enabled: bool = True
+
+    cors_origins: list[str] = ["*"]
+
+    # Stripe Billing
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
 
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> Settings:
+        if self.is_production:
+            if not self.github_app_id:
+                raise ValueError("GITHUB_APP_ID must be configured in production.")
+            if not self.github_private_key:
+                raise ValueError("GITHUB_PRIVATE_KEY must be configured in production.")
+            if "dev-secret-key" in self.session_secret_key or len(self.session_secret_key) < 32:
+                raise ValueError("SESSION_SECRET_KEY must be set to a secure key (min 32 chars) in production.")
+            if "dev-token-encryption-key" in self.token_encryption_key or len(self.token_encryption_key) < 32:
+                raise ValueError("TOKEN_ENCRYPTION_KEY must be set to a secure 32-byte key in production.")
+            if not self.github_webhook_secret:
+                raise ValueError("GITHUB_WEBHOOK_SECRET must be set in production.")
+        return self
+
 
 settings = Settings()
+
