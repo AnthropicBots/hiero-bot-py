@@ -462,5 +462,30 @@ class GitHubClient:
         except Exception as exc:
             log.warning("Inline comment failed (path=%s line=%d): %s", path, line, exc)
 
+    async def list_commits(
+        self,
+        owner: str,
+        repo: str,
+        installation_id: int,
+        *,
+        path: str | None = None,
+        per_page: int = 30,
+    ) -> list[dict]:
+        """
+        Recent commits on the default branch, optionally scoped to one path.
+
+        Scoping by path is what makes reviewer recommendation cheap: GitHub does
+        the history walk server-side and returns only the commits that touched
+        that directory, so one request answers "who has worked here lately".
+        """
+        params: dict[str, Any] = {"per_page": per_page}
+        if path:
+            params["path"] = path
+
+        result = await self.get(
+            f"/repos/{owner}/{repo}/commits", installation_id, params=params
+        )
+        return result if isinstance(result, list) else []
+
     async def close(self) -> None:
         await self._http.aclose()
