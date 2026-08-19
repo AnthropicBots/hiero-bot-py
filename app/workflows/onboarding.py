@@ -240,10 +240,10 @@ class OnboardingWorkflow:
                 },
             )
         except Exception as exc:
-            # Unknown history: fall back to the association signal, which already
-            # told us they are not an established contributor.
+            # If contributor history cannot be verified, do not claim that this
+            # is a first-time contributor.
             log.warning("Could not read issue history for @%s: %s", login, exc)
-            return True
+            return False
 
         others = [
             item
