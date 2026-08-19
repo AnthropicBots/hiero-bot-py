@@ -99,11 +99,11 @@ async def test_welcomes_everyone_when_first_time_only_disabled(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
-async def test_welcomes_when_issue_history_lookup_fails(mock_gh, ctx):
+async def test_skips_when_issue_history_lookup_fails(mock_gh, ctx):
     mock_gh.get = AsyncMock(side_effect=RuntimeError("api down"))
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_new_contributor(ctx, make_payload())
-    mock_gh.post_comment.assert_awaited_once()
+    mock_gh.post_comment.assert_not_awaited()
 
 
 # ── Bot detection (#42: check_human_contributors) ─────────────
@@ -275,6 +275,20 @@ async def test_cla_gate_fails_closed_when_file_missing(mock_gh, ctx):
     ctx["config"].workflows.onboarding.require_signed_cla = True
     mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})
     mock_gh.get_file_content = AsyncMock(return_value=None)
+
+    wf = OnboardingWorkflow(mock_gh)
+    await wf.handle_self_assign(ctx, make_payload())
+
+    mock_gh.add_assignees.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cla_gate_fails_closed_when_file_lookup_fails(mock_gh, ctx):
+    ctx["config"].workflows.onboarding.require_signed_cla = True
+    mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})
+    mock_gh.get_file_content = AsyncMock(
+        side_effect=RuntimeError("GitHub API down")
+    )
 
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload())
