@@ -12,7 +12,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config.loader import ConfigLoader
+from app.config.loader import ConfigInvalid, ConfigLoader
 from app.db.models import Account, AccountRepo
 from app.github.client import GitHubClient
 from app.github.replay_guard import is_replay  # #4
@@ -94,7 +94,32 @@ class WebhookRouter:
         repo = repo_data["name"]
         installation_id = installation_data["id"]
 
-        config = await self._config_loader.load(owner, repo, installation_id)
+        # Invalidate config cache before loading so config changes are
+        # discovered even when a negative-cache entry exists.
+        if event == "push":
+            commits = payload.get("commits", [])
+            config_changed = any(
+                ".github/hiero-bot.yml"
+                in (
+                    commit.get("modified", [])
+                    + commit.get("added", [])
+                    + commit.get("removed", [])
+                )
+                for commit in commits
+            )
+            if config_changed:
+                self._config_loader.invalidate(owner, repo)
+                log.info("Config cache invalidated for %s/%s", owner, repo)
+
+        try:
+            config = await self._config_loader.load(owner, repo, installation_id)
+        except ConfigInvalid as exc:
+            # A broken config is the repository's problem, not a delivery
+            # failure. Returning 200 stops GitHub retrying the same delivery
+            # for hours against a file that will not parse until a human edits it.
+            log.error("Skipping %s/%s: %s", owner, repo, exc.detail)
+            return {"ok": True, "skipped": "invalid config"}
+
         if config is None:
             log.debug("No config for %s/%s — skipping", owner, repo)
             return {"ok": True, "skipped": "no config"}
@@ -128,15 +153,7 @@ class WebhookRouter:
                         await self._handle_slash_command(body, payload, ctx)
 
             elif event == "push":
-                # Invalidate config cache if bot config added/modified/removed
-                commits = payload.get("commits", [])
-                config_changed = any(
-                    ".github/hiero-bot.yml" in (c.get("modified", []) + c.get("added", []) + c.get("removed", []))
-                    for c in commits
-                )
-                if config_changed:
-                    self._config_loader.invalidate(owner, repo)
-                    log.info("Config cache invalidated for %s/%s", owner, repo)
+                log.debug("Processed push event for %s/%s", owner, repo)
 
             else:
                 log.debug("No handler for event=%s", event)
@@ -406,4 +423,4 @@ class WebhookRouter:
             await db.commit()
             log.info("Removed %d repos from installation %s", len(repos_removed), inst_id)
 
-        return {"ok": True, "action": action}
+        return {"ok": True, "action": action}
