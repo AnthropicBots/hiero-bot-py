@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.config.loader import ConfigInvalid
 from app.db.models import Account
 from app.github.webhooks import WebhookRouter
 
@@ -119,3 +120,46 @@ async def test_config_change_invalidates_cache_before_loading(db):
     assert result == {"ok": True}
     config_loader.invalidate.assert_called_once_with("testorg", "testrepo")
     config_loader.load.assert_called_once_with("testorg", "testrepo", 8888)
+
+
+@pytest.mark.asyncio
+async def test_invalid_config_is_acknowledged_without_retrying(db):
+    gh = MagicMock()
+    config_loader = MagicMock()
+    config_loader.load = AsyncMock()
+
+    async def load(owner, repo, installation_id):
+        raise ConfigInvalid(
+            f"{owner}/{repo}",
+            "workflows.pull_request.enabled: Input should be a valid boolean",
+        )
+
+    config_loader.load.side_effect = load
+
+    router = WebhookRouter(gh, config_loader)
+
+    payload = {
+        "repository": {
+            "owner": {"login": "testorg"},
+            "name": "testrepo",
+        },
+        "installation": {"id": 8888},
+    }
+
+    request = MagicMock()
+    request.headers = {
+        "X-GitHub-Event": "pull_request",
+    }
+    request.json = AsyncMock(return_value=payload)
+
+    result = await router.handle(request, db)
+
+    assert result == {
+        "ok": True,
+        "skipped": "invalid config",
+    }
+    config_loader.load.assert_awaited_once_with(
+        "testorg",
+        "testrepo",
+        8888,
+    )
