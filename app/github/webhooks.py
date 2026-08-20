@@ -94,6 +94,23 @@ class WebhookRouter:
         repo = repo_data["name"]
         installation_id = installation_data["id"]
 
+        # Invalidate config cache before loading so config changes are
+        # discovered even when a negative-cache entry exists.
+        if event == "push":
+            commits = payload.get("commits", [])
+            config_changed = any(
+                ".github/hiero-bot.yml"
+                in (
+                    commit.get("modified", [])
+                    + commit.get("added", [])
+                    + commit.get("removed", [])
+                )
+                for commit in commits
+            )
+            if config_changed:
+                self._config_loader.invalidate(owner, repo)
+                log.info("Config cache invalidated for %s/%s", owner, repo)
+
         try:
             config = await self._config_loader.load(owner, repo, installation_id)
         except ConfigInvalid as exc:
@@ -136,15 +153,7 @@ class WebhookRouter:
                         await self._handle_slash_command(body, payload, ctx)
 
             elif event == "push":
-                # Invalidate config cache if bot config added/modified/removed
-                commits = payload.get("commits", [])
-                config_changed = any(
-                    ".github/hiero-bot.yml" in (c.get("modified", []) + c.get("added", []) + c.get("removed", []))
-                    for c in commits
-                )
-                if config_changed:
-                    self._config_loader.invalidate(owner, repo)
-                    log.info("Config cache invalidated for %s/%s", owner, repo)
+                log.debug("Processed push event for %s/%s", owner, repo)
 
             else:
                 log.debug("No handler for event=%s", event)

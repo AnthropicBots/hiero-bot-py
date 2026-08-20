@@ -1,6 +1,6 @@
 # tests/unit/test_installation_webhooks.py — Installation webhook unit tests
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -72,3 +72,50 @@ async def test_handle_installation_repositories_added_and_removed(db):
     }
     res_rem = await router._handle_installation_repositories(removed_payload, db)
     assert res_rem == {"ok": True, "action": "removed"}
+
+
+@pytest.mark.asyncio
+async def test_config_change_invalidates_cache_before_loading(db):
+    gh = MagicMock()
+    config_loader = MagicMock()
+    invalidated = False
+
+    def invalidate(owner, repo):
+        nonlocal invalidated
+        invalidated = True
+
+    async def load(owner, repo, installation_id):
+        assert invalidated is True
+        return {"enabled": True}
+
+    config_loader.invalidate.side_effect = invalidate
+    config_loader.load.side_effect = load
+
+    router = WebhookRouter(gh, config_loader)
+
+    payload = {
+        "repository": {
+            "owner": {"login": "testorg"},
+            "name": "testrepo",
+        },
+        "installation": {"id": 8888},
+        "commits": [
+            {
+                "added": [".github/hiero-bot.yml"],
+                "modified": [],
+                "removed": [],
+            }
+        ],
+    }
+
+    request = MagicMock()
+    request.headers = {
+        "X-GitHub-Event": "push",
+    }
+    request.json = AsyncMock(return_value=payload)
+
+    result = await router.handle(request, db)
+
+    assert result == {"ok": True}
+    config_loader.invalidate.assert_called_once_with("testorg", "testrepo")
+    config_loader.load.assert_called_once_with("testorg", "testrepo", 8888)
