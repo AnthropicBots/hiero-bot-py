@@ -170,15 +170,44 @@ class GitHubClient:
         **kwargs: Any,
     ) -> Any:
         headers = await self._inst_headers(installation_id)
-        resp = await self._http.request(method, path, headers=headers, **kwargs)
-        if resp.status_code == 404:
-            raise httpx.HTTPStatusError(
-                "Not found", request=resp.request, response=resp
-            )
-        resp.raise_for_status()
-        if resp.content:
-            return resp.json()
-        return {}
+        max_retries = 3
+        backoff = 1.0
+
+        for attempt in range(max_retries + 1):
+            try:
+                resp = await self._http.request(method, path, headers=headers, **kwargs)
+                if resp.status_code == 404:
+                    raise httpx.HTTPStatusError(
+                        "Not found", request=resp.request, response=resp
+                    )
+
+                # Retry on rate limiting (429) or transient gateway errors (502, 503, 504)
+                if resp.status_code in (429, 502, 503, 504) and attempt < max_retries:
+                    retry_after = resp.headers.get("Retry-After")
+                    sleep_time = float(retry_after) if retry_after else backoff
+                    log.warning(
+                        "GitHub API %s %s returned status %d. Retrying in %.1fs (attempt %d/%d)",
+                        method, path, resp.status_code, sleep_time, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(sleep_time)
+                    backoff *= 2.0
+                    continue
+
+                resp.raise_for_status()
+                if resp.content:
+                    return resp.json()
+                return {}
+
+            except httpx.RequestError as exc:
+                if attempt < max_retries:
+                    log.warning(
+                        "GitHub API request network error on %s %s: %s. Retrying in %.1fs...",
+                        method, path, exc, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff *= 2.0
+                    continue
+                raise
 
     async def get(self, path: str, installation_id: int, **kwargs: Any) -> Any:
         return await self.request("GET", path, installation_id, **kwargs)
@@ -461,6 +490,31 @@ class GitHubClient:
             )
         except Exception as exc:
             log.warning("Inline comment failed (path=%s line=%d): %s", path, line, exc)
+
+    async def list_commits(
+        self,
+        owner: str,
+        repo: str,
+        installation_id: int,
+        *,
+        path: str | None = None,
+        per_page: int = 30,
+    ) -> list[dict]:
+        """
+        Recent commits on the default branch, optionally scoped to one path.
+
+        Scoping by path is what makes reviewer recommendation cheap: GitHub does
+        the history walk server-side and returns only the commits that touched
+        that directory, so one request answers "who has worked here lately".
+        """
+        params: dict[str, Any] = {"per_page": per_page}
+        if path:
+            params["path"] = path
+
+        result = await self.get(
+            f"/repos/{owner}/{repo}/commits", installation_id, params=params
+        )
+        return result if isinstance(result, list) else []
 
     async def close(self) -> None:
         await self._http.aclose()

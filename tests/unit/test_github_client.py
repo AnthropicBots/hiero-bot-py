@@ -155,3 +155,39 @@ async def test_list_issue_comments_paginates():
     assert mock_get.await_count == 2
 
     await client.close()
+
+@pytest.mark.asyncio
+async def test_list_commits_uses_path_and_per_page():
+    client = GitHubClient()
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(
+            return_value=[
+                {"sha": "abc123", "author": {"login": "bob"}},
+            ]
+        ),
+    ) as mock_get:
+        commits = await client.list_commits(
+            "hiero",
+            "sdk-js",
+            123,
+            path="app/github",
+            per_page=30,
+        )
+
+    assert commits == [
+        {"sha": "abc123", "author": {"login": "bob"}},
+    ]
+
+    mock_get.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/commits",
+        123,
+        params={
+            "path": "app/github",
+            "per_page": 30,
+        },
+    )
+
+    await client.close()
