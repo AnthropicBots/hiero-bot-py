@@ -239,16 +239,14 @@ class GitHubClient:
         extract: str | None = None,
     ) -> list[dict]:
         """
-        Walk a paginated GitHub collection endpoint and return every item.
+        Walk a paginated GitHub collection endpoint and return every item
+        up to the configured page cap.
 
-        GitHub caps `per_page` at 100, so any endpoint queried without following
-        pages silently truncates once a repository grows past that. Callers get
-        the full collection here, bounded by ``max_pages`` so a pathological repo
-        can't turn one scan into thousands of requests.
+        The caller receives all collected items. If the page cap is reached,
+        a warning is emitted because the returned collection may be truncated.
 
-        ``extract`` names the key holding the list for endpoints that wrap their
-        results in an object (e.g. ``/installation/repositories`` →
-        ``repositories``).
+        ``extract`` names the key holding the list for endpoints that wrap
+        their results in an object.
         """
         items: list[dict] = []
         page = 1
@@ -268,18 +266,17 @@ class GitHubClient:
                     page,
                     type(batch).__name__,
                 )
-                break
+                return items
 
             items.extend(batch)
 
-            # A short page means we've reached the end of the collection.
             if len(batch) < per_page:
                 return items
 
             page += 1
 
         log.warning(
-            "Pagination for %s stopped at the %d-page cap — results are truncated",
+            "Pagination for %s reached the %d-page cap; results may be truncated",
             path,
             max_pages,
         )
@@ -293,21 +290,80 @@ class GitHubClient:
         per_page: int = 100,
         max_pages: int = MAX_PAGES,
     ) -> list[dict]:
-        """Same as :meth:`paginate` but authenticated as the app, not an installation."""
+        """Paginate an endpoint authenticated as the GitHub App."""
         items: list[dict] = []
         page = 1
+        max_retries = 3
 
         while page <= max_pages:
-            resp = await self._http.get(
-                path,
-                headers=self._app_headers(),
-                params={**(params or {}), "per_page": per_page, "page": page},
-            )
-            resp.raise_for_status()
-            batch = resp.json()
+            backoff = 1.0
+
+            for attempt in range(max_retries + 1):
+                try:
+                    resp = await self._http.get(
+                        path,
+                        headers=self._app_headers(),
+                        params={
+                            **(params or {}),
+                            "per_page": per_page,
+                            "page": page,
+                        },
+                    )
+
+                    if (
+                        resp.status_code in (429, 502, 503, 504)
+                        and attempt < max_retries
+                    ):
+                        retry_after = resp.headers.get("Retry-After")
+                        sleep_time = (
+                            float(retry_after) if retry_after else backoff
+                        )
+                        log.warning(
+                            "GitHub App API %s page %d returned status %d. "
+                            "Retrying in %.1fs (attempt %d/%d)",
+                            path,
+                            page,
+                            resp.status_code,
+                            sleep_time,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        await asyncio.sleep(sleep_time)
+                        backoff *= 2.0
+                        continue
+
+                    resp.raise_for_status()
+                    batch = resp.json()
+                    break
+
+                except httpx.RequestError as exc:
+                    if attempt >= max_retries:
+                        raise
+
+                    log.warning(
+                        "GitHub App API network error on %s page %d: %s. "
+                        "Retrying in %.1fs...",
+                        path,
+                        page,
+                        exc,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff *= 2.0
+            else:
+                raise RuntimeError(
+                    f"Unable to fetch paginated GitHub App endpoint: {path}"
+                )
 
             if not isinstance(batch, list):
-                break
+                log.warning(
+                    "Unexpected app-level paginated payload for %s "
+                    "(page %d): %s",
+                    path,
+                    page,
+                    type(batch).__name__,
+                )
+                return items
 
             items.extend(batch)
 
@@ -317,7 +373,10 @@ class GitHubClient:
             page += 1
 
         log.warning(
-            "App-level pagination for %s stopped at the %d-page cap", path, max_pages
+            "App-level pagination for %s reached the %d-page cap; "
+            "results may be truncated",
+            path,
+            max_pages,
         )
         return items
 
@@ -512,10 +571,9 @@ class GitHubClient:
     async def list_pr_reviews(
         self, owner: str, repo: str, pr_number: int, installation_id: int
     ) -> list[dict]:
-        return await self.get(
+        return await self.paginate(
             f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
             installation_id,
-            params={"per_page": 100},
         )
 
     async def get_combined_status(
@@ -533,26 +591,76 @@ class GitHubClient:
         query: str,
         installation_id: int,
         *,
-        per_page: int = 1,
+        per_page: int = 100,
+        page: int = 1,
         sort: str | None = None,
         order: str | None = None,
     ) -> dict:
         """
-        Run an issue/PR search and return the raw response.
-
-        The useful part is `total_count`: it answers "how many PRs did this
-        person get merged?" in a single request, where walking `/pulls` would
-        take one request per hundred PRs in the repository's entire history.
-        Search has its own, much tighter rate limit, so callers should treat a
-        failure here as "fall back to REST" rather than as fatal.
+        Run a GitHub issue/PR search and return one result page.
         """
-        params: dict[str, Any] = {"q": query, "per_page": per_page}
+        params: dict[str, Any] = {
+            "q": query,
+            "per_page": per_page,
+            "page": page,
+        }
         if sort:
             params["sort"] = sort
         if order:
             params["order"] = order
 
         return await self.get("/search/issues", installation_id, params=params)
+
+    async def paginate_search(
+        self,
+        query: str,
+        installation_id: int,
+        *,
+        per_page: int = 100,
+        max_pages: int = MAX_PAGES,
+        sort: str | None = None,
+        order: str | None = None,
+    ) -> list[dict]:
+        """
+        Return all matching search results up to the configured page cap.
+        """
+        items: list[dict] = []
+        page = 1
+
+        while page <= max_pages:
+            result = await self.search_issues(
+                query,
+                installation_id,
+                per_page=per_page,
+                page=page,
+                sort=sort,
+                order=order,
+            )
+
+            batch = result.get("items", [])
+            if not isinstance(batch, list):
+                log.warning(
+                    "Unexpected search payload for %s (page %d): %s",
+                    query,
+                    page,
+                    type(batch).__name__,
+                )
+                return items
+
+            items.extend(batch)
+
+            if len(batch) < per_page:
+                return items
+
+            page += 1
+
+        log.warning(
+            "Search pagination for %s reached the %d-page cap; "
+            "results may be truncated",
+            query,
+            max_pages,
+        )
+        return items
 
     async def get_collaborator_permission(
         self,

@@ -112,6 +112,7 @@ async def test_installation_token_cache_hit():
 
     await client.close()
 
+
 @pytest.mark.asyncio
 async def test_list_issue_comments_paginates():
     client = GitHubClient()
@@ -149,6 +150,43 @@ async def test_list_issue_comments_paginates():
     )
     mock_get.assert_any_await(
         "/repos/hiero/sdk-js/issues/1/comments",
+        123,
+        params={"per_page": 100, "page": 2},
+    )
+    assert mock_get.await_count == 2
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_pr_reviews_paginates():
+    client = GitHubClient()
+
+    first_page = [
+        {"id": i, "user": {"login": "alice"}, "state": "APPROVED"}
+        for i in range(100)
+    ]
+    second_page = [
+        {"id": 100, "user": {"login": "alice"}, "state": "CHANGES_REQUESTED"}
+    ]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(side_effect=[first_page, second_page]),
+    ) as mock_get:
+        reviews = await client.list_pr_reviews("hiero", "sdk-js", 42, 123)
+
+    assert len(reviews) == 101
+    assert reviews[-1]["id"] == 100
+
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/pulls/42/reviews",
+        123,
+        params={"per_page": 100, "page": 1},
+    )
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/pulls/42/reviews",
         123,
         params={"per_page": 100, "page": 2},
     )
@@ -316,17 +354,23 @@ async def test_list_installations_paginates_with_app_auth():
     client = GitHubClient()
 
     first = Mock()
+    first.status_code = 200
     first.raise_for_status = Mock()
+    first.headers = {}
     first.json = Mock(return_value=[{"id": i} for i in range(100)])
 
     second = Mock()
+    second.status_code = 200
     second.raise_for_status = Mock()
+    second.headers = {}
     second.json = Mock(return_value=[{"id": 100}])
 
     with (
         patch.object(client, "_make_jwt", return_value="fake_jwt"),
         patch.object(
-            client._http, "get", new=AsyncMock(side_effect=[first, second])
+            client._http,
+            "get",
+            new=AsyncMock(side_effect=[first, second]),
         ) as mock_get,
     ):
         installations = await client.list_installations()
@@ -334,11 +378,22 @@ async def test_list_installations_paginates_with_app_auth():
     assert len(installations) == 101
     assert mock_get.await_count == 2
 
+    mock_get.assert_any_await(
+        "/app/installations",
+        headers={"Authorization": "Bearer fake_jwt"},
+        params={"per_page": 100, "page": 1},
+    )
+    mock_get.assert_any_await(
+        "/app/installations",
+        headers={"Authorization": "Bearer fake_jwt"},
+        params={"per_page": 100, "page": 2},
+    )
+
     await client.close()
 
 
 @pytest.mark.asyncio
-async def test_search_issues_passes_query_and_sort_params():
+async def test_search_issues_passes_query_pagination_and_sort_params():
     client = GitHubClient()
 
     with patch.object(
@@ -354,7 +409,8 @@ async def test_search_issues_passes_query_and_sort_params():
         result = await client.search_issues(
             "repo:hiero/sdk-js type:pr author:alice is:merged",
             42,
-            per_page=1,
+            per_page=100,
+            page=2,
             sort="created",
             order="asc",
         )
@@ -369,11 +425,69 @@ async def test_search_issues_passes_query_and_sort_params():
         42,
         params={
             "q": "repo:hiero/sdk-js type:pr author:alice is:merged",
-            "per_page": 1,
+            "per_page": 100,
+            "page": 2,
             "sort": "created",
             "order": "asc",
         },
     )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paginate_search_walks_every_page():
+    client = GitHubClient()
+
+    responses = [
+        {
+            "total_count": 101,
+            "items": [{"number": i} for i in range(100)],
+        },
+        {
+            "total_count": 101,
+            "items": [{"number": 100}],
+        },
+    ]
+
+    with patch.object(
+        client,
+        "search_issues",
+        new=AsyncMock(side_effect=responses),
+    ) as mock_search:
+        items = await client.paginate_search(
+            "repo:hiero/sdk-js type:pr reviewed-by:alice",
+            42,
+        )
+
+    assert len(items) == 101
+    assert items[-1]["number"] == 100
+    assert mock_search.await_count == 2
+
+    first_call = mock_search.await_args_list[0]
+    second_call = mock_search.await_args_list[1]
+
+    assert first_call.args == (
+        "repo:hiero/sdk-js type:pr reviewed-by:alice",
+        42,
+    )
+    assert first_call.kwargs == {
+        "per_page": 100,
+        "page": 1,
+        "sort": None,
+        "order": None,
+    }
+
+    assert second_call.args == (
+        "repo:hiero/sdk-js type:pr reviewed-by:alice",
+        42,
+    )
+    assert second_call.kwargs == {
+        "per_page": 100,
+        "page": 2,
+        "sort": None,
+        "order": None,
+    }
 
     await client.close()
 

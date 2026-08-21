@@ -148,6 +148,7 @@ class ProgressionWorkflow:
         self, owner: str, repo: str, login: str, inst: int
     ) -> dict | None:
         slug = f"{owner}/{repo}"
+
         try:
             merged = await self._gh.search_issues(
                 f"repo:{slug} type:pr author:{login} is:merged",
@@ -156,19 +157,12 @@ class ProgressionWorkflow:
                 sort="created",
                 order="asc",
             )
-            reviewed = await self._gh.search_issues(
-                f"repo:{slug} type:pr reviewed-by:{login}",
-                inst,
-                per_page=1,
-            )
         except Exception as exc:
-            log.warning("Search-based stats unavailable for @%s: %s", login, exc)
+            log.warning("Search-based merged-PR stats unavailable for @%s: %s", login, exc)
             return None
 
         merged_prs = int(merged.get("total_count") or 0)
 
-        # `sort=created&order=asc&per_page=1` puts the contributor's earliest
-        # merged PR first, which dates the start of their involvement.
         first_contribution = None
         items = merged.get("items") or []
         if items:
@@ -176,13 +170,55 @@ class ProgressionWorkflow:
                 items[0].get("closed_at") or items[0].get("created_at")
             )
 
+        try:
+            reviews_given = await self._count_reviews_via_search(
+                owner, repo, login, inst
+            )
+        except Exception as exc:
+            log.warning("Search-based review stats unavailable for @%s: %s", login, exc)
+            return None
+
         return {
             "merged_prs": merged_prs,
-            "reviews_given": int(reviewed.get("total_count") or 0),
+            "reviews_given": reviews_given,
             "months_active": _months_since(first_contribution),
             "login": login,
             "source": "search",
         }
+
+    async def _count_reviews_via_search(
+        self, owner: str, repo: str, login: str, inst: int
+    ) -> int:
+        """
+        Count submitted review objects by using `reviewed-by:` only to find
+        candidate pull requests, then inspecting the actual review objects.
+        """
+        slug = f"{owner}/{repo}"
+
+        items = await self._gh.paginate_search(
+            f"repo:{slug} type:pr reviewed-by:{login}",
+            inst,
+            per_page=100,
+        )
+
+        reviews_given = 0
+
+        for item in items:
+            pr_number = item.get("number")
+            if not pr_number:
+                continue
+
+            reviews = await self._gh.list_pr_reviews(
+                owner, repo, pr_number, inst
+            )
+
+            reviews_given += sum(
+                1
+                for review in reviews
+                if (review.get("user") or {}).get("login") == login
+            )
+
+        return reviews_given
 
     async def _collect_stats_via_rest(
         self, owner: str, repo: str, login: str, inst: int
@@ -227,12 +263,12 @@ class ProgressionWorkflow:
         self, owner: str, repo: str, login: str, inst: int
     ) -> int:
         """
-        Count pull requests this contributor reviewed.
+        Count submitted reviews by the contributor.
 
-        The REST fallback uses GitHub's review endpoint for each PR. To avoid
-        scanning the entire repository history when Search is unavailable, only
-        pull requests authored by or associated with the contributor are used as
-        candidates. Each qualifying PR is counted once.
+        The fallback walks the repository's pull-request history and counts
+        every submitted review object authored by the contributor. A review
+        submitted multiple times on the same PR is counted once per submitted
+        review.
         """
         try:
             prs = await self._gh.paginate(
@@ -244,7 +280,7 @@ class ProgressionWorkflow:
             log.warning("Could not read PR history for @%s: %s", login, exc)
             return 0
 
-        reviewed_prs: set[int] = set()
+        reviews_given = 0
 
         for pr in prs:
             pr_number = pr.get("number")
@@ -262,15 +298,15 @@ class ProgressionWorkflow:
                     login,
                     exc,
                 )
-                return 0
+                continue
 
-            if any(
-                (review.get("user") or {}).get("login") == login
+            reviews_given += sum(
+                1
                 for review in reviews
-            ):
-                reviewed_prs.add(pr_number)
+                if (review.get("user") or {}).get("login") == login
+            )
 
-        return len(reviewed_prs)
+        return reviews_given
 
     @staticmethod
     def _check_eligibility(stats: dict, cfg) -> str | None:

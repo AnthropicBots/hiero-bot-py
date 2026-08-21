@@ -171,33 +171,68 @@ def search_result(total, first_closed_at=None):
 
 
 @pytest.mark.asyncio
-async def test_search_stats_use_total_count(mock_gh):
+async def test_search_stats_use_search_for_candidates(mock_gh):
     mock_gh.search_issues = AsyncMock(
         side_effect=[
             search_result(137, iso_days_ago(400)),
-            search_result(64),
         ]
     )
+    mock_gh.paginate_search = AsyncMock(
+        return_value=[
+            {"number": 101},
+            {"number": 102},
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(
+        side_effect=[
+            [
+                {"user": {"login": "alice"}, "state": "APPROVED"},
+                {"user": {"login": "alice"}, "state": "COMMENTED"},
+            ],
+            [
+                {"user": {"login": "alice"}, "state": "APPROVED"},
+            ],
+        ]
+    )
+
     wf = ProgressionWorkflow(mock_gh)
 
     stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
     assert stats["merged_prs"] == 137
-    assert stats["reviews_given"] == 64
+    assert stats["reviews_given"] == 3
     assert stats["months_active"] == 13
     assert stats["source"] == "search"
+    mock_gh.paginate_search.assert_awaited_once_with(
+        "repo:hiero/sdk-js type:pr reviewed-by:alice",
+        42,
+        per_page=100,
+    )
+    assert mock_gh.list_pr_reviews.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_search_stats_query_shape(mock_gh):
-    mock_gh.search_issues = AsyncMock(return_value=search_result(0))
+    mock_gh.search_issues = AsyncMock(
+        return_value=search_result(0)
+    )
+    mock_gh.paginate_search = AsyncMock(return_value=[])
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
     wf = ProgressionWorkflow(mock_gh)
 
     await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
-    queries = [call.args[0] for call in mock_gh.search_issues.await_args_list]
-    assert "repo:hiero/sdk-js type:pr author:alice is:merged" in queries
-    assert "repo:hiero/sdk-js type:pr reviewed-by:alice" in queries
+    merged_queries = [
+        call.args[0] for call in mock_gh.search_issues.await_args_list
+    ]
+    assert "repo:hiero/sdk-js type:pr author:alice is:merged" in merged_queries
+
+    mock_gh.paginate_search.assert_awaited_once_with(
+        "repo:hiero/sdk-js type:pr reviewed-by:alice",
+        42,
+        per_page=100,
+    )
 
 
 @pytest.mark.asyncio
@@ -214,43 +249,81 @@ async def test_no_merged_prs_means_zero_months(mock_gh):
 @pytest.mark.asyncio
 async def test_falls_back_to_rest_when_search_fails(mock_gh):
     mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("rate limited"))
+
     mock_gh.paginate = AsyncMock(
         side_effect=[
             [
-                {"user": {"login": "alice"}, "merged_at": iso_days_ago(200)},
-                {"user": {"login": "alice"}, "merged_at": iso_days_ago(90)},
-                {"user": {"login": "bob"}, "merged_at": iso_days_ago(10)},
-                {"user": {"login": "alice"}, "merged_at": None},
+                {"number": 1, "user": {"login": "alice"}, "merged_at": iso_days_ago(200)},
+                {"number": 2, "user": {"login": "alice"}, "merged_at": iso_days_ago(90)},
+                {"number": 3, "user": {"login": "bob"}, "merged_at": iso_days_ago(10)},
+                {"number": 4, "user": {"login": "alice"}, "merged_at": None},
             ],
+            [
+                {"number": 1},
+                {"number": 2},
+                {"number": 3},
+                {"number": 4},
+            ],
+        ]
+    )
+
+    mock_gh.list_pr_reviews = AsyncMock(
+        side_effect=[
+            [{"user": {"login": "alice"}, "state": "APPROVED"}],
+            [{"user": {"login": "bob"}, "state": "APPROVED"}],
+            [{"user": {"login": "alice"}, "state": "COMMENTED"}],
             [],
         ]
     )
+
     wf = ProgressionWorkflow(mock_gh)
 
     stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
     assert stats["source"] == "rest"
     assert stats["merged_prs"] == 2
+    assert stats["reviews_given"] == 2
     assert stats["months_active"] == 6
 
 
 @pytest.mark.asyncio
-async def test_rest_fallback_paginates_full_pr_history(mock_gh):
-    """Regression for #41 — the old code only ever read the first 100 closed PRs."""
+async def test_rest_fallback_uses_paginated_pr_history(mock_gh):
+    """Regression for #41 — contributor PRs outside page one are included."""
     mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("no search"))
-    mock_gh.paginate = AsyncMock(side_effect=[[], []])
+
+    recent_prs = [
+        {
+            "number": number,
+            "user": {"login": "bob"},
+            "merged_at": iso_days_ago(10),
+        }
+        for number in range(1, 101)
+    ]
+    older_pr = {
+        "number": 101,
+        "user": {"login": "alice"},
+        "merged_at": iso_days_ago(200),
+    }
+
+    mock_gh.paginate = AsyncMock(
+        side_effect=[
+            recent_prs + [older_pr],
+            recent_prs + [older_pr],
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
     wf = ProgressionWorkflow(mock_gh)
 
-    await wf._collect_stats("hiero", "sdk-js", "alice", 42)
+    stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
-    pulls_call = mock_gh.paginate.await_args_list[0]
-    assert pulls_call.args[0] == "/repos/hiero/sdk-js/pulls"
-    assert pulls_call.kwargs["params"] == {"state": "closed"}
+    assert stats["merged_prs"] == 1
+    assert stats["months_active"] == 6
 
 
 @pytest.mark.asyncio
-async def test_rest_reviews_count_distinct_prs_including_approval_only(mock_gh):
-    """Regression for #41 — count submitted reviews, not inline comments."""
+async def test_rest_reviews_count_submitted_reviews_including_approval_only(mock_gh):
+    """Regression for #41 — count submitted reviews, not inline comments or PRs."""
     mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("no search"))
     mock_gh.paginate = AsyncMock(
         return_value=[
@@ -273,11 +346,12 @@ async def test_rest_reviews_count_distinct_prs_including_approval_only(mock_gh):
             ],
         ]
     )
+
     wf = ProgressionWorkflow(mock_gh)
 
     stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
-    assert stats["reviews_given"] == 2
+    assert stats["reviews_given"] == 3
     assert mock_gh.list_pr_reviews.await_count == 3
 
 
@@ -294,7 +368,7 @@ async def test_rest_fallback_survives_pr_listing_failure(mock_gh):
 
 
 @pytest.mark.asyncio
-async def test_rest_fallback_returns_zero_when_review_history_is_incomplete(mock_gh):
+async def test_rest_fallback_keeps_reviews_found_before_partial_failure(mock_gh):
     mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("no search"))
     mock_gh.paginate = AsyncMock(
         return_value=[
@@ -308,11 +382,12 @@ async def test_rest_fallback_returns_zero_when_review_history_is_incomplete(mock
             RuntimeError("boom"),
         ]
     )
+
     wf = ProgressionWorkflow(mock_gh)
 
     stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
-    assert stats["reviews_given"] == 0
+    assert stats["reviews_given"] == 1
     assert mock_gh.list_pr_reviews.await_count == 2
 
 
