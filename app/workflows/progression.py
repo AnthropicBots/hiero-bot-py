@@ -227,28 +227,48 @@ class ProgressionWorkflow:
         self, owner: str, repo: str, login: str, inst: int
     ) -> int:
         """
-        Count distinct pull requests this contributor reviewed.
+        Count pull requests this contributor reviewed.
 
-        #41: the previous implementation counted rows from
-        `/pulls/comments`, so a single thorough review that left eight inline
-        comments scored as eight reviews, and a plain approve-with-no-comments
-        scored as zero. Collapsing to distinct pull requests is a far closer
-        answer to "how many reviews has this person given".
+        The review API returns submitted reviews, including approvals and
+        change requests that have no inline review comments. Count each PR once
+        for this contributor, even if they submitted multiple review entries.
         """
         try:
-            comments = await self._gh.paginate(
-                f"/repos/{owner}/{repo}/pulls/comments", inst
+            prs = await self._gh.paginate(
+                f"/repos/{owner}/{repo}/pulls",
+                inst,
+                params={"state": "all"},
             )
         except Exception as exc:
-            log.warning("Could not read review comments for @%s: %s", login, exc)
+            log.warning("Could not read PR history for @%s: %s", login, exc)
             return 0
 
-        reviewed_prs = {
-            comment.get("pull_request_url")
-            for comment in comments
-            if (comment.get("user") or {}).get("login") == login
-            and comment.get("pull_request_url")
-        }
+        reviewed_prs: set[int] = set()
+
+        for pr in prs:
+            pr_number = pr.get("number")
+            if not pr_number:
+                continue
+
+            try:
+                reviews = await self._gh.list_pr_reviews(
+                    owner, repo, pr_number, inst
+                )
+            except Exception as exc:
+                log.warning(
+                    "Could not read reviews for PR #%s (@%s): %s",
+                    pr_number,
+                    login,
+                    exc,
+                )
+                continue
+
+            if any(
+                (review.get("user") or {}).get("login") == login
+                for review in reviews
+            ):
+                reviewed_prs.add(pr_number)
+
         return len(reviewed_prs)
 
     @staticmethod

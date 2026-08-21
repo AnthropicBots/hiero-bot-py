@@ -249,18 +249,27 @@ async def test_rest_fallback_paginates_full_pr_history(mock_gh):
 
 
 @pytest.mark.asyncio
-async def test_rest_reviews_count_distinct_prs_not_comments(mock_gh):
-    """Regression for #41 — eight inline comments on one PR were eight 'reviews'."""
+async def test_rest_reviews_count_distinct_prs_including_approval_only(mock_gh):
+    """Regression for #41 — count submitted reviews, not inline comments."""
     mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("no search"))
     mock_gh.paginate = AsyncMock(
+        return_value=[
+            {"number": 1, "user": {"login": "bob"}},
+            {"number": 2, "user": {"login": "bob"}},
+            {"number": 3, "user": {"login": "alice"}},
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(
         side_effect=[
-            [],
             [
-                {"user": {"login": "alice"}, "pull_request_url": ".../pulls/1"},
-                {"user": {"login": "alice"}, "pull_request_url": ".../pulls/1"},
-                {"user": {"login": "alice"}, "pull_request_url": ".../pulls/1"},
-                {"user": {"login": "alice"}, "pull_request_url": ".../pulls/2"},
-                {"user": {"login": "bob"}, "pull_request_url": ".../pulls/3"},
+                {"user": {"login": "alice"}, "state": "APPROVED"},
+            ],
+            [
+                {"user": {"login": "alice"}, "state": "COMMENTED"},
+                {"user": {"login": "alice"}, "state": "APPROVED"},
+            ],
+            [
+                {"user": {"login": "bob"}, "state": "APPROVED"},
             ],
         ]
     )
@@ -269,6 +278,7 @@ async def test_rest_reviews_count_distinct_prs_not_comments(mock_gh):
     stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
     assert stats["reviews_given"] == 2
+    assert mock_gh.list_pr_reviews.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -284,9 +294,15 @@ async def test_rest_fallback_survives_pr_listing_failure(mock_gh):
 
 
 @pytest.mark.asyncio
-async def test_rest_fallback_survives_comment_listing_failure(mock_gh):
+async def test_rest_fallback_survives_review_listing_failure(mock_gh):
     mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("no search"))
-    mock_gh.paginate = AsyncMock(side_effect=[[], RuntimeError("boom")])
+    mock_gh.paginate = AsyncMock(
+        side_effect=[
+            [{"number": 1, "user": {"login": "alice"}}],
+            [],
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(side_effect=RuntimeError("boom"))
     wf = ProgressionWorkflow(mock_gh)
 
     stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
