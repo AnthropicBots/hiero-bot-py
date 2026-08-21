@@ -294,20 +294,26 @@ async def test_rest_fallback_survives_pr_listing_failure(mock_gh):
 
 
 @pytest.mark.asyncio
-async def test_rest_fallback_survives_review_listing_failure(mock_gh):
+async def test_rest_fallback_returns_zero_when_review_history_is_incomplete(mock_gh):
     mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("no search"))
     mock_gh.paginate = AsyncMock(
-        side_effect=[
-            [{"number": 1, "user": {"login": "alice"}}],
-            [],
+        return_value=[
+            {"number": 1, "user": {"login": "bob"}},
+            {"number": 2, "user": {"login": "bob"}},
         ]
     )
-    mock_gh.list_pr_reviews = AsyncMock(side_effect=RuntimeError("boom"))
+    mock_gh.list_pr_reviews = AsyncMock(
+        side_effect=[
+            [{"user": {"login": "alice"}, "state": "APPROVED"}],
+            RuntimeError("boom"),
+        ]
+    )
     wf = ProgressionWorkflow(mock_gh)
 
     stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
     assert stats["reviews_given"] == 0
+    assert mock_gh.list_pr_reviews.await_count == 2
 
 
 @pytest.mark.asyncio

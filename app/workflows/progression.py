@@ -232,6 +232,9 @@ class ProgressionWorkflow:
         The review API returns submitted reviews, including approvals and
         change requests that have no inline review comments. Count each PR once
         for this contributor, even if they submitted multiple review entries.
+
+        If any review lookup fails, return 0 rather than presenting an incomplete
+        review history as an accurate contributor statistic.
         """
         try:
             prs = await self._gh.paginate(
@@ -261,7 +264,7 @@ class ProgressionWorkflow:
                     login,
                     exc,
                 )
-                continue
+                return 0
 
             if any(
                 (review.get("user") or {}).get("login") == login

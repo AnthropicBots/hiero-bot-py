@@ -1,6 +1,6 @@
 # tests/unit/test_scheduler.py — scheduled stale scan
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -165,3 +165,28 @@ def test_flush_config_cache_clears_loader():
     asyncio.run(scheduler._flush_config_cache())
 
     loader.clear.assert_called_once()
+
+
+def test_start_registers_scheduler_jobs():
+    scheduler = BotScheduler(AsyncMock(), make_loader(None))
+
+    with (
+        patch.object(scheduler._scheduler, "add_job") as mock_add_job,
+        patch.object(scheduler._scheduler, "start") as mock_start,
+    ):
+        scheduler.start()
+
+    assert mock_add_job.call_count == 2
+    mock_start.assert_called_once()
+
+    stale_job = mock_add_job.call_args_list[0].kwargs
+    cache_job = mock_add_job.call_args_list[1].kwargs
+
+    assert stale_job["id"] == "stale_scan"
+    assert stale_job["coalesce"] is True
+    assert stale_job["max_instances"] == 1
+    assert stale_job["misfire_grace_time"] == 3600
+
+    assert cache_job["id"] == "config_cache_flush"
+    assert cache_job["coalesce"] is True
+    assert cache_job["max_instances"] == 1

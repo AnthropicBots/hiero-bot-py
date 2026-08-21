@@ -338,6 +338,47 @@ async def test_list_installations_paginates_with_app_auth():
 
 
 @pytest.mark.asyncio
+async def test_search_issues_passes_query_and_sort_params():
+    client = GitHubClient()
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(
+            return_value={
+                "total_count": 137,
+                "items": [],
+            }
+        ),
+    ) as mock_get:
+        result = await client.search_issues(
+            "repo:hiero/sdk-js type:pr author:alice is:merged",
+            42,
+            per_page=1,
+            sort="created",
+            order="asc",
+        )
+
+    assert result == {
+        "total_count": 137,
+        "items": [],
+    }
+
+    mock_get.assert_awaited_once_with(
+        "/search/issues",
+        42,
+        params={
+            "q": "repo:hiero/sdk-js type:pr author:alice is:merged",
+            "per_page": 1,
+            "sort": "created",
+            "order": "asc",
+        },
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_list_commits_uses_path_and_per_page():
     client = GitHubClient()
 
