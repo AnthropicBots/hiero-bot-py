@@ -16,6 +16,11 @@ log = get_logger("github.client")
 
 GITHUB_API = "https://api.github.com"
 
+# Safety valve for paginated endpoints: 100 items/page × 50 pages = 5000 items.
+# Large enough for any realistic repository, small enough that a runaway loop
+# can't burn an installation's whole rate-limit budget.
+MAX_PAGES = 50
+
 _PEM_MARKERS = [
     (
         "-----BEGIN RSA PRIVATE KEY-----",
@@ -221,6 +226,160 @@ class GitHubClient:
     async def delete(self, path: str, installation_id: int, **kwargs: Any) -> Any:
         return await self.request("DELETE", path, installation_id, **kwargs)
 
+    # Pagination
+
+    async def paginate(
+        self,
+        path: str,
+        installation_id: int,
+        *,
+        params: dict[str, Any] | None = None,
+        per_page: int = 100,
+        max_pages: int = MAX_PAGES,
+        extract: str | None = None,
+    ) -> list[dict]:
+        """
+        Walk a paginated GitHub collection endpoint and return every item
+        up to the configured page cap.
+
+        The caller receives all collected items. If the page cap is reached,
+        a warning is emitted because the returned collection may be truncated.
+
+        ``extract`` names the key holding the list for endpoints that wrap
+        their results in an object.
+        """
+        items: list[dict] = []
+        page = 1
+
+        while page <= max_pages:
+            result = await self.get(
+                path,
+                installation_id,
+                params={**(params or {}), "per_page": per_page, "page": page},
+            )
+
+            batch = result.get(extract, []) if extract else result
+            if not isinstance(batch, list):
+                log.warning(
+                    "Unexpected paginated payload for %s (page %d): %s",
+                    path,
+                    page,
+                    type(batch).__name__,
+                )
+                return items
+
+            items.extend(batch)
+
+            if len(batch) < per_page:
+                return items
+
+            page += 1
+
+        log.warning(
+            "Pagination for %s reached the %d-page cap; results may be truncated",
+            path,
+            max_pages,
+        )
+        return items
+
+    async def _paginate_app(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        per_page: int = 100,
+        max_pages: int = MAX_PAGES,
+    ) -> list[dict]:
+        """Paginate an endpoint authenticated as the GitHub App."""
+        items: list[dict] = []
+        page = 1
+        max_retries = 3
+
+        while page <= max_pages:
+            backoff = 1.0
+
+            for attempt in range(max_retries + 1):
+                try:
+                    resp = await self._http.get(
+                        path,
+                        headers=self._app_headers(),
+                        params={
+                            **(params or {}),
+                            "per_page": per_page,
+                            "page": page,
+                        },
+                    )
+
+                    if (
+                        resp.status_code in (429, 502, 503, 504)
+                        and attempt < max_retries
+                    ):
+                        retry_after = resp.headers.get("Retry-After")
+                        sleep_time = (
+                            float(retry_after) if retry_after else backoff
+                        )
+                        log.warning(
+                            "GitHub App API %s page %d returned status %d. "
+                            "Retrying in %.1fs (attempt %d/%d)",
+                            path,
+                            page,
+                            resp.status_code,
+                            sleep_time,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        await asyncio.sleep(sleep_time)
+                        backoff *= 2.0
+                        continue
+
+                    resp.raise_for_status()
+                    batch = resp.json()
+                    break
+
+                except httpx.RequestError as exc:
+                    if attempt >= max_retries:
+                        raise
+
+                    log.warning(
+                        "GitHub App API network error on %s page %d: %s. "
+                        "Retrying in %.1fs...",
+                        path,
+                        page,
+                        exc,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff *= 2.0
+            else:
+                raise RuntimeError(
+                    f"Unable to fetch paginated GitHub App endpoint: {path}"
+                )
+
+            if not isinstance(batch, list):
+                log.warning(
+                    "Unexpected app-level paginated payload for %s "
+                    "(page %d): %s",
+                    path,
+                    page,
+                    type(batch).__name__,
+                )
+                return items
+
+            items.extend(batch)
+
+            if len(batch) < per_page:
+                return items
+
+            page += 1
+
+        log.warning(
+            "App-level pagination for %s reached the %d-page cap; "
+            "results may be truncated",
+            path,
+            max_pages,
+        )
+        return items
+
     # High-level helpers
 
     async def get_file_content(
@@ -384,10 +543,11 @@ class GitHubClient:
     async def list_issues(
         self, owner: str, repo: str, installation_id: int, **params: Any
     ) -> list[dict]:
-        return await self.get(
+        """List issues across every page — repos with >100 open issues need this."""
+        return await self.paginate(
             f"/repos/{owner}/{repo}/issues",
             installation_id,
-            params={"per_page": 100, **params},
+            params=params,
         )
 
     async def list_pr_files(
@@ -411,10 +571,9 @@ class GitHubClient:
     async def list_pr_reviews(
         self, owner: str, repo: str, pr_number: int, installation_id: int
     ) -> list[dict]:
-        return await self.get(
+        return await self.paginate(
             f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
             installation_id,
-            params={"per_page": 100},
         )
 
     async def get_combined_status(
@@ -426,6 +585,82 @@ class GitHubClient:
 
     async def get_user(self, login: str, installation_id: int) -> dict:
         return await self.get(f"/users/{login}", installation_id)
+
+    async def search_issues(
+        self,
+        query: str,
+        installation_id: int,
+        *,
+        per_page: int = 100,
+        page: int = 1,
+        sort: str | None = None,
+        order: str | None = None,
+    ) -> dict:
+        """
+        Run a GitHub issue/PR search and return one result page.
+        """
+        params: dict[str, Any] = {
+            "q": query,
+            "per_page": per_page,
+            "page": page,
+        }
+        if sort:
+            params["sort"] = sort
+        if order:
+            params["order"] = order
+
+        return await self.get("/search/issues", installation_id, params=params)
+
+    async def paginate_search(
+        self,
+        query: str,
+        installation_id: int,
+        *,
+        per_page: int = 100,
+        max_pages: int = MAX_PAGES,
+        sort: str | None = None,
+        order: str | None = None,
+    ) -> list[dict]:
+        """
+        Return all matching search results up to the configured page cap.
+        """
+        items: list[dict] = []
+        page = 1
+
+        while page <= max_pages:
+            result = await self.search_issues(
+                query,
+                installation_id,
+                per_page=per_page,
+                page=page,
+                sort=sort,
+                order=order,
+            )
+
+            batch = result.get("items", [])
+            if not isinstance(batch, list):
+                log.warning(
+                    "Unexpected search payload for %s (page %d): %s",
+                    query,
+                    page,
+                    type(batch).__name__,
+                )
+                return items
+
+            items.extend(batch)
+
+            if len(batch) < per_page:
+                return items
+
+            page += 1
+
+        log.warning(
+            "Search pagination for %s reached the %d-page cap; "
+            "results may be truncated",
+            query,
+            max_pages,
+        )
+        return items
 
     async def get_collaborator_permission(
         self,
@@ -453,17 +688,16 @@ class GitHubClient:
             return []
 
     async def list_installations(self) -> list[dict]:
-        resp = await self._http.get(
-            "/app/installations", headers=self._app_headers(), params={"per_page": 100}
-        )
-        resp.raise_for_status()
-        return resp.json()
+        """Every installation of this app, across all pages."""
+        return await self._paginate_app("/app/installations")
 
     async def list_installation_repos(self, installation_id: int) -> list[dict]:
-        data = await self.get(
-            "/installation/repositories", installation_id, params={"per_page": 100}
+        """Every repo an installation can see — the response wraps them in an object."""
+        return await self.paginate(
+            "/installation/repositories",
+            installation_id,
+            extract="repositories",
         )
-        return data.get("repositories", [])
 
     async def create_pr_review_comment(
         self,
