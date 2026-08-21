@@ -156,7 +156,6 @@ async def test_list_issue_comments_paginates():
 
     await client.close()
 
-
 # ── Pagination ────────────────────────────────────────────────
 
 
@@ -259,7 +258,9 @@ async def test_paginate_extracts_wrapped_collection():
 async def test_paginate_breaks_on_unexpected_payload():
     client = GitHubClient()
 
-    with patch.object(client, "get", new=AsyncMock(return_value={"message": "nope"})):
+    with patch.object(
+        client, "get", new=AsyncMock(return_value={"message": "nope"})
+    ):
         items = await client.paginate("/repos/hiero/sdk-js/issues", 1)
 
     assert items == []
@@ -273,7 +274,9 @@ async def test_list_issues_walks_every_page():
     client = GitHubClient()
 
     with patch.object(
-        client, "get", new=AsyncMock(side_effect=[page(100), page(100, 100), page(5, 200)])
+        client,
+        "get",
+        new=AsyncMock(side_effect=[page(100), page(100, 100), page(5, 200)]),
     ) as mock_get:
         issues = await client.list_issues(
             "hiero", "sdk-js", 42, state="open", sort="updated"
@@ -330,5 +333,42 @@ async def test_list_installations_paginates_with_app_auth():
 
     assert len(installations) == 101
     assert mock_get.await_count == 2
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_commits_uses_path_and_per_page():
+    client = GitHubClient()
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(
+            return_value=[
+                {"sha": "abc123", "author": {"login": "bob"}},
+            ]
+        ),
+    ) as mock_get:
+        commits = await client.list_commits(
+            "hiero",
+            "sdk-js",
+            123,
+            path="app/github",
+            per_page=30,
+        )
+
+    assert commits == [
+        {"sha": "abc123", "author": {"login": "bob"}},
+    ]
+
+    mock_get.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/commits",
+        123,
+        params={
+            "path": "app/github",
+            "per_page": 30,
+        },
+    )
 
     await client.close()
