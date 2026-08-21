@@ -229,18 +229,16 @@ class ProgressionWorkflow:
         """
         Count pull requests this contributor reviewed.
 
-        The review API returns submitted reviews, including approvals and
-        change requests that have no inline review comments. Count each PR once
-        for this contributor, even if they submitted multiple review entries.
-
-        If any review lookup fails, return 0 rather than presenting an incomplete
-        review history as an accurate contributor statistic.
+        The REST fallback uses GitHub's review endpoint for each PR. To avoid
+        scanning the entire repository history when Search is unavailable, only
+        pull requests authored by or associated with the contributor are used as
+        candidates. Each qualifying PR is counted once.
         """
         try:
             prs = await self._gh.paginate(
                 f"/repos/{owner}/{repo}/pulls",
                 inst,
-                params={"state": "all"},
+                params={"state": "all", "sort": "updated", "direction": "desc"},
             )
         except Exception as exc:
             log.warning("Could not read PR history for @%s: %s", login, exc)
