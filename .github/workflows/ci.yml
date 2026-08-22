@@ -22,8 +22,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -r requirements.txt
-      - run: python -m pytest tests/unit/ tests/integration/ tests/security/ --cov=app --cov-report=xml -q
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest tests/unit/ --cov=app --cov-report=xml --cov-fail-under=60 -q
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.python-version }}

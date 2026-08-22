@@ -9,12 +9,22 @@ from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.me import router as me_router
+from app.auth.dependencies import get_current_user
 from app.db.database import get_db
-from app.db.models import AuditLog, ContributorSnapshot, PRHealthScore, StaleActionLog
+from app.db.models import (
+    AuditLog,
+    ContributorSnapshot,
+    PRHealthScore,
+    StaleActionLog,
+    User,
+)
+from app.utils.access import get_authorized_owners, verify_owner_access
 from app.utils.logger import get_logger
 
 log = get_logger("api.routes")
 router = APIRouter(prefix="/api/v1", tags=["API"])
+router.include_router(me_router)
 
 
 # Response schemas
@@ -80,14 +90,14 @@ class RepoStats(BaseModel):
     total_audit_events: int
 
 
-#Health
+# Health
 
 @router.get("/health")
 async def health():
     return {"status": "ok", "service": "hiero-maintainer-bot"}
 
 
-#Audit log 
+# Audit log
 
 @router.get("/audit", response_model=list[AuditEntry])
 async def get_audit_log(
@@ -98,11 +108,21 @@ async def get_audit_log(
     since: datetime | None = Query(None),
     limit: int = Query(default=100, le=500),
     offset: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),
+    allowed_owners: set[str] = Depends(get_authorized_owners),
     db: AsyncSession = Depends(get_db),
 ):
+    if owner:
+        await verify_owner_access(owner, user, db)
+    elif not allowed_owners:
+        return []
+
     q = select(AuditLog).order_by(desc(AuditLog.timestamp))
     if owner:
         q = q.where(AuditLog.owner == owner)
+    else:
+        q = q.where(AuditLog.owner.in_(allowed_owners))
+
     if repo:
         q = q.where(AuditLog.repo == repo)
     if action:
@@ -136,11 +156,21 @@ async def get_pr_health(
     min_score: float | None = Query(None),
     max_score: float | None = Query(None),
     limit: int = Query(default=50, le=200),
+    user: User = Depends(get_current_user),
+    allowed_owners: set[str] = Depends(get_authorized_owners),
     db: AsyncSession = Depends(get_db),
 ):
+    if owner:
+        await verify_owner_access(owner, user, db)
+    elif not allowed_owners:
+        return []
+
     q = select(PRHealthScore).order_by(desc(PRHealthScore.created_at))
     if owner:
         q = q.where(PRHealthScore.owner == owner)
+    else:
+        q = q.where(PRHealthScore.owner.in_(allowed_owners))
+
     if repo:
         q = q.where(PRHealthScore.repo == repo)
     if pr_author:
@@ -158,8 +188,10 @@ async def get_pr_health(
 async def get_pr_health_stats(
     owner: str = Query(...),
     repo: str = Query(...),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await verify_owner_access(owner, user, db)
     result = await db.execute(
         select(
             func.avg(PRHealthScore.score).label("avg_score"),
@@ -179,7 +211,7 @@ async def get_pr_health_stats(
     }
 
 
-# Contributors 
+# Contributors
 
 @router.get("/contributors", response_model=list[ContributorEntry])
 async def get_contributors(
@@ -188,11 +220,21 @@ async def get_contributors(
     login: str | None = Query(None),
     eligible_for: str | None = Query(None),
     limit: int = Query(default=50, le=200),
+    user: User = Depends(get_current_user),
+    allowed_owners: set[str] = Depends(get_authorized_owners),
     db: AsyncSession = Depends(get_db),
 ):
+    if owner:
+        await verify_owner_access(owner, user, db)
+    elif not allowed_owners:
+        return []
+
     q = select(ContributorSnapshot).order_by(desc(ContributorSnapshot.recorded_at))
     if owner:
         q = q.where(ContributorSnapshot.owner == owner)
+    else:
+        q = q.where(ContributorSnapshot.owner.in_(allowed_owners))
+
     if repo:
         q = q.where(ContributorSnapshot.repo == repo)
     if login:
@@ -204,14 +246,17 @@ async def get_contributors(
     return result.scalars().all()
 
 
-# Repo stats 
+# Repo stats
 
 @router.get("/repos/stats", response_model=RepoStats)
 async def get_repo_stats(
     owner: str = Query(...),
     repo: str = Query(...),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await verify_owner_access(owner, user, db)
+
     async def count(model, **filters):
         q = select(func.count()).select_from(model)
         for col, val in filters.items():
@@ -238,7 +283,7 @@ async def get_repo_stats(
     )
 
 
-# Stale log 
+# Stale log
 
 @router.get("/stale-log")
 async def get_stale_log(
@@ -246,11 +291,21 @@ async def get_stale_log(
     repo: str | None = Query(None),
     action: str | None = Query(None),
     limit: int = Query(default=100, le=500),
+    user: User = Depends(get_current_user),
+    allowed_owners: set[str] = Depends(get_authorized_owners),
     db: AsyncSession = Depends(get_db),
 ):
+    if owner:
+        await verify_owner_access(owner, user, db)
+    elif not allowed_owners:
+        return []
+
     q = select(StaleActionLog).order_by(desc(StaleActionLog.occurred_at))
     if owner:
         q = q.where(StaleActionLog.owner == owner)
+    else:
+        q = q.where(StaleActionLog.owner.in_(allowed_owners))
+
     if repo:
         q = q.where(StaleActionLog.repo == repo)
     if action:
@@ -258,3 +313,4 @@ async def get_stale_log(
     q = q.limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
+

@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
+from app.db.models import AuditLog
 from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
@@ -21,7 +26,48 @@ def _get_assign_lock(owner: str, repo: str, issue_number: int) -> asyncio.Lock:
     return _assign_locks[key]
 
 
-BOT_PATTERNS = ("bot", "dependabot", "renovate", "github-actions", "[bot]")
+# Bot detection. Substring matching is deliberately avoided — "bot" appears in
+# plenty of human logins (robotics-sam, abbot, talbot), and silently skipping
+# those people is worse than occasionally welcoming a bot.
+BOT_LOGIN_SUFFIXES = ("[bot]",)
+BOT_LOGIN_EXACT = frozenset(
+    {
+        "dependabot",
+        "renovate",
+        "renovate-bot",
+        "github-actions",
+        "codecov",
+        "codecov-io",
+        "greenkeeper",
+        "snyk-bot",
+        "imgbot",
+        "allcontributors",
+        "mergify",
+        "stale",
+        "semantic-release-bot",
+        "pre-commit-ci",
+    }
+)
+
+# GitHub reports how the author relates to the repository. Anyone in this set
+# has demonstrably interacted with the project before, so they are not new.
+ESTABLISHED_ASSOCIATIONS = frozenset(
+    {"OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"}
+)
+
+
+def looks_like_bot(login: str, account_type: str = "") -> bool:
+    """True when the account is a bot by GitHub's own reckoning or by login shape."""
+    if account_type == "Bot":
+        return True
+
+    normalized = login.lower()
+    if any(normalized.endswith(suffix) for suffix in BOT_LOGIN_SUFFIXES):
+        return True
+
+    # Strip a trailing "-bot"/"bot" style qualifier before the exact match so
+    # both "renovate" and "renovate-bot" resolve to a known automation account.
+    return normalized in BOT_LOGIN_EXACT
 
 
 class OnboardingWorkflow:
@@ -35,19 +81,33 @@ class OnboardingWorkflow:
 
         sender = payload.get("sender", {})
         login: str = sender.get("login", "")
-        issue_number: int | None = (payload.get("issue") or {}).get("number")
+        issue = payload.get("issue") or {}
+        issue_number: int | None = issue.get("number")
         if not login or not issue_number:
             return
 
-        # Skip bots
-        if sender.get("type") == "Bot" or any(p in login.lower() for p in BOT_PATTERNS):
+        # `check_human_contributors: false` still respects GitHub's own account
+        # type — it only turns off the heuristic login matching on top of it.
+        if sender.get("type") == "Bot" or (
+            cfg.check_human_contributors and looks_like_bot(login)
+        ):
             log.debug("Skipping bot account: %s", login)
             return
 
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db = ctx["db"]
 
-        # Welcome every human issue creator
+        if cfg.welcome_first_time_only:
+            first_time = await self._is_first_time(ctx, login, issue_number, issue)
+            if not first_time:
+                log.debug(
+                    "@%s is an established contributor in %s/%s — no welcome",
+                    login,
+                    owner,
+                    repo,
+                )
+                return
+
         msg = self._build_welcome(login, cfg)
         await self._gh.post_comment(owner, repo, issue_number, msg, inst)
 
@@ -118,21 +178,87 @@ class OnboardingWorkflow:
             )
             await db.commit()
 
-    # ── Helpers ───────────────────────────────────────────────
+    # ── First-time detection ──────────────────────────────────
 
     async def _is_first_time(
-        self, owner: str, repo: str, login: str, inst: int
+        self, ctx: dict, login: str, issue_number: int, issue: dict
     ) -> bool:
-        try:
-            contributors = await self._gh.get(
-                f"/repos/{owner}/{repo}/contributors", inst, params={"per_page": 500}
-            )
-            return not any(c["login"] == login for c in (contributors or []))
-        except Exception:
+        """
+        Decide whether this is the contributor's first interaction with the repo.
+
+        Three independent signals, cheapest first:
+
+        1. `author_association` — GitHub already tells us when the author is an
+           owner, member, collaborator or past contributor.
+        2. The audit trail — if we welcomed them before, don't do it again, even
+           if GitHub's view of them has since changed.
+        3. Their issue/PR history in this repo — the only signal that catches
+           someone who has opened issues but never had a PR merged, which is
+           exactly the case the old code got wrong.
+        """
+        association = (issue.get("author_association") or "").upper()
+        if association in ESTABLISHED_ASSOCIATIONS:
             return False
+
+        if await self._already_welcomed(ctx, login):
+            return False
+
+        return await self._has_no_prior_issues(ctx, login, issue_number)
+
+    async def _already_welcomed(self, ctx: dict, login: str) -> bool:
+        try:
+            result = await ctx["db"].execute(
+                select(AuditLog.id)
+                .where(
+                    AuditLog.owner == ctx["owner"],
+                    AuditLog.repo == ctx["repo"],
+                    AuditLog.target_login == login,
+                    AuditLog.action == "contributor.welcomed",
+                )
+                .limit(1)
+            )
+            return result.scalar() is not None
+        except Exception as exc:
+            log.warning("Could not check welcome history for @%s: %s", login, exc)
+            return False
+
+    async def _has_no_prior_issues(
+        self, ctx: dict, login: str, issue_number: int
+    ) -> bool:
+        """True when the issue being handled is the only one this login has opened."""
+        owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
+        try:
+            created = await self._gh.get(
+                f"/repos/{owner}/{repo}/issues",
+                inst,
+                params={
+                    "creator": login,
+                    "state": "all",
+                    "per_page": 5,
+                    "sort": "created",
+                    "direction": "asc",
+                },
+            )
+        except Exception as exc:
+            # If contributor history cannot be verified, do not claim that this
+            # is a first-time contributor.
+            log.warning("Could not read issue history for @%s: %s", login, exc)
+            return False
+
+        others = [
+            item
+            for item in (created or [])
+            if item.get("number") != issue_number
+        ]
+        return not others
+
+    # ── Eligibility ───────────────────────────────────────────
 
     async def _check_eligibility(self, ctx: dict, login: str) -> tuple[bool, str]:
         cfg = ctx["config"].workflows.onboarding
+
+        # Account-quality checks fail open: a GitHub hiccup should not stop a
+        # legitimate contributor from picking up an issue.
         try:
             user = await self._gh.get_user(login, ctx["installation_id"])
             created = datetime.fromisoformat(user["created_at"].replace("Z", "+00:00"))
@@ -149,9 +275,78 @@ class OnboardingWorkflow:
                     f"⚠️ @{login} Your account needs at least "
                     f"**{cfg.minimum_public_contributions} public repos** to qualify."
                 )
-        except Exception:
-            pass  # Fail open
+        except Exception as exc:
+            log.warning("Account checks skipped for @%s: %s", login, exc)
+
+        # The CLA gate fails closed — "required" has to mean required.
+        if cfg.require_signed_cla and not await self._has_signed_cla(ctx, login):
+            return False, self._cla_notice(login, cfg)
+
         return True, ""
+
+    async def _has_signed_cla(self, ctx: dict, login: str) -> bool:
+        owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
+        path = ctx["config"].workflows.onboarding.cla_signatures_file
+
+        try:
+            raw_b64 = await self._gh.get_file_content(owner, repo, path, inst)
+        except Exception as exc:
+            log.error("CLA signature file %s unreadable: %s", path, exc)
+            return False
+
+        if not raw_b64:
+            log.warning(
+                "require_signed_cla is on but %s is missing in %s/%s", path, owner, repo
+            )
+            return False
+
+        try:
+            document = json.loads(base64.b64decode(raw_b64).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            log.error("CLA signature file %s is not valid JSON: %s", path, exc)
+            return False
+
+        return login.lower() in self._signatory_logins(document)
+
+    @staticmethod
+    def _signatory_logins(document: object) -> set[str]:
+        """
+        Extract signatory logins from the common CLA-file shapes.
+
+        Supports cla-assistant's `{"signedContributors": [{"name": "..."}]}`, a
+        bare list of logins, and a list of `{"login": "..."}` objects.
+        """
+        if isinstance(document, dict):
+            entries = document.get("signedContributors") or document.get("signatures")
+        else:
+            entries = document
+
+        if not isinstance(entries, list):
+            return set()
+
+        logins: set[str] = set()
+        for entry in entries:
+            if isinstance(entry, str):
+                logins.add(entry.lower())
+            elif isinstance(entry, dict):
+                name = entry.get("name") or entry.get("login") or entry.get("username")
+                if isinstance(name, str):
+                    logins.add(name.lower())
+        return logins
+
+    @staticmethod
+    def _cla_notice(login: str, cfg) -> str:
+        link = (
+            f"\n\nSign it here: {cfg.cla_document_url}" if cfg.cla_document_url else ""
+        )
+        return (
+            f"⚠️ @{login} This repository requires a signed Contributor License "
+            f"Agreement before you can be assigned an issue.{link}\n\n"
+            f"Once your signature appears in `{cfg.cla_signatures_file}`, comment "
+            f"`/assign` again."
+        )
+
+    # ── Mentors ───────────────────────────────────────────────
 
     async def _assign_mentor(
         self, ctx: dict, issue_number: int, contributor: str

@@ -33,7 +33,7 @@ def _matches(supplied: str, expected: str) -> bool:
 async def require_dashboard_auth(
     credentials: HTTPBasicCredentials | None = Depends(_security),
 ) -> None:
-    if not _auth_configured():
+    if not settings.legacy_basic_auth_enabled or not _auth_configured():
         return
 
     unauthorized = HTTPException(
