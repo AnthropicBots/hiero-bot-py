@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     log_level: str = "info"
     environment: str = "development"
 
+    # CORS
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]  # override via env in prod
+
     # Dashboard basic auth (optional)
     dashboard_username: str | None = None
     dashboard_password: str | None = None
