@@ -87,7 +87,10 @@ def test_sha1_style_header_is_rejected():
 
 
 def test_uppercase_digest_is_rejected():
-    assert_rejected(sign(SECRET, BODY).upper())
+    signature = sign(SECRET, BODY)
+    digest = signature.removeprefix("sha256=")
+
+    assert_rejected("sha256=" + digest.upper())
 
 
 def test_truncated_digest_is_rejected():

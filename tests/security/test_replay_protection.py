@@ -10,12 +10,15 @@ from app.github.replay_guard import is_replay
 
 def fresh_cache(monkeypatch, maxsize=10_000, ttl=600):
     monkeypatch.setattr(
-        replay_guard, "_seen_deliveries", TTLCache(maxsize=maxsize, ttl=ttl)
+        replay_guard,
+        "_seen_deliveries",
+        TTLCache(maxsize=maxsize, ttl=ttl),
     )
 
 
 def test_first_delivery_is_not_a_replay(monkeypatch):
     fresh_cache(monkeypatch)
+
     assert is_replay("delivery-1") is False
 
 
@@ -68,13 +71,18 @@ def test_cache_is_bounded(monkeypatch):
     assert len(replay_guard._seen_deliveries) <= 100
 
 
-def test_eviction_under_pressure_does_not_error(monkeypatch):
+def test_old_delivery_is_evicted_when_cache_is_full(monkeypatch):
     fresh_cache(monkeypatch, maxsize=10)
 
-    for i in range(50):
-        is_replay(f"delivery-{i}")
+    for i in range(10):
+        assert is_replay(f"delivery-{i}") is False
 
-    assert is_replay("delivery-49") is True
+    assert is_replay("delivery-0") is True
+
+    assert is_replay("delivery-10") is False
+
+    assert is_replay("delivery-0") is False
+    assert is_replay("delivery-10") is True
 
 
 def test_default_guard_has_a_bounded_size_and_ttl():

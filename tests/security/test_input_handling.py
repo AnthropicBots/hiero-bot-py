@@ -29,17 +29,20 @@ def test_yaml_name_tags_are_refused():
         yaml.safe_load("!!python/name:os.system {}")
 
 
-def test_yaml_aliases_are_not_expanded_into_the_schema():
-    """A billion-laughs style document must not validate into a config."""
+def test_yaml_aliases_do_not_bypass_config_schema():
+    """YAML aliases must not introduce data outside the expected schema."""
     bomb = """
     a: &a ["x", "x", "x"]
     b: &b [*a, *a, *a]
     repo: "hiero/sdk-js"
+    workflows:
+      pr_health: *b
     """
+
     data = yaml.safe_load(bomb)
 
-    config = RepoConfig.model_validate({"repo": data["repo"], "workflows": {}})
-    assert config.repo == "hiero/sdk-js"
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate(data)
 
 
 @pytest.mark.parametrize(
@@ -61,7 +64,12 @@ def test_repo_slug_rejects_traversal_and_injection(repo):
 
 def test_valid_repo_slugs_are_accepted():
     for slug in ["hiero/sdk-js", "a/b", "Org.Name/repo_name-1"]:
-        assert RepoConfig.model_validate({"repo": slug, "workflows": {}}).repo == slug
+        assert (
+            RepoConfig.model_validate(
+                {"repo": slug, "workflows": {}}
+            ).repo
+            == slug
+        )
 
 
 @pytest.mark.parametrize(
@@ -77,7 +85,12 @@ def test_valid_repo_slugs_are_accepted():
 )
 def test_out_of_range_values_are_rejected(workflows):
     with pytest.raises(ValidationError):
-        RepoConfig.model_validate({"repo": "hiero/sdk-js", "workflows": workflows})
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/sdk-js",
+                "workflows": workflows,
+            }
+        )
 
 
 def test_contradictory_stale_windows_are_rejected():
@@ -101,7 +114,11 @@ def test_unknown_focus_area_is_rejected():
             {
                 "repo": "hiero/sdk-js",
                 "workflows": {
-                    "pull_request": {"ai_review": {"focus_areas": ["rm -rf"]}}
+                    "pull_request": {
+                        "ai_review": {
+                            "focus_areas": ["rm -rf"],
+                        }
+                    }
                 },
             }
         )
@@ -141,8 +158,11 @@ async def test_audit_entries_record_actor_and_reason(db):
 
 @pytest.mark.asyncio
 async def test_audit_metadata_round_trips_untrusted_strings(db):
-    """Metadata comes from GitHub payloads; storing it must not execute it."""
-    hostile = {"label": "<script>alert(1)</script>", "team": "'; DROP TABLE x;--"}
+    """Untrusted metadata is stored as data rather than interpreted as commands."""
+    hostile = {
+        "label": "<script>alert(1)</script>",
+        "team": "'; DROP TABLE x;--",
+    }
 
     entry = await audit.record(
         db,
@@ -165,20 +185,41 @@ def test_flattened_pem_is_normalised():
         "MIIBOgIBAAJBAK"
         "-----END RSA PRIVATE KEY-----"
     )
+
     normalised = _normalize_private_key(key)
 
-    assert normalised.startswith("-----BEGIN RSA PRIVATE KEY-----\n")
-    assert normalised.endswith("\n-----END RSA PRIVATE KEY-----")
+    assert normalised.startswith(
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+    )
+    assert normalised.endswith(
+        "\n-----END RSA PRIVATE KEY-----"
+    )
 
 
 def test_escaped_newlines_are_expanded():
-    key = "-----BEGIN PRIVATE KEY-----\\nBODY\\n-----END PRIVATE KEY-----"
-    assert "\n" in _normalize_private_key(key)
+    key = (
+        "-----BEGIN PRIVATE KEY-----\\n"
+        "BODY\\n"
+        "-----END PRIVATE KEY-----"
+    )
+
+    normalised = _normalize_private_key(key)
+
+    assert normalised == (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "BODY\n"
+        "-----END PRIVATE KEY-----"
+    )
 
 
 @pytest.mark.parametrize(
     "key",
-    ["", "not a key at all", "-----BEGIN RSA PRIVATE KEY-----", base64.b64encode(b"x").decode()],
+    [
+        "",
+        "not a key at all",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        base64.b64encode(b"x").decode(),
+    ],
 )
 def test_malformed_private_keys_are_refused(key):
     with pytest.raises(RuntimeError):
@@ -186,6 +227,11 @@ def test_malformed_private_keys_are_refused(key):
 
 
 def test_unsupported_pem_type_is_refused():
-    key = "-----BEGIN CERTIFICATE-----BODY-----END CERTIFICATE-----"
+    key = (
+        "-----BEGIN CERTIFICATE-----"
+        "BODY"
+        "-----END CERTIFICATE-----"
+    )
+
     with pytest.raises(RuntimeError, match="Unsupported"):
         _normalize_private_key(key)
