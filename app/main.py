@@ -20,6 +20,7 @@ from app.github.webhooks import WebhookRouter
 from app.scheduler.jobs import BotScheduler
 from app.utils.auth import _auth_configured
 from app.utils.logger import get_logger
+from app.utils.ratelimit import RateLimitMiddleware
 from app.utils.settings import settings
 
 log = get_logger("main")
@@ -83,7 +84,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # Security Headers Middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
@@ -92,19 +92,29 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     if settings.is_production:
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
     return response
 
 
 # Global Exception Handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    log.error("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc, exc_info=exc)
+    log.error(
+        "Unhandled server exception on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc,
+        exc_info=exc,
+    )
     return JSONResponse(
         status_code=500,
         content={"detail": "An internal server error occurred."},
     )
 
+
+app.add_middleware(RateLimitMiddleware)
 
 from app.auth.dependencies import get_current_user_optional
 from app.db.models import User
@@ -163,4 +173,3 @@ async def healthz(db: AsyncSession = Depends(get_db)):
             "environment": settings.environment,
         },
     )
-
