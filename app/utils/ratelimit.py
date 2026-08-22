@@ -145,7 +145,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def _limiter_for(self, path: str) -> tuple[RateLimiter | None, str]:
         if path in EXEMPT_PATHS:
             return None, ""
-        if path.startswith("/webhook"):
+        if path == "/webhook":
             return self.webhook, "webhook"
         if path.startswith("/api/"):
             return self.api, "api"

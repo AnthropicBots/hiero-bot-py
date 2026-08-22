@@ -207,8 +207,18 @@ async def test_webhook_and_api_budgets_are_separate(client):
     for _ in range(2):
         await client.get("/api/v1/health")
 
-    assert (await client.get("/api/v1/health")).status_code == 429
-    assert (await client.post("/webhook")).status_code == 200
+    api_response = await client.get("/api/v1/health")
+    assert api_response.status_code == 429
+
+    for _ in range(2):
+        await client.post("/webhook")
+
+    webhook_response = await client.post("/webhook")
+
+    assert webhook_response.status_code == 429
+    assert int(webhook_response.headers["Retry-After"]) >= 1
+    assert webhook_response.headers["X-RateLimit-Remaining"] == "0"
+    assert webhook_response.json()["detail"] == "Rate limit exceeded"
 
 
 @pytest.mark.asyncio
