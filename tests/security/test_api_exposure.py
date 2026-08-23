@@ -1,6 +1,4 @@
-# tests/security/test_api_exposure.py
-
-import base64
+# tests/security/test_api_exposure.py — REST API attack surface (#20)
 
 import pytest
 import pytest_asyncio
@@ -8,13 +6,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.api.routes import router as api_router
+from app.auth.session import SESSION_COOKIE_NAME, create_db_session
 from app.db.database import Base, get_db
-from app.db.models import AuditLog
+from app.db.models import Account, AccountUser, AuditLog, User
 from app.main import app
-from app.utils.settings import settings
-
-USER = "maintainer"
-PASSWORD = "correct-horse-battery-staple"
 
 
 @pytest_asyncio.fixture
@@ -50,27 +45,55 @@ async def api_db():
             ]
         )
         await session.commit()
+
         yield session
 
     await engine.dispose()
 
 
-def basic(user: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{user}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
+@pytest_asyncio.fixture
+async def api_user(api_db):
+    user = User(
+        github_user_id=123456789,
+        github_login="maintainer",
+        github_email="maintainer@example.com",
+    )
+
+    account = Account(
+        github_installation_id=987654321,
+        github_account_id=987654321,
+        org_login="hiero",
+        account_type="Organization",
+        plan_tier="free",
+    )
+
+    api_db.add_all([user, account])
+    await api_db.commit()
+    await api_db.refresh(user)
+    await api_db.refresh(account)
+
+    account_user = AccountUser(
+        account_id=account.id,
+        user_id=user.id,
+        authorized=True,
+    )
+
+    api_db.add(account_user)
+    await api_db.commit()
+
+    return user
 
 
 @pytest_asyncio.fixture
-async def client(api_db, monkeypatch):
-    monkeypatch.setattr(settings, "dashboard_username", USER)
-    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
+async def client(api_db, api_user):
+    _, cookie_value = await create_db_session(api_db, api_user.id)
 
     app.dependency_overrides[get_db] = lambda: api_db
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
-        headers=basic(USER, PASSWORD),
+        cookies={SESSION_COOKIE_NAME: cookie_value},
     ) as c:
         yield c
 
@@ -94,53 +117,26 @@ async def unauthenticated_client(api_db):
 
 
 @pytest.mark.asyncio
-async def test_api_requires_authentication(
-    unauthenticated_client,
-    monkeypatch,
-):
-    monkeypatch.setattr(settings, "dashboard_username", USER)
-    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
-
+async def test_api_requires_authentication(unauthenticated_client):
     response = await unauthenticated_client.get("/api/v1/audit")
 
     assert response.status_code == 401
-    assert response.headers["WWW-Authenticate"] == "Basic"
+    assert response.json()["detail"] == "Authentication required"
 
 
 @pytest.mark.asyncio
-async def test_api_rejects_wrong_credentials(
-    unauthenticated_client,
-    monkeypatch,
-):
-    monkeypatch.setattr(settings, "dashboard_username", USER)
-    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
-
+async def test_api_rejects_invalid_bearer_token(unauthenticated_client):
     response = await unauthenticated_client.get(
         "/api/v1/audit",
-        headers=basic(USER, "wrong-password"),
+        headers={"Authorization": "Bearer invalid-session-token"},
     )
 
     assert response.status_code == 401
+    assert response.json()["detail"] == "Authentication required"
 
 
 @pytest.mark.asyncio
-async def test_api_rejects_wrong_username(
-    unauthenticated_client,
-    monkeypatch,
-):
-    monkeypatch.setattr(settings, "dashboard_username", USER)
-    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
-
-    response = await unauthenticated_client.get(
-        "/api/v1/audit",
-        headers=basic("intruder", PASSWORD),
-    )
-
-    assert response.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_api_accepts_correct_credentials(client):
+async def test_api_accepts_valid_session(client):
     response = await client.get("/api/v1/audit")
 
     assert response.status_code == 200
@@ -149,16 +145,24 @@ async def test_api_accepts_correct_credentials(client):
 # ── The API is read-only ──────────────────────────────────────
 
 
+def _registered_methods(router) -> set[str]:
+    methods: set[str] = set()
+
+    for route in router.routes:
+        if hasattr(route, "methods"):
+            methods.update(route.methods)
+        elif hasattr(route, "routes"):
+            methods.update(_registered_methods(route))
+
+    return methods
+
+
 def test_no_mutating_routes_are_registered():
     """
     Nothing under /api/v1 may create, change or delete state.
     """
-    methods = {
-        method
-        for route in api_router.routes
-        for method in route.methods
-        if method not in {"HEAD", "OPTIONS"}
-    }
+    methods = _registered_methods(api_router)
+    methods.difference_update({"HEAD", "OPTIONS"})
 
     assert methods == {"GET"}
 
@@ -186,22 +190,26 @@ async def test_write_methods_are_refused(client, method):
     ],
 )
 @pytest.mark.asyncio
-async def test_hostile_filter_values_return_no_rows(client, value):
+async def test_hostile_filter_values_are_rejected(client, value):
     response = await client.get(
         "/api/v1/audit",
         params={"owner": value},
     )
 
-    assert response.status_code == 200
-    assert response.json() == []
+    assert response.status_code == 403
+    assert "Access denied" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_the_table_still_exists_after_injection_attempts(client):
-    await client.get(
+async def test_injection_attempt_does_not_destroy_the_table(client):
+    malicious_owner = "'; DROP TABLE audit_logs; --"
+
+    malicious_response = await client.get(
         "/api/v1/audit",
-        params={"owner": "'; DROP TABLE audit_logs; --"},
+        params={"owner": malicious_owner},
     )
+
+    assert malicious_response.status_code == 403
 
     response = await client.get(
         "/api/v1/audit",
