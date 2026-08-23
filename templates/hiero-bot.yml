@@ -40,6 +40,10 @@ workflows:
 
     minimum_account_age_days: 0       # 0 = no minimum
     minimum_public_contributions: 0   # 0 = no minimum
+    # Maximum number of open issues a contributor can have assigned
+    # simultaneously in this repository.
+    # Set to null to disable the limit.
+    max_concurrent_assignments: 3
     auto_assign_mentor: false
     mentor_assignment_strategy: round-robin  # round-robin | least-busy | expertise-match
     welcome_message: |

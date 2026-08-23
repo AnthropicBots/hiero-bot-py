@@ -110,6 +110,8 @@ async def test_config_change_invalidates_cache_before_loading(db):
     }
 
     request = MagicMock()
+    request.body = AsyncMock(return_value=b"")
+    router._verify_signature = MagicMock()
     request.headers = {
         "X-GitHub-Event": "push",
     }
@@ -147,6 +149,8 @@ async def test_invalid_config_is_acknowledged_without_retrying(db):
     }
 
     request = MagicMock()
+    request.body = AsyncMock(return_value=b"")
+    router._verify_signature = MagicMock()
     request.headers = {
         "X-GitHub-Event": "pull_request",
     }

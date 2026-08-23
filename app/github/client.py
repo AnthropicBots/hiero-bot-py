@@ -282,6 +282,29 @@ class GitHubClient:
         )
         return items
 
+    async def count_assigned_open_issues(
+        self,
+        owner: str,
+        repo: str,
+        login: str,
+        installation_id: int,
+        *,
+        max_pages: int = MAX_PAGES,
+    ) -> int:
+        """Count open issues assigned to a user, excluding pull requests."""
+        items = await self.paginate(
+            f"/repos/{owner}/{repo}/issues",
+            installation_id,
+            params={
+                "assignee": login,
+                "state": "open",
+            },
+            per_page=100,
+            max_pages=max_pages,
+        )
+
+        return sum(1 for item in items if "pull_request" not in item)
+
     async def _paginate_app(
         self,
         path: str,
