@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str | None = None
 
+    # Forge provider. "github" uses the GitHub App credentials above; "gitlab"
+    # needs an access token instead, since GitLab has no App-style installation
+    # model.
+    forge_provider: str = "github"
+    gitlab_token: str | None = None
+    gitlab_base_url: str = "https://gitlab.com/api/v4"
+
     # Database
     database_url: str = "sqlite+aiosqlite:///./hiero_bot.db"
 
