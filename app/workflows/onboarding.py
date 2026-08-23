@@ -17,6 +17,7 @@ from app.utils.logger import get_logger
 log = get_logger("workflow.onboarding")
 
 _assign_locks: dict[tuple[str, str, int], asyncio.Lock] = {}
+_contributor_assign_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
 
 
 def _get_assign_lock(owner: str, repo: str, issue_number: int) -> asyncio.Lock:
@@ -24,6 +25,17 @@ def _get_assign_lock(owner: str, repo: str, issue_number: int) -> asyncio.Lock:
     if key not in _assign_locks:
         _assign_locks[key] = asyncio.Lock()
     return _assign_locks[key]
+
+
+def _get_contributor_assign_lock(
+    owner: str,
+    repo: str,
+    login: str,
+) -> asyncio.Lock:
+    key = (owner, repo, login.lower())
+    if key not in _contributor_assign_locks:
+        _contributor_assign_locks[key] = asyncio.Lock()
+    return _contributor_assign_locks[key]
 
 
 # Bot detection. Substring matching is deliberately avoided — "bot" appears in
@@ -154,12 +166,30 @@ class OnboardingWorkflow:
                 await self._gh.post_comment(owner, repo, issue_number, msg, inst)
                 return
 
-            ok, reason = await self._check_eligibility(ctx, login)
-            if not ok:
-                await self._gh.post_comment(owner, repo, issue_number, reason, inst)
-                return
+            if cfg.max_concurrent_assignments is not None:
+                async with _get_contributor_assign_lock(owner, repo, login):
+                    ok, reason = await self._check_eligibility(ctx, login)
+                    if not ok:
+                        await self._gh.post_comment(
+                            owner, repo, issue_number, reason, inst
+                        )
+                        return
 
-            await self._gh.add_assignees(owner, repo, issue_number, [login], inst)
+                    await self._gh.add_assignees(
+                        owner, repo, issue_number, [login], inst
+                    )
+            else:
+                ok, reason = await self._check_eligibility(ctx, login)
+                if not ok:
+                    await self._gh.post_comment(
+                        owner, repo, issue_number, reason, inst
+                    )
+                    return
+
+                await self._gh.add_assignees(
+                    owner, repo, issue_number, [login], inst
+                )
+
             await self._gh.post_comment(
                 owner,
                 repo,
@@ -256,6 +286,43 @@ class OnboardingWorkflow:
 
     async def _check_eligibility(self, ctx: dict, login: str) -> tuple[bool, str]:
         cfg = ctx["config"].workflows.onboarding
+        if cfg.max_concurrent_assignments is not None:
+            owner = ctx["owner"]
+            repo = ctx["repo"]
+            installation_id = ctx["installation_id"]
+
+            try:
+                current = await self._gh.count_assigned_open_issues(
+                    owner,
+                    repo,
+                    login,
+                    installation_id,
+                )
+            except Exception as exc:
+                log.error(
+                    "Could not check concurrent assignments for @%s in %s/%s: %s",
+                    login,
+                    owner,
+                    repo,
+                    exc,
+                )
+                return (
+                    False,
+                    (
+                        f"⚠️ @{login} We couldn't verify your current issue "
+                        "assignments. Please try again later."
+                    ),
+                )
+
+            if current >= cfg.max_concurrent_assignments:
+                return (
+                    False,
+                    (
+                        f"⚠️ @{login} You already have {current} open issue(s) "
+                        "assigned in this repository. Please finish one before "
+                        "taking another issue."
+                    ),
+                )
 
         # Account-quality checks fail open: a GitHub hiccup should not stop a
         # legitimate contributor from picking up an issue.

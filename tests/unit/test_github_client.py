@@ -256,6 +256,163 @@ async def test_paginate_respects_max_pages_cap():
 
 
 @pytest.mark.asyncio
+async def test_count_assigned_open_issues_single_page():
+    client = GitHubClient()
+
+    items = [
+        {"number": 1},
+        {"number": 2},
+        {"number": 3},
+    ]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(return_value=items),
+    ) as mock_get:
+        count = await client.count_assigned_open_issues(
+            "hiero",
+            "sdk-js",
+            "alice",
+            123,
+        )
+
+    assert count == 3
+    mock_get.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/issues",
+        123,
+        params={
+            "assignee": "alice",
+            "state": "open",
+            "per_page": 100,
+            "page": 1,
+        },
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_count_assigned_open_issues_paginates():
+    client = GitHubClient()
+
+    first_page = [{"number": i} for i in range(100)]
+    second_page = [{"number": 100 + i} for i in range(25)]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(side_effect=[first_page, second_page]),
+    ) as mock_get:
+        count = await client.count_assigned_open_issues(
+            "hiero",
+            "sdk-js",
+            "alice",
+            123,
+        )
+
+    assert count == 125
+    assert mock_get.await_count == 2
+
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/issues",
+        123,
+        params={
+            "assignee": "alice",
+            "state": "open",
+            "per_page": 100,
+            "page": 1,
+        },
+    )
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/issues",
+        123,
+        params={
+            "assignee": "alice",
+            "state": "open",
+            "per_page": 100,
+            "page": 2,
+        },
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_count_assigned_open_issues_excludes_pull_requests():
+    client = GitHubClient()
+
+    items = [
+        {"number": 1},
+        {"number": 2, "pull_request": {"url": "https://api.github.com/pr/2"}},
+        {"number": 3},
+        {"number": 4, "pull_request": {"url": "https://api.github.com/pr/4"}},
+    ]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(return_value=items),
+    ):
+        count = await client.count_assigned_open_issues(
+            "hiero",
+            "sdk-js",
+            "alice",
+            123,
+        )
+
+    assert count == 2
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_count_assigned_open_issues_respects_max_pages():
+    client = GitHubClient()
+
+    first_page = [{"number": i} for i in range(100)]
+    second_page = [{"number": 100 + i} for i in range(100)]
+    third_page = [{"number": 200 + i} for i in range(100)]
+    fourth_page = [{"number": 300 + i} for i in range(100)]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(
+            side_effect=[
+                first_page,
+                second_page,
+                third_page,
+                fourth_page,
+            ]
+        ),
+    ) as mock_get:
+        count = await client.count_assigned_open_issues(
+            "hiero",
+            "sdk-js",
+            "alice",
+            123,
+            max_pages=3,
+        )
+
+    assert count == 300
+    assert mock_get.await_count == 3
+
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/issues",
+        123,
+        params={
+            "assignee": "alice",
+            "state": "open",
+            "per_page": 100,
+            "page": 3,
+        },
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_paginate_preserves_caller_params():
     client = GitHubClient()
 

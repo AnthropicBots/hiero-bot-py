@@ -33,6 +33,7 @@ def mock_gh():
     gh.update_comment = AsyncMock()
     gh.add_label = AsyncMock()
     gh.add_assignees = AsyncMock()
+    gh.count_assigned_open_issues = AsyncMock(return_value=0)
     gh.remove_assignees = AsyncMock()
     gh.close_issue = AsyncMock()
     gh.list_issues = AsyncMock(return_value=[])

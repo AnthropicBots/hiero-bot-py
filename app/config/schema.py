@@ -45,6 +45,9 @@ class OnboardingConfig(BaseModel):
 
     minimum_account_age_days: int = Field(default=0, ge=0)
     minimum_public_contributions: int = Field(default=0, ge=0)
+    # Maximum number of open issues a contributor can hold in this repository.
+    # Set to null to disable the limit.
+    max_concurrent_assignments: int | None = Field(default=None, ge=1)
     auto_assign_mentor: bool = False
     mentor_assignment_strategy: MentorStrategy = "round-robin"
     welcome_message: str | None = None

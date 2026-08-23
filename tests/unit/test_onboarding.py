@@ -1,5 +1,6 @@
 # tests/unit/test_onboarding.py
 
+import asyncio
 import base64
 import json
 from datetime import datetime, timedelta, timezone
@@ -190,6 +191,114 @@ async def test_self_assign_success(mock_gh, ctx):
     await wf.handle_self_assign(ctx, make_payload(assignees=[]))
     mock_gh.add_assignees.assert_awaited_once()
     assert mock_gh.add_assignees.call_args[0][3] == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_self_assign_blocked_at_assignment_limit(mock_gh, ctx):
+    ctx["config"].workflows.onboarding.max_concurrent_assignments = 3
+    mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})
+    mock_gh.count_assigned_open_issues = AsyncMock(return_value=3)
+
+    wf = OnboardingWorkflow(mock_gh)
+    await wf.handle_self_assign(ctx, make_payload(assignees=[]))
+
+    mock_gh.add_assignees.assert_not_awaited()
+    mock_gh.count_assigned_open_issues.assert_awaited_once_with(
+        "hiero",
+        "sdk-js",
+        "alice",
+        42,
+    )
+    body = mock_gh.post_comment.call_args[0][3]
+    assert "already have 3 open issue(s)" in body
+
+
+@pytest.mark.asyncio
+async def test_self_assign_allowed_under_assignment_limit(mock_gh, ctx):
+    ctx["config"].workflows.onboarding.max_concurrent_assignments = 3
+    mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})
+    mock_gh.count_assigned_open_issues = AsyncMock(return_value=2)
+
+    wf = OnboardingWorkflow(mock_gh)
+    await wf.handle_self_assign(ctx, make_payload(assignees=[]))
+
+    mock_gh.count_assigned_open_issues.assert_awaited_once_with(
+        "hiero",
+        "sdk-js",
+        "alice",
+        42,
+    )
+    mock_gh.add_assignees.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_self_assign_skips_assignment_limit_when_unset(mock_gh, ctx):
+    ctx["config"].workflows.onboarding.max_concurrent_assignments = None
+    mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})
+
+    wf = OnboardingWorkflow(mock_gh)
+    await wf.handle_self_assign(ctx, make_payload(assignees=[]))
+
+    mock_gh.count_assigned_open_issues.assert_not_awaited()
+    mock_gh.add_assignees.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_self_assign_fails_closed_when_assignment_count_lookup_fails(
+    mock_gh, ctx
+):
+    ctx["config"].workflows.onboarding.max_concurrent_assignments = 3
+    mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})
+    mock_gh.count_assigned_open_issues = AsyncMock(
+        side_effect=RuntimeError("GitHub API down")
+    )
+
+    wf = OnboardingWorkflow(mock_gh)
+    await wf.handle_self_assign(ctx, make_payload(assignees=[]))
+
+    mock_gh.add_assignees.assert_not_awaited()
+    body = mock_gh.post_comment.call_args[0][3]
+    assert "couldn't verify your current issue assignments" in body
+
+
+@pytest.mark.asyncio
+async def test_self_assign_concurrent_requests_respect_assignment_limit(mock_gh, ctx):
+    ctx["config"].workflows.onboarding.max_concurrent_assignments = 3
+
+    mock_gh.get = AsyncMock(
+        side_effect=[
+            {"number": 1, "assignees": []},
+            {"number": 2, "assignees": []},
+        ]
+    )
+
+    assignment_count = 2
+
+    async def count_assigned_open_issues(*args):
+        return assignment_count
+
+    mock_gh.count_assigned_open_issues = AsyncMock(
+        side_effect=count_assigned_open_issues
+    )
+
+    async def add_assignee(*args):
+        nonlocal assignment_count
+        assignment_count += 1
+
+    mock_gh.add_assignees = AsyncMock(side_effect=add_assignee)
+
+    wf = OnboardingWorkflow(mock_gh)
+
+    payload_one = make_payload(issue_number=1, assignees=[])
+    payload_two = make_payload(issue_number=2, assignees=[])
+
+    await asyncio.gather(
+        wf.handle_self_assign(ctx, payload_one),
+        wf.handle_self_assign(ctx, payload_two),
+    )
+
+    assert mock_gh.add_assignees.await_count == 1
+    assert mock_gh.count_assigned_open_issues.await_count == 2
 
 
 @pytest.mark.asyncio
