@@ -178,6 +178,17 @@ python .github/scripts/check_audit_severity.py audit-report.json
 
 CI runs the same check and fails the build on High/Critical CVSS findings. `pip-audit` has no built-in severity flag — filtering is done by the script above against each finding's CVSS score.
 
+### Webhook secret rotation
+
+To rotate `GITHUB_WEBHOOK_SECRET` without downtime:
+
+1. Set the new secret as `GITHUB_WEBHOOK_SECRET` and the previous secret as `GITHUB_WEBHOOK_SECRET_OLD`.
+2. Deploy the application with both secrets configured.
+3. Update the GitHub App webhook configuration to use the new secret.
+4. After the grace period, remove `GITHUB_WEBHOOK_SECRET_OLD` and redeploy.
+
+During the rotation window, both the current and previous secrets are accepted.
+
 ## Configuration
 
 Add `.github/hiero-bot.yml` to any repo where the app is installed. Full reference: [`templates/hiero-bot.yml`](templates/hiero-bot.yml). The bot is completely silent if no config file exists — nothing runs by accident.
@@ -194,7 +205,9 @@ Add `.github/hiero-bot.yml` to any repo where the app is installed. Full referen
 | `PORT` | ❌ | Default: `8000` |
 | `LOG_LEVEL` | ❌ | debug/info/warn/error |
 | `ENVIRONMENT` | ❌ | development / production |
-| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | ❌ | Reserved for dashboard access control — defined but not yet enforced; tracked in the roadmap below |
+| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | ✅ production | Basic Auth credentials; required before exposing the dashboard or API publicly |
+
+> **Production security:** `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` are required before exposing the bot publicly. If either is unset in production, the dashboard and REST API are unauthenticated.
 
 ## Ecosystem & standing
 
