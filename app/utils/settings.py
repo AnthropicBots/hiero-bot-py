@@ -45,7 +45,8 @@ class Settings(BaseSettings):
     token_encryption_key: str = "dev-token-encryption-key-32b-change-in-prod="
     legacy_basic_auth_enabled: bool = True
 
-    cors_origins: list[str] = ["*"]
+    # Non-prod default below; override via env (comma/JSON-list) in production.
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     # Stripe Billing
     stripe_secret_key: str | None = None
