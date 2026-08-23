@@ -1,4 +1,4 @@
-# tests/security/test_dashboard_auth.py — dashboard / API access control (#20)
+# tests/security/test_dashboard_auth.py
 
 import base64
 
@@ -6,6 +6,7 @@ import pytest
 from fastapi import Depends, FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from app.main import app
 from app.utils.auth import _auth_configured, _matches, require_dashboard_auth
 from app.utils.settings import settings
 
@@ -27,6 +28,18 @@ def build_app():
 async def client():
     async with AsyncClient(
         transport=ASGITransport(app=build_app()), base_url="http://test"
+    ) as c:
+        yield c
+
+
+@pytest.fixture
+async def real_app_client(monkeypatch):
+    monkeypatch.setattr(settings, "dashboard_username", USER)
+    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
     ) as c:
         yield c
 
@@ -124,6 +137,37 @@ async def test_non_ascii_credentials_are_unusable_end_to_end(client, monkeypatch
 
     response = await client.get("/protected", headers=basic("wächter", "pässwörd"))
     assert response.status_code == 401
+
+
+# ── Real dashboard integration ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_real_dashboard_requires_authentication(real_app_client):
+    response = await real_app_client.get("/")
+
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Basic"
+
+
+@pytest.mark.asyncio
+async def test_real_dashboard_rejects_wrong_credentials(real_app_client):
+    response = await real_app_client.get(
+        "/",
+        headers=basic(USER, "wrong-password"),
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_real_dashboard_accepts_correct_credentials(real_app_client):
+    response = await real_app_client.get(
+        "/",
+        headers=basic(USER, PASSWORD),
+    )
+
+    assert response.status_code == 200
 
 
 # ── Configuration ─────────────────────────────────────────────

@@ -1,4 +1,4 @@
-# tests/security/test_api_exposure.py — REST API attack surface (#20)
+# tests/security/test_api_exposure.py
 
 import base64
 
@@ -12,6 +12,9 @@ from app.db.database import Base, get_db
 from app.db.models import AuditLog
 from app.main import app
 from app.utils.settings import settings
+
+USER = "maintainer"
+PASSWORD = "correct-horse-battery-staple"
 
 
 @pytest_asyncio.fixture
@@ -52,30 +55,22 @@ async def api_db():
     await engine.dispose()
 
 
+def basic(user: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{user}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
 @pytest_asyncio.fixture
 async def client(api_db, monkeypatch):
-    monkeypatch.setattr(
-        settings,
-        "dashboard_username",
-        "maintainer",
-    )
-    monkeypatch.setattr(
-        settings,
-        "dashboard_password",
-        "correct-horse-battery-staple",
-    )
+    monkeypatch.setattr(settings, "dashboard_username", USER)
+    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
 
     app.dependency_overrides[get_db] = lambda: api_db
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
-        headers={
-            "Authorization": "Basic "
-            + base64.b64encode(
-                b"maintainer:correct-horse-battery-staple"
-            ).decode(),
-        },
+        headers=basic(USER, PASSWORD),
     ) as c:
         yield c
 
@@ -95,21 +90,16 @@ async def unauthenticated_client(api_db):
     app.dependency_overrides.clear()
 
 
+# ── Authentication ────────────────────────────────────────────
+
+
 @pytest.mark.asyncio
 async def test_api_requires_authentication(
     unauthenticated_client,
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        settings,
-        "dashboard_username",
-        "maintainer",
-    )
-    monkeypatch.setattr(
-        settings,
-        "dashboard_password",
-        "correct-horse-battery-staple",
-    )
+    monkeypatch.setattr(settings, "dashboard_username", USER)
+    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
 
     response = await unauthenticated_client.get("/api/v1/audit")
 
@@ -122,24 +112,28 @@ async def test_api_rejects_wrong_credentials(
     unauthenticated_client,
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        settings,
-        "dashboard_username",
-        "maintainer",
-    )
-    monkeypatch.setattr(
-        settings,
-        "dashboard_password",
-        "correct-horse-battery-staple",
-    )
-
-    credentials = base64.b64encode(
-        b"maintainer:wrong-password"
-    ).decode()
+    monkeypatch.setattr(settings, "dashboard_username", USER)
+    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
 
     response = await unauthenticated_client.get(
         "/api/v1/audit",
-        headers={"Authorization": f"Basic {credentials}"},
+        headers=basic(USER, "wrong-password"),
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_api_rejects_wrong_username(
+    unauthenticated_client,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "dashboard_username", USER)
+    monkeypatch.setattr(settings, "dashboard_password", PASSWORD)
+
+    response = await unauthenticated_client.get(
+        "/api/v1/audit",
+        headers=basic("intruder", PASSWORD),
     )
 
     assert response.status_code == 401
