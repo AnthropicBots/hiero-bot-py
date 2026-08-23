@@ -13,6 +13,28 @@ from app.utils.logger import get_logger
 
 log = get_logger("workflow.progression")
 
+DAYS_PER_MONTH = 30
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """Parse a GitHub ISO-8601 timestamp, returning None on anything unusable."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _months_since(start: datetime | None) -> int:
+    if start is None:
+        return 0
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    days = (datetime.now(timezone.utc) - start).days
+    return max(0, days // DAYS_PER_MONTH)
+
+
 MILESTONES = {
     1: "🎊 **First merged PR** in this repo — welcome to the Hiero contributor community!",
     5: "🌟 **5 merged PRs** — you're building real momentum!",
@@ -110,51 +132,181 @@ class ProgressionWorkflow:
     async def _collect_stats(
         self, owner: str, repo: str, login: str, inst: int
     ) -> dict:
-        merged_prs = 0
-        reviews_given = 0
-        months_active = 0
-        first_contribution: datetime | None = None
+        """
+        Gather a contributor's merged-PR count, reviews given, and tenure.
+
+        Prefers the search API — one request answers a question that would
+        otherwise need the repo's entire PR history — and falls back to
+        paginated REST when search is unavailable or rate limited.
+        """
+        stats = await self._collect_stats_via_search(owner, repo, login, inst)
+        if stats is None:
+            stats = await self._collect_stats_via_rest(owner, repo, login, inst)
+        return stats
+
+    async def _collect_stats_via_search(
+        self, owner: str, repo: str, login: str, inst: int
+    ) -> dict | None:
+        slug = f"{owner}/{repo}"
 
         try:
-            prs = await self._gh.get(
-                f"/repos/{owner}/{repo}/pulls", inst,
-                params={"state": "closed", "per_page": 100}
+            merged = await self._gh.search_issues(
+                f"repo:{slug} type:pr author:{login} is:merged",
+                inst,
+                per_page=1,
+                sort="created",
+                order="asc",
             )
-            merged = [p for p in (prs or [])
-                      if p.get("user", {}).get("login") == login and p.get("merged_at")]
-            merged_prs = len(merged)
-            if merged:
-                dates = [
-                    datetime.fromisoformat(p["merged_at"].replace("Z", "+00:00"))
-                    for p in merged
-                ]
-                first_contribution = min(dates)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Search-based merged-PR stats unavailable for @%s: %s", login, exc)
+            return None
+
+        merged_prs = int(merged.get("total_count") or 0)
+
+        first_contribution = None
+        items = merged.get("items") or []
+        if items:
+            first_contribution = _parse_ts(
+                items[0].get("closed_at") or items[0].get("created_at")
+            )
 
         try:
-            review_comments = await self._gh.get(
-                f"/repos/{owner}/{repo}/pulls/comments", inst,
-                params={"per_page": 100}
+            reviews_given = await self._count_reviews_via_search(
+                owner, repo, login, inst
             )
-            reviews_given = sum(
-                1 for c in (review_comments or [])
-                if (c.get("user") or {}).get("login") == login
-            )
-        except Exception:
-            pass
-
-        if first_contribution:
-            months_active = max(0, int(
-                (datetime.now(timezone.utc) - first_contribution).days / 30
-            ))
+        except Exception as exc:
+            log.warning("Search-based review stats unavailable for @%s: %s", login, exc)
+            return None
 
         return {
             "merged_prs": merged_prs,
             "reviews_given": reviews_given,
-            "months_active": months_active,
+            "months_active": _months_since(first_contribution),
             "login": login,
+            "source": "search",
         }
+
+    async def _count_reviews_via_search(
+        self, owner: str, repo: str, login: str, inst: int
+    ) -> int:
+        """
+        Count submitted review objects by using `reviewed-by:` only to find
+        candidate pull requests, then inspecting the actual review objects.
+        """
+        slug = f"{owner}/{repo}"
+
+        items = await self._gh.paginate_search(
+            f"repo:{slug} type:pr reviewed-by:{login}",
+            inst,
+            per_page=100,
+        )
+
+        reviews_given = 0
+
+        for item in items:
+            pr_number = item.get("number")
+            if not pr_number:
+                continue
+
+            reviews = await self._gh.list_pr_reviews(
+                owner, repo, pr_number, inst
+            )
+
+            reviews_given += sum(
+                1
+                for review in reviews
+                if (review.get("user") or {}).get("login") == login
+            )
+
+        return reviews_given
+
+    async def _collect_stats_via_rest(
+        self, owner: str, repo: str, login: str, inst: int
+    ) -> dict:
+        merged_prs = 0
+        first_contribution: datetime | None = None
+
+        try:
+            # #41: this listing used to stop at the first 100 closed PRs, so on
+            # any busy repo a long-standing contributor's merged count silently
+            # capped out (usually at 0, since page one is the most recent PRs).
+            prs = await self._gh.paginate(
+                f"/repos/{owner}/{repo}/pulls",
+                inst,
+                params={"state": "closed"},
+            )
+            merged = [
+                p
+                for p in prs
+                if (p.get("user") or {}).get("login") == login and p.get("merged_at")
+            ]
+            merged_prs = len(merged)
+
+            dates = [_parse_ts(p["merged_at"]) for p in merged]
+            dates = [d for d in dates if d]
+            if dates:
+                first_contribution = min(dates)
+        except Exception as exc:
+            log.warning("Could not read PR history for @%s: %s", login, exc)
+
+        return {
+            "merged_prs": merged_prs,
+            "reviews_given": await self._count_reviews_via_rest(
+                owner, repo, login, inst
+            ),
+            "months_active": _months_since(first_contribution),
+            "login": login,
+            "source": "rest",
+        }
+
+    async def _count_reviews_via_rest(
+        self, owner: str, repo: str, login: str, inst: int
+    ) -> int:
+        """
+        Count submitted reviews by the contributor.
+
+        The fallback walks the repository's pull-request history and counts
+        every submitted review object authored by the contributor. A review
+        submitted multiple times on the same PR is counted once per submitted
+        review.
+        """
+        try:
+            prs = await self._gh.paginate(
+                f"/repos/{owner}/{repo}/pulls",
+                inst,
+                params={"state": "all", "sort": "updated", "direction": "desc"},
+            )
+        except Exception as exc:
+            log.warning("Could not read PR history for @%s: %s", login, exc)
+            return 0
+
+        reviews_given = 0
+
+        for pr in prs:
+            pr_number = pr.get("number")
+            if not pr_number:
+                continue
+
+            try:
+                reviews = await self._gh.list_pr_reviews(
+                    owner, repo, pr_number, inst
+                )
+            except Exception as exc:
+                log.warning(
+                    "Could not read reviews for PR #%s (@%s): %s",
+                    pr_number,
+                    login,
+                    exc,
+                )
+                continue
+
+            reviews_given += sum(
+                1
+                for review in reviews
+                if (review.get("user") or {}).get("login") == login
+            )
+
+        return reviews_given
 
     @staticmethod
     def _check_eligibility(stats: dict, cfg) -> str | None:

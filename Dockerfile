@@ -11,7 +11,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY . .
-RUN addgroup --system botgroup && adduser --system --ingroup botgroup botuser
+RUN addgroup --system botgroup && adduser --system --ingroup botgroup botuser && \
+    chown -R botuser:botgroup /app
 USER botuser
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \

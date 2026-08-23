@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 
+from sqlalchemy import select
+
 from app.ai.reviewer import AIReviewer
+from app.db.models import ReviewerRecommendation
 from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
@@ -13,6 +17,13 @@ log = get_logger("workflow.pullrequest")
 
 LABEL_PASS = "quality: ✅ passed"
 LABEL_FAIL = "quality: ❌ needs work"
+
+# Reviewer recommendation budget. A PR spreading across more than a handful of
+# directories has no sharp ownership signal, so querying more of them buys
+# noise rather than accuracy — and every extra directory is another API call.
+MAX_PATHS_QUERIED = 5
+COMMITS_PER_PATH = 30
+MAX_RECOMMENDATIONS = 2
 
 
 class QualityCheck:
@@ -27,7 +38,7 @@ class PullRequestWorkflow:
         self._gh = gh
         self._ai = AIReviewer()
 
-    async def handle_pr_opened(self, ctx: dict, payload: dict) -> None:
+    async def handle_pr_opened(self, ctx: dict, payload: dict, action: str = "opened") -> None:
         cfg = ctx["config"].workflows.pull_request
         if not cfg.enabled:
             return
@@ -44,11 +55,38 @@ class PullRequestWorkflow:
         checks = await self._run_quality_checks(ctx, pr)
         all_passed = all(c.passed for c in checks)
 
-        # Post quality report
+        # Post or update quality report
         if checks:
-            await self._gh.post_comment(
-                owner, repo, pr_number, self._build_report(checks), inst
+            report = self._build_report(checks)
+            comments = await self._gh.list_issue_comments(
+                owner, repo, pr_number, inst
             )
+
+            existing_comment = next(
+                (
+                    comment
+                    for comment in comments
+                    if comment.get("body", "").startswith("## 🔍 Quality Gate Report")
+                ),
+                None,
+            )
+
+            if existing_comment:
+                await self._gh.update_comment(
+                    owner,
+                    repo,
+                    existing_comment["id"],
+                    report,
+                    inst,
+                )
+            else:
+                await self._gh.post_comment(
+                    owner,
+                    repo,
+                    pr_number,
+                    report,
+                    inst,
+                )
 
         # Label
         if cfg.auto_label:
@@ -71,11 +109,11 @@ class PullRequestWorkflow:
         )
 
         # AI review
-        if cfg.ai_review.enabled:
+        if action in ("opened", "reopened") and cfg.ai_review.enabled:
             await self._run_ai_review(ctx, pr)
 
-        # Reviewer recommendation
-        if cfg.reviewer_recommendation:
+# Reviewer recommendation
+        if action in ("opened", "reopened") and cfg.reviewer_recommendation:
             await self._recommend_reviewers(ctx, pr)
 
         await db.commit()
@@ -87,6 +125,13 @@ class PullRequestWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         pr_number = pr["number"]
         checks: list[QualityCheck] = []
+        _cached_files: list[dict] | None = None
+
+        async def get_files() -> list[dict]:
+            nonlocal _cached_files
+            if _cached_files is None:
+                _cached_files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
+            return _cached_files
 
         # Linked issue
         if gates.require_linked_issue:
@@ -108,7 +153,7 @@ class PullRequestWorkflow:
 
         # Tests
         if gates.require_tests:
-            files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
+            files = await get_files()
             test_pats = [
                 re.compile(p)
                 for p in [
@@ -203,8 +248,7 @@ class PullRequestWorkflow:
 
         # Changelog
         if gates.require_changelog_entry:
-            if "files" not in dir(self):  # avoid re-fetching
-                files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
+            files = await get_files()
             has_cl = any(
                 re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
                 for f in files
@@ -256,7 +300,7 @@ class PullRequestWorkflow:
 
 {"" if all_passed else "> Please address failing checks before requesting a review."}"""
 
-    # ── AI Review ─────────────────────────────────────────────
+    # ── AI Review & Recommendation ───────────────────────────────────────────── 
 
     async def _run_ai_review(self, ctx: dict, pr: dict) -> None:
         import base64
@@ -309,7 +353,13 @@ class PullRequestWorkflow:
             f"{result['summary']}\n\n"
             f"---\n_Automated AI review — a human maintainer will also review._"
         )
-        await self._gh.post_comment(owner, repo, pr_number, body, inst)
+        await self._gh.post_comment(
+            owner,
+            repo,
+            pr_number,
+            body,
+            inst,
+        )
 
         for comment in result.get("comments", [])[: cfg.max_comments]:
             await self._gh.create_pr_review_comment(
@@ -337,43 +387,78 @@ class PullRequestWorkflow:
     # ── Reviewer recommendation ───────────────────────────────
 
     async def _recommend_reviewers(self, ctx: dict, pr: dict) -> None:
-        """Suggest reviewers based on recent contribution history."""
+        """
+        Suggest reviewers from the commit history of the directories this PR touches.
+
+        The previous implementation listed the 50 most recent closed PRs and
+        then fetched the file list of every one of them — up to 51 API calls per
+        opened PR, serially, and it only ever saw whoever *authored* those PRs
+        rather than who reviewed them. This asks GitHub for the commit history of
+        each touched directory instead: a handful of concurrent requests, and the
+        answer is real file history rather than a proxy for it.
+        """
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         pr_number = pr["number"]
         author = pr["user"]["login"]
 
         try:
             files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
-            touched_paths = [f["filename"] for f in files]
+            directories = _touched_directories(files)
+            if not directories:
+                return
 
-            # Get recent closed PRs touching same paths
-            recent_prs = await self._gh.get(
-                f"/repos/{owner}/{repo}/pulls",
-                inst,
-                params={"state": "closed", "per_page": 50},
+            histories = await asyncio.gather(
+                *(
+                    self._gh.list_commits(
+                        owner, repo, inst, path=directory, per_page=COMMITS_PER_PATH
+                    )
+                    for directory in directories
+                ),
+                return_exceptions=True,
             )
 
-            scores: dict[str, float] = {}
-            for rpr in recent_prs or []:
-                reviewer = (rpr.get("user") or {}).get("login", "")
-                if not reviewer or reviewer == author:
-                    continue
-                pr_files = await self._gh.list_pr_files(
-                    owner, repo, rpr["number"], inst
-                )
-                overlap = sum(
-                    1
-                    for f in pr_files
-                    if any(f["filename"].rsplit("/", 1)[0] in p for p in touched_paths)
-                )
-                if overlap:
-                    scores[reviewer] = scores.get(reviewer, 0) + overlap
-
+            scores = _score_candidates(histories, exclude=author)
             if not scores:
                 return
 
-            top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:2]
-            names = ", ".join(f"@{r}" for r, _ in top)
+            top = sorted(scores.items(), key=lambda item: item[1], reverse=True)[
+                :MAX_RECOMMENDATIONS
+            ]
+            best = top[0][1]
+
+            for login, hits in top:
+                reason = (
+                    f"{hits} recent commit(s) in "
+                    f"{', '.join(sorted(directories))}"
+                )
+                score = round(hits / best, 3)
+
+                existing = await ctx["db"].scalar(
+                    select(ReviewerRecommendation).where(
+                        ReviewerRecommendation.owner == owner,
+                        ReviewerRecommendation.repo == repo,
+                        ReviewerRecommendation.pr_number == pr_number,
+                        ReviewerRecommendation.recommended_reviewer == login,
+                    )
+                )
+
+                if existing is None:
+                    ctx["db"].add(
+                        ReviewerRecommendation(
+                            owner=owner,
+                            repo=repo,
+                            pr_number=pr_number,
+                            recommended_reviewer=login,
+                            reason=reason,
+                            score=score,
+                            was_assigned=False,
+                        )
+                    )
+                else:
+                    existing.reason = reason
+                    existing.score = score
+
+            names = ", ".join(f"@{login}" for login, _ in top)
             await self._gh.post_comment(
                 owner,
                 repo,
@@ -388,11 +473,65 @@ class PullRequestWorkflow:
                 owner=owner,
                 repo=repo,
                 target_number=pr_number,
-                reason="Reviewer recommendation based on file overlap",
-                metadata={"recommendations": [r for r, _ in top]},
+                reason="Reviewer recommendation based on directory commit history",
+                metadata={
+                    "recommendations": [login for login, _ in top],
+                    "directories": sorted(directories),
+                    "api_calls": len(directories) + 1,
+                },
             )
         except Exception as exc:
             log.warning("Reviewer recommendation failed: %s", exc)
+
+
+def _touched_directories(files: list[dict]) -> list[str]:
+    """
+    The directories this PR changes, most-touched first, capped.
+
+    Files at the repository root collapse to "", which GitHub rejects as a path
+    filter, so they are dropped — a root-only PR has no meaningful ownership
+    signal to extract anyway.
+    """
+    counts: dict[str, int] = {}
+    for f in files:
+        filename = f.get("filename") or ""
+        if "/" not in filename:
+            continue
+        directory = filename.rsplit("/", 1)[0]
+        counts[directory] = counts.get(directory, 0) + 1
+
+    ranked = sorted(
+        counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return [directory for directory, _ in ranked[:MAX_PATHS_QUERIED]]
+
+
+def _score_candidates(histories: list, exclude: str) -> dict[str, int]:
+    """Count unique commits per author across the fetched histories, skipping bots."""
+    scores: dict[str, int] = {}
+    seen_shas: set[str] = set()
+
+    for history in histories:
+        if isinstance(history, BaseException):
+            log.debug("Commit history lookup failed: %s", history)
+            continue
+
+        for commit in history or []:
+            sha = commit.get("sha")
+            if sha:
+                if sha in seen_shas:
+                    continue
+                seen_shas.add(sha)
+
+            login = ((commit.get("author") or {}).get("login") or "").strip()
+            if not login or login == exclude:
+                continue
+            if login.lower().endswith("[bot]"):
+                continue
+            scores[login] = scores.get(login, 0) + 1
+
+    return scores
 
 
 def _sev_emoji(sev: str) -> str:
