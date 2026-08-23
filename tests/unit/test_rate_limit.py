@@ -3,6 +3,7 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -105,38 +106,81 @@ def test_reset_clears_state():
 # ── Caller identification ─────────────────────────────────────
 
 
-class FakeRequest:
-    def __init__(self, host="1.2.3.4", forwarded=None):
-        self.client = type("C", (), {"host": host})()
-        self.headers = {"X-Forwarded-For": forwarded} if forwarded else {}
+
+def make_request(
+    host: str = "1.2.3.4",
+    forwarded: str | None = None,
+) -> Request:
+    headers = {}
+
+    if forwarded is not None:
+        headers["x-forwarded-for"] = forwarded
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [
+            (key.encode(), value.encode())
+            for key, value in headers.items()
+        ],
+        "client": (host, 12345),
+        "scheme": "http",
+        "server": ("testserver", 80),
+    }
+
+    async def receive():
+        return {
+            "type": "http.request",
+            "body": b"",
+            "more_body": False,
+        }
+
+    return Request(scope, receive)
 
 
 def test_forwarded_header_ignored_without_trusted_proxies(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxy_hops", 0)
-    assert client_key(FakeRequest(forwarded="9.9.9.9")) == "1.2.3.4"
+
+    request = make_request(forwarded="9.9.9.9")
+
+    assert client_key(request) == "1.2.3.4"
 
 
 def test_forwarded_header_used_behind_one_proxy(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
-    request = FakeRequest(forwarded="203.0.113.9, 10.0.0.1")
+
+    request = make_request(
+        forwarded="203.0.113.9, 10.0.0.1",
+    )
+
     assert client_key(request) == "10.0.0.1"
 
 
 def test_forwarded_chain_walked_back_by_hop_count(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxy_hops", 2)
-    request = FakeRequest(forwarded="203.0.113.9, 10.0.0.1, 10.0.0.2")
+
+    request = make_request(
+        forwarded="203.0.113.9, 10.0.0.1, 10.0.0.2",
+    )
+
     assert client_key(request) == "10.0.0.1"
 
 
 def test_empty_forwarded_header_falls_back_to_peer(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
-    assert client_key(FakeRequest(forwarded="  ")) == "1.2.3.4"
+
+    request = make_request(forwarded="  ")
+
+    assert client_key(request) == "1.2.3.4"
 
 
 def test_missing_client_is_labelled_unknown(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxy_hops", 0)
-    request = FakeRequest()
-    request.client = None
+
+    request = make_request()
+    request.scope["client"] = None
+
     assert client_key(request) == "unknown"
 
 
