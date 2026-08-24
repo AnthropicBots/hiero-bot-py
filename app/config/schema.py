@@ -27,10 +27,27 @@ class RoleRequirements(BaseModel):
 
 class OnboardingConfig(BaseModel):
     enabled: bool = True
+
+    # When true, heuristic bot-login detection runs on top of GitHub's own
+    # account type, catching bots that present as `type: User`. When false only
+    # accounts GitHub reports as `type: Bot` are skipped.
     check_human_contributors: bool = True
+
+    # Gate `/assign` on the contributor appearing in the repo's CLA signature
+    # file. Fails closed: an unreadable or missing signature file blocks
+    # assignment rather than waving it through.
     require_signed_cla: bool = False
+    cla_signatures_file: str = ".github/cla-signatures.json"
+    cla_document_url: str | None = None
+
+    # Post the welcome comment only for genuine first-time contributors.
+    welcome_first_time_only: bool = True
+
     minimum_account_age_days: int = Field(default=0, ge=0)
     minimum_public_contributions: int = Field(default=0, ge=0)
+    # Maximum number of open issues a contributor can hold in this repository.
+    # Set to null to disable the limit.
+    max_concurrent_assignments: int | None = Field(default=None, ge=1)
     auto_assign_mentor: bool = False
     mentor_assignment_strategy: MentorStrategy = "round-robin"
     welcome_message: str | None = None

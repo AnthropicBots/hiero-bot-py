@@ -12,20 +12,29 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.utils.settings import settings
 
-engine = create_async_engine(
-    settings.database_url,
-    echo=False,
-    future=True,
-    connect_args={"timeout": 30},
-)
+_is_sqlite = "sqlite" in settings.database_url
+_engine_kwargs: dict = {
+    "echo": False,
+    "future": True,
+    "pool_pre_ping": True,
+}
+
+if _is_sqlite:
+    _engine_kwargs["connect_args"] = {"timeout": 30}
+else:
+    _engine_kwargs["pool_size"] = 10
+    _engine_kwargs["max_overflow"] = 20
+
+engine = create_async_engine(settings.database_url, **_engine_kwargs)
 
 
 @event.listens_for(engine.sync_engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=30000")
-    cursor.close()
+    if engine.dialect.name == "sqlite":
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
 
 
 AsyncSessionLocal = async_sessionmaker(

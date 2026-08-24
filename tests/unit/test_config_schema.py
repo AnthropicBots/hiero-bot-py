@@ -22,9 +22,42 @@ def test_defaults_applied():
     cfg = RepoConfig.model_validate(MINIMAL)
     assert cfg.workflows.onboarding.enabled is True
     assert cfg.workflows.onboarding.minimum_account_age_days == 0
+    assert cfg.workflows.onboarding.max_concurrent_assignments is None
     assert cfg.workflows.pull_request.stale_pr_days == 30
     assert cfg.workflows.issue_management.stale_issue_days == 60
     assert cfg.workflows.pr_health.enabled is True
+
+
+def test_max_concurrent_assignments_validation():
+    unlimited = RepoConfig.model_validate({
+        "repo": "hiero/x",
+        "workflows": {
+            "onboarding": {
+                "max_concurrent_assignments": None,
+            }
+        },
+    })
+    assert unlimited.workflows.onboarding.max_concurrent_assignments is None
+
+    limited = RepoConfig.model_validate({
+        "repo": "hiero/x",
+        "workflows": {
+            "onboarding": {
+                "max_concurrent_assignments": 5,
+            }
+        },
+    })
+    assert limited.workflows.onboarding.max_concurrent_assignments == 5
+
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate({
+            "repo": "hiero/x",
+            "workflows": {
+                "onboarding": {
+                    "max_concurrent_assignments": 0,
+                }
+            },
+        })
 
 
 def test_ai_review_max_comments_capped():

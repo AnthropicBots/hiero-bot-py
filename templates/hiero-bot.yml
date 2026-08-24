@@ -22,10 +22,28 @@ workflows:
   #  Onboarding 
   onboarding:
     enabled: true
+
+    # true  → skip bots GitHub reports as `type: Bot` *and* logins that match
+    #         known automation accounts (dependabot[bot], renovate, ...)
+    # false → skip only accounts GitHub itself reports as bots
     check_human_contributors: true
+
+    # Post the welcome comment only for genuine first-time contributors.
+    # Set false to greet every issue opener.
+    welcome_first_time_only: true
+
+    # Gate /assign on the contributor appearing in the CLA signature file.
+    # Fails closed: a missing or unreadable file blocks assignment.
     require_signed_cla: false
+    cla_signatures_file: ".github/cla-signatures.json"
+    # cla_document_url: "https://example.org/cla"
+
     minimum_account_age_days: 0       # 0 = no minimum
     minimum_public_contributions: 0   # 0 = no minimum
+    # Maximum number of open issues a contributor can have assigned
+    # simultaneously in this repository.
+    # Set to null to disable the limit.
+    max_concurrent_assignments: 3
     auto_assign_mentor: false
     mentor_assignment_strategy: round-robin  # round-robin | least-busy | expertise-match
     welcome_message: |
@@ -59,6 +77,47 @@ workflows:
     auto_label: true
     stale_pr_days: 30
     auto_close_stale: false
+
+  #  Reviewer Assignment
+  #
+  # Automatically requests reviewers on newly opened, non-draft PRs.
+  # Unlike pull_request.reviewer_recommendation, this makes a real
+  # GitHub review request.
+  reviewer_assignment:
+    enabled: false
+
+    # Repository-local YAML file containing reviewer availability.
+    availability_file: ".github/reviewers.yml"
+
+    # Maximum number of reviewers to request.
+    reviewers_count: 1
+
+    # Reviewer selection strategy:
+    # round-robin → select reviewers based on PR number
+    # random      → randomly select eligible reviewers
+    strategy: round-robin
+
+    # Do not request a review from the PR author.
+    exclude_pr_author: true
+
+    # If no reviewers are currently marked available, fall back
+    # to all reviewers listed in the availability file.
+    fallback_to_all_if_none_available: true
+
+    # Whether to post a comment mentioning the selected reviewers.
+    # off     → only create the GitHub review request
+    # mention → create the review request and mention reviewers in a comment
+    notify_comment: off
+
+    # Create .github/reviewers.yml with:
+    #
+    # reviewers:
+    #   - login: reviewer1
+    #     available: true
+    #   - login: reviewer2
+    #     available: false
+    #
+    # See .github/reviewers.yml in this repository for a working example.
 
   #  PR Health Scoring
   pr_health:
