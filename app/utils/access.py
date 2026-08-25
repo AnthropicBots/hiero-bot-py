@@ -22,12 +22,11 @@ async def get_authorized_owners(
     return {acc["org_login"] for acc in accounts if acc.get("org_login")}
 
 
-async def verify_owner_access(
+def verify_owner_access(
     owner: str,
     user: User,
-    db: AsyncSession,
+    allowed_owners: set[str],
 ) -> None:
-    allowed_owners = await get_authorized_owners(user, db)
     if owner not in allowed_owners:
         log.warning("User @%s attempted unauthorized access to org '%s'", user.github_login, owner)
         raise HTTPException(
