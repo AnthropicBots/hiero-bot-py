@@ -57,3 +57,6 @@ coverage.xml
 # Local planning & tracking
 plan.md
 todo.md
+
+# Security audit reports
+audit-report.json
