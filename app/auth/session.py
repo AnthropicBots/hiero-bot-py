@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-
-# Key derivation helper for Fernet token encryption
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -21,11 +18,7 @@ SESSION_EXPIRE_SECONDS = 86400 * 7  # 7 days
 
 
 def _get_fernet() -> Fernet:
-    key = settings.token_encryption_key.encode("utf-8")
-    if len(key) < 32:
-        key = key.ljust(32, b"0")
-    encoded_key = base64.urlsafe_b64encode(key[:32])
-    return Fernet(encoded_key)
+    return Fernet(settings.token_encryption_key.encode("ascii"))
 
 
 def encrypt_token(plain_token: str) -> str:
