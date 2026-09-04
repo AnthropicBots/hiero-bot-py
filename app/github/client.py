@@ -576,11 +576,21 @@ class GitHubClient:
     async def list_pr_files(
         self, owner: str, repo: str, pr_number: int, installation_id: int
     ) -> list[dict]:
-        return await self.get(
-            f"/repos/{owner}/{repo}/pulls/{pr_number}/files",
-            installation_id,
-            params={"per_page": 100},
-        )
+        files = []
+        page = 1
+        while True:
+            data = await self.get(
+                f"/repos/{owner}/{repo}/pulls/{pr_number}/files",
+                installation_id,
+                params={"per_page": 100, "page": page},
+            )
+            if not data:
+                break
+            files.extend(data)
+            if len(data) < 100:
+                break
+            page += 1
+        return files
 
     async def list_pr_commits(
         self, owner: str, repo: str, pr_number: int, installation_id: int

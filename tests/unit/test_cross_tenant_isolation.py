@@ -11,7 +11,7 @@ from app.auth.session import (
     unsign_session_id,
 )
 from app.db.models import Account, AccountUser, User
-from app.utils.access import verify_owner_access
+from app.utils.access import get_authorized_owners, verify_owner_access
 
 
 @pytest.mark.asyncio
@@ -62,11 +62,13 @@ async def test_cross_tenant_access_denial(db):
     db.add(AccountUser(account_id=acc_b.id, user_id=user_b.id, authorized=True))
     await db.commit()
 
+    allowed_owners = await get_authorized_owners(user_a, db)
+
     # User A should pass for org_a
-    await verify_owner_access("org_a", user_a, db)
+    verify_owner_access("org_a", user_a, allowed_owners)
 
     # User A must get 403 when trying to access org_b
     with pytest.raises(HTTPException) as exc_info:
-        await verify_owner_access("org_b", user_a, db)
+        verify_owner_access("org_b", user_a, allowed_owners)
     assert exc_info.value.status_code == 403
     assert "Access denied to organization 'org_b'" in exc_info.value.detail
