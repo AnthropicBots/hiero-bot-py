@@ -18,7 +18,6 @@ from app.db.database import get_db, init_db
 from app.github.client import GitHubClient
 from app.github.webhooks import WebhookRouter
 from app.scheduler.jobs import BotScheduler
-from app.utils.auth import _auth_configured
 from app.utils.logger import get_logger
 from app.utils.ratelimit import RateLimitMiddleware
 from app.utils.settings import settings
@@ -47,11 +46,6 @@ async def lifespan(app: FastAPI):
 
     if settings.is_production:
         _scheduler.start()
-        if not _auth_configured():
-            log.warning(
-                "DASHBOARD_USERNAME/DASHBOARD_PASSWORD are unset in production -"
-                "dashboard and /api/v1/* are UNAUTHENTICATED."
-            )
 
     log.info("Bot ready on port %d", settings.port)
     yield

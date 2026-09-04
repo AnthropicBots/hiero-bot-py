@@ -32,10 +32,6 @@ class Settings(BaseSettings):
     log_level: str = "info"
     environment: str = "development"
 
-    # Dashboard basic auth (optional)
-    dashboard_username: str | None = None
-    dashboard_password: str | None = None
-
     # GitHub OAuth & Session Security
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
@@ -43,8 +39,6 @@ class Settings(BaseSettings):
         "dev-secret-key-32-bytes-minimum-length-change-in-prod"
     )
     token_encryption_key: str = "dev-token-encryption-key-32b-change-in-prod="
-    legacy_basic_auth_enabled: bool = True
-
     # Non-prod default below; override via env (comma/JSON-list) in production.
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 

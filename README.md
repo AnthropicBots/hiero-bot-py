@@ -205,9 +205,8 @@ Add `.github/hiero-bot.yml` to any repo where the app is installed. Full referen
 | `PORT` | ❌ | Default: `8000` |
 | `LOG_LEVEL` | ❌ | debug/info/warn/error |
 | `ENVIRONMENT` | ❌ | development / production |
-| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | ✅ production | Basic Auth credentials; required before exposing the dashboard or API publicly |
 
-> **Production security:** `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` are required before exposing the bot publicly. If either is unset in production, the dashboard and REST API are unauthenticated.
+The dashboard and protected REST API endpoints use GitHub OAuth with signed, database-backed sessions. Configure `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `SESSION_SECRET_KEY`, and `TOKEN_ENCRYPTION_KEY` before exposing the application publicly.
 
 ## Ecosystem & standing
 
