@@ -164,16 +164,6 @@ async def test_list_pr_files_paginates():
 
     first_page = [{"filename": f"file_{i}.py"} for i in range(100)]
     second_page = [{"filename": "file_100.py"}]
-async def test_list_pr_reviews_paginates():
-    client = GitHubClient()
-
-    first_page = [
-        {"id": i, "user": {"login": "alice"}, "state": "APPROVED"}
-        for i in range(100)
-    ]
-    second_page = [
-        {"id": 100, "user": {"login": "alice"}, "state": "CHANGES_REQUESTED"}
-    ]
 
     with patch.object(
         client,
@@ -192,6 +182,36 @@ async def test_list_pr_reviews_paginates():
 
     mock_get.assert_any_await(
         "/repos/AnthropicBots/hiero-bot-py/pulls/79/files",
+        123,
+        params={"per_page": 100, "page": 1},
+    )
+    mock_get.assert_any_await(
+        "/repos/AnthropicBots/hiero-bot-py/pulls/79/files",
+        123,
+        params={"per_page": 100, "page": 2},
+    )
+    assert mock_get.await_count == 2
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_pr_reviews_paginates():
+    client = GitHubClient()
+
+    first_page = [
+        {"id": i, "user": {"login": "alice"}, "state": "APPROVED"}
+        for i in range(100)
+    ]
+    second_page = [
+        {"id": 100, "user": {"login": "alice"}, "state": "CHANGES_REQUESTED"}
+    ]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(side_effect=[first_page, second_page]),
+    ) as mock_get:
         reviews = await client.list_pr_reviews("hiero", "sdk-js", 42, 123)
 
     assert len(reviews) == 101
@@ -203,14 +223,12 @@ async def test_list_pr_reviews_paginates():
         params={"per_page": 100, "page": 1},
     )
     mock_get.assert_any_await(
-        "/repos/AnthropicBots/hiero-bot-py/pulls/79/files",
         "/repos/hiero/sdk-js/pulls/42/reviews",
         123,
         params={"per_page": 100, "page": 2},
     )
     assert mock_get.await_count == 2
 
-    await client.close()
     await client.close()
 
 # ── Pagination ────────────────────────────────────────────────

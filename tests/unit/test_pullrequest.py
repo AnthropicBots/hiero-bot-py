@@ -170,3 +170,68 @@ async def test_quality_report_ignores_unrelated_comment(mock_gh, ctx):
 
     mock_gh.update_comment.assert_not_awaited()
     mock_gh.post_comment.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_require_tests_detects_test_file_from_second_page(mock_gh, ctx):
+    cfg = ctx["config"].workflows.pull_request.quality_gates
+    cfg.require_linked_issue = False
+    cfg.require_tests = True
+    cfg.require_dco = False
+    cfg.require_gpg_signature = False
+    cfg.max_files_changed = None
+    cfg.allowed_branch_pattern = None
+    cfg.require_changelog_entry = False
+
+    first_page = [{"filename": f"src/file_{i}.py"} for i in range(100)]
+    second_page = [{"filename": "tests/test_feature.py"}]
+
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=first_page + second_page
+    )
+
+    wf = PullRequestWorkflow(mock_gh)
+
+    checks = await wf._run_quality_checks(
+        ctx,
+        make_pr(),
+    )
+
+    tests_check = next(
+        check for check in checks if check.name == "Tests"
+    )
+
+    assert tests_check.passed is True
+    assert tests_check.detail == "Changes include test coverage ✅"
+
+
+@pytest.mark.asyncio
+async def test_require_changelog_detects_entry_from_second_page(mock_gh, ctx):
+    cfg = ctx["config"].workflows.pull_request.quality_gates
+    cfg.require_linked_issue = False
+    cfg.require_tests = False
+    cfg.require_dco = False
+    cfg.require_gpg_signature = False
+    cfg.max_files_changed = None
+    cfg.allowed_branch_pattern = None
+    cfg.require_changelog_entry = True
+
+    first_page = [{"filename": f"src/file_{i}.py"} for i in range(100)]
+    second_page = [{"filename": "CHANGELOG.md"}]
+
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=first_page + second_page
+    )
+
+    wf = PullRequestWorkflow(mock_gh)
+
+    checks = await wf._run_quality_checks(
+        ctx,
+        make_pr(),
+    )
+
+    changelog_check = next(
+        check for check in checks if check.name == "Changelog"
+    )
+
+    assert changelog_check.passed is True
+    assert changelog_check.detail == "CHANGELOG entry included ✅"
