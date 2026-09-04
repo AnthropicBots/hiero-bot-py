@@ -170,6 +170,31 @@ def test_compute_signals_detects_tests():
     assert signals["small_diff"] is True
 
 
+@pytest.mark.asyncio
+async def test_score_pr_detects_test_file_from_second_page(mock_gh, ctx):
+    first_page = [{"filename": f"src/file_{i}.py"} for i in range(100)]
+    second_page = [{"filename": "tests/test_feature.py"}]
+
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=first_page + second_page
+    )
+    mock_gh.get_combined_status = AsyncMock(return_value={})
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
+    wf = PRHealthWorkflow(mock_gh)
+    await wf.score_pr(ctx, make_payload())
+
+    from sqlalchemy import select
+
+    from app.db.models import PRHealthScore
+
+    result = await ctx["db"].execute(select(PRHealthScore))
+    row = result.scalars().one()
+
+    assert row.files_changed == 101
+    assert row.has_tests is True
+
+
 def test_compute_signals_large_diff():
     pr = {"body": "", "additions": 300, "deletions": 200}
     signals = PRHealthWorkflow._compute_signals(pr, [], [], {})
