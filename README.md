@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./.github/assets/mark2_orbit_ring.jpg" width="120" height="120" alt="hydra-maintainer logo" />
+  <img src="‎.github/assets/mark2_orbit_ring.jpg" width="120" height="120" alt="hydra-maintainer logo" />
 
   # hydra-maintainer
 
