@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from cryptography.fernet import Fernet
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -78,14 +79,20 @@ class Settings(BaseSettings):
                     "SESSION_SECRET_KEY must be set to a secure key "
                     "(min 32 chars) in production."
                 )
-            if (
-                "dev-token-encryption-key" in self.token_encryption_key
-                or len(self.token_encryption_key) < 32
-            ):
+
+            if "dev-token-encryption-key" in self.token_encryption_key:
                 raise ValueError(
-                    "TOKEN_ENCRYPTION_KEY must be set to a secure 32-byte key "
+                    "TOKEN_ENCRYPTION_KEY must be set to a generated Fernet key "
                     "in production."
                 )
+
+            try:
+                Fernet(self.token_encryption_key.encode("ascii"))
+            except (UnicodeEncodeError, ValueError):
+                raise ValueError(
+                    "TOKEN_ENCRYPTION_KEY must be a valid Fernet key in production."
+                ) from None
+
             if not self.github_webhook_secret:
                 raise ValueError(
                     "GITHUB_WEBHOOK_SECRET must be set in production."

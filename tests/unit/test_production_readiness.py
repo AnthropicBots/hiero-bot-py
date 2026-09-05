@@ -1,4 +1,5 @@
 import pytest
+from cryptography.fernet import Fernet
 
 from app.auth.sync import _SYNC_CACHE, _prune_expired_cache
 from app.utils.settings import Settings
@@ -26,6 +27,36 @@ def test_production_settings_validation():
             github_webhook_secret="sec",
         )
     assert "SESSION_SECRET_KEY" in str(exc_info.value)
+
+
+def test_production_settings_accepts_valid_fernet_key():
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        github_app_id="123456",
+        github_private_key="test-private-key",
+        session_secret_key="session-secret-key-that-is-long-enough",
+        token_encryption_key=Fernet.generate_key().decode(),
+        github_webhook_secret="sec",
+    )
+
+    assert settings.is_production is True
+
+
+def test_production_settings_rejects_arbitrary_32_character_key():
+    with pytest.raises(
+        ValueError,
+        match="TOKEN_ENCRYPTION_KEY must be a valid Fernet key in production.",
+    ):
+        Settings(
+            _env_file=None,
+            environment="production",
+            github_app_id="123456",
+            github_private_key="test-private-key",
+            session_secret_key="session-secret-key-that-is-long-enough",
+            token_encryption_key="a" * 32,
+            github_webhook_secret="sec",
+        )
 
 
 def test_sync_cache_pruning():
