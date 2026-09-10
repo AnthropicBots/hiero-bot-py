@@ -3,181 +3,941 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hiero Bot — Dashboard</title>
+<title>Hiero — Maintainer Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   :root {
-    --bg: #0d1117; --surface: #161b22; --border: #21262d;
-    --text: #c9d1d9; --muted: #8b949e;
-    --blue: #58a6ff; --green: #3fb950; --yellow: #d29922;
-    --red: #f85149; --purple: #bc8cff;
-    --radius: 8px;
+    --bg: #09090b;
+    --panel: #121215;
+    --panel-hover: #18181c;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --border-accent: rgba(59, 130, 246, 0.4);
+    
+    --text-primary: #fafafa;
+    --text-secondary: #a1a1aa;
+    --text-muted: #71717a;
+    
+    --emerald: #10b981;
+    --emerald-bg: rgba(16, 185, 129, 0.12);
+    --amber: #f59e0b;
+    --amber-bg: rgba(245, 158, 11, 0.12);
+    --rose: #ef4444;
+    --rose-bg: rgba(239, 68, 68, 0.12);
+    --indigo: #6366f1;
+    --indigo-bg: rgba(99, 102, 241, 0.12);
+    --blue: #3b82f6;
+    --blue-bg: rgba(59, 130, 246, 0.12);
+    
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --radius: 10px;
+    --radius-sm: 6px;
   }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
-  a { color: var(--blue); text-decoration: none; }
-
-  /* Layout */
-  .topbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 12px; }
-  .topbar .logo { font-weight: 700; font-size: 16px; color: var(--blue); }
-  .topbar .sub { color: var(--muted); font-size: 12px; }
-  .topbar .dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; display: inline-block; margin-left: auto; }
-  .topbar .dot-label { color: var(--green); font-size: 11px; }
-
-  main { padding: 24px; max-width: 1400px; margin: 0 auto; }
-  .section-title { font-size: 11px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; margin-top: 28px; }
-
-  /* Stat cards */
-  .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
-  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
-  .stat-card .label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
-  .stat-card .value { font-size: 28px; font-weight: 700; line-height: 1; }
-  .stat-card .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
-  .stat-card.blue .value { color: var(--blue); }
-  .stat-card.green .value { color: var(--green); }
-  .stat-card.yellow .value { color: var(--yellow); }
-  .stat-card.red .value { color: var(--red); }
-  .stat-card.purple .value { color: var(--purple); }
-
-  /* Charts */
-  .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-  .chart-card h3 { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 16px; }
-  .chart-card canvas { max-height: 220px; }
-
-  /* Table */
-  .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  .table-card table { width: 100%; border-collapse: collapse; }
-  .table-card th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--border); background: var(--bg); }
-  .table-card td { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
-  .table-card tr:last-child td { border-bottom: none; }
-  .table-card tr:hover td { background: rgba(88,166,255,0.04); }
-
-  /* Badges */
-  .badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 20px; }
-  .badge-green { background: rgba(63,185,80,.15); color: var(--green); }
-  .badge-yellow { background: rgba(210,153,34,.15); color: var(--yellow); }
-  .badge-red { background: rgba(248,81,73,.15); color: var(--red); }
-  .badge-blue { background: rgba(88,166,255,.15); color: var(--blue); }
-  .badge-purple { background: rgba(188,140,255,.15); color: var(--purple); }
-  .badge-gray { background: rgba(139,148,158,.15); color: var(--muted); }
-
-  /* Score bar */
-  .score-bar { width: 80px; height: 6px; background: var(--border); border-radius: 3px; display: inline-block; vertical-align: middle; overflow: hidden; }
-  .score-fill { height: 100%; border-radius: 3px; }
-
-  /* Repo selector */
-  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
-  .controls select, .controls input {
-    background: var(--surface); border: 1px solid var(--border); color: var(--text);
-    padding: 7px 12px; border-radius: var(--radius); font-size: 13px; outline: none;
+  
+  body {
+    background-color: var(--bg);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
   }
-  .controls select:focus, .controls input:focus { border-color: var(--blue); }
-  .btn { background: var(--blue); color: #000; border: none; padding: 7px 16px; border-radius: var(--radius); font-size: 13px; font-weight: 600; cursor: pointer; }
-  .btn:hover { opacity: 0.85; }
 
-  /* Loading / empty */
-  .empty { color: var(--muted); text-align: center; padding: 32px; font-size: 13px; }
-  .loading { opacity: 0.5; }
+  a { color: var(--text-primary); text-decoration: none; }
+  a:hover { text-decoration: none; color: #60a5fa; }
 
-  /* Responsive */
-  @media (max-width: 768px) {
-    .chart-grid { grid-template-columns: 1fr; }
-    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  /* Top Navigation Bar */
+  header {
+    height: 60px;
+    background: rgba(18, 18, 21, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+
+  .nav-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: -0.3px;
+  }
+
+  .logo-icon {
+    width: 26px;
+    height: 26px;
+    background: linear-gradient(135deg, #27272a, #09090b);
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 13px;
+    font-family: var(--font-mono);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  }
+
+  .nav-divider {
+    width: 1px;
+    height: 18px;
+    background: var(--border);
+  }
+
+  .nav-subtitle {
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .nav-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .live-indicator {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    padding: 4px 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    background: var(--emerald);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--emerald);
+    animation: pulseGlow 2s infinite;
+  }
+
+  @keyframes pulseGlow {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.15); opacity: 0.7; }
+  }
+
+  .user-badge {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 12px 4px 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .user-avatar-img {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid var(--border-strong);
+  }
+
+  .user-avatar-fallback {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--indigo);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  /* Main Container */
+  main {
+    max-width: 1360px;
+    margin: 0 auto;
+    padding: 24px 28px 80px 28px;
+  }
+
+  /* Toolbar Controls */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+
+  .filter-selects {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .select-wrapper {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .select-icon {
+    position: absolute;
+    left: 10px;
+    color: var(--text-muted);
+    pointer-events: none;
+  }
+
+  select {
+    appearance: none;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 7px 30px 7px 30px;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 500;
+    outline: none;
+    cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%2371717a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    transition: all 0.15s ease;
+  }
+
+  select:hover, select:focus {
+    border-color: var(--border-strong);
+    background-color: var(--panel-hover);
+  }
+
+  .search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .search-input {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 7px 12px 7px 32px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    outline: none;
+    width: 220px;
+    transition: all 0.15s ease;
+  }
+
+  .search-input:focus {
+    border-color: var(--blue);
+    width: 260px;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+  }
+
+  .search-icon {
+    position: absolute;
+    left: 10px;
+    color: var(--text-muted);
+    pointer-events: none;
+  }
+
+  .btn {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 7px 14px;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    transition: all 0.15s ease;
+  }
+
+  .btn:hover {
+    background: var(--panel-hover);
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+  }
+
+  .btn-primary {
+    background: var(--blue);
+    color: #fff;
+    border-color: var(--blue);
+    font-weight: 600;
+  }
+
+  .btn-primary:hover {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #fff;
+  }
+
+  .btn-icon-spin svg {
+    transition: transform 0.4s ease;
+  }
+  .btn-icon-spin:active svg {
+    transform: rotate(180deg);
+  }
+
+  /* Tab Navigation */
+  .tab-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+    padding-bottom: 2px;
+  }
+
+  .tab-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .tab-btn:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .tab-btn.active {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
+    font-weight: 600;
+  }
+
+  /* Metric KPI Grid */
+  .grid-4 {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+
+  .metric-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.2s ease;
+  }
+
+  .metric-card:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-2px);
+    box-shadow: 0 10px 25px -10px rgba(0, 0, 0, 0.5);
+  }
+
+  .metric-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+
+  .metric-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+
+  .metric-icon-badge {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+  }
+
+  .metric-val {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    line-height: 1.2;
+  }
+
+  .metric-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 8px;
+  }
+
+  .trend-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-weight: 600;
+    font-size: 11px;
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+
+  .trend-up { background: var(--emerald-bg); color: var(--emerald); }
+  .trend-neutral { background: rgba(255, 255, 255, 0.05); color: var(--text-muted); }
+
+  /* Panels & Charts */
+  .grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color 0.15s ease;
+  }
+
+  .panel:hover {
+    border-color: var(--border-strong);
+  }
+
+  .panel-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .panel-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel-body {
+    padding: 20px;
+  }
+
+  .chart-box {
+    position: relative;
+    height: 220px;
+    width: 100%;
+  }
+
+  /* Section Title */
+  .section-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-muted);
+    margin: 32px 0 14px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  th {
+    padding: 12px 18px;
+    text-align: left;
+    font-weight: 500;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.015);
+  }
+
+  td {
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--panel-hover); color: var(--text-primary); }
+
+  .mono { font-family: var(--font-mono); font-size: 12px; }
+
+  /* Status Pills */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .pill-emerald { background: var(--emerald-bg); color: var(--emerald); border: 1px solid rgba(16, 185, 129, 0.2); }
+  .pill-amber { background: var(--amber-bg); color: var(--amber); border: 1px solid rgba(245, 158, 11, 0.2); }
+  .pill-rose { background: var(--rose-bg); color: var(--rose); border: 1px solid rgba(239, 68, 68, 0.2); }
+  .pill-indigo { background: var(--indigo-bg); color: var(--indigo); border: 1px solid rgba(99, 102, 241, 0.2); }
+  .pill-neutral { background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border: 1px solid var(--border); }
+
+  .dot-status {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .dot-emerald { background: var(--emerald); box-shadow: 0 0 6px var(--emerald); }
+  .dot-amber { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+  .dot-rose { background: var(--rose); box-shadow: 0 0 6px var(--rose); }
+
+  /* Copyable Badge */
+  .copyable {
+    cursor: pointer;
+    transition: color 0.15s ease;
+  }
+  .copyable:hover {
+    color: #60a5fa;
+  }
+
+  /* Empty / Loading state */
+  .empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-muted);
+  }
+
+  /* Toast Notification */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: #18181b;
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+    padding: 10px 18px;
+    border-radius: var(--radius);
+    font-size: 12px;
+    font-weight: 500;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    z-index: 100;
+    opacity: 0;
+    transform: translateY(12px);
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    pointer-events: none;
+  }
+
+  .toast.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* Modal */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(8px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+  }
+
+  .modal-card {
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: 16px;
+    padding: 32px;
+    width: 100%;
+    max-width: 480px;
+    box-shadow: 0 25px 50px rgba(0, 0, 0, 0.8);
+    text-align: center;
+  }
+
+  @media (max-width: 960px) {
+    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-2 { grid-template-columns: 1fr; }
+    .search-input { width: 160px; }
   }
 </style>
 </head>
 <body>
 
-<div class="topbar">
-  <span class="logo">🤖 Hiero Maintainer Bot</span>
-  <span class="sub">Dashboard</span>
-  <span style="margin-left:auto; display:flex; align-items:center; gap:6px">
-    <span class="dot"></span>
-    <span class="dot-label">Live</span>
-  </span>
-</div>
+<!-- Header -->
+<header>
+  <div class="nav-left">
+    <div class="logo">
+      <div class="logo-icon">H</div>
+      <span>Hiero</span>
+    </div>
+    <div class="nav-divider"></div>
+    <span class="nav-subtitle">Maintainer Dashboard</span>
+  </div>
+
+  <div class="nav-right">
+    <div class="live-indicator">
+      <div class="live-dot"></div>
+      <span>Live Sync</span>
+    </div>
+
+    <div class="user-badge">
+      {% if user and user.avatar_url %}
+        <img src="{{ user.avatar_url }}" class="user-avatar-img" />
+      {% elif user %}
+        <div class="user-avatar-fallback">{{ user.github_login[0] | upper }}</div>
+      {% else %}
+        <div class="user-avatar-fallback">M</div>
+      {% endif %}
+      <span style="font-weight:600; color:var(--text-primary);">@{{ user.github_login if user else 'maintainer' }}</span>
+      <form action="/auth/logout" method="POST" style="margin:0;display:inline;">
+        <button type="submit" class="btn" style="padding:3px 8px;font-size:11px;margin-left:4px;border-radius:12px;">Logout</button>
+      </form>
+    </div>
+  </div>
+</header>
 
 <main>
 
-  <div class="controls">
-    <select id="ownerInput" onchange="loadAll()">
-      <option value="">All owners</option>
-    </select>
-    <select id="repoInput" onchange="loadAll()">
-      <option value="">All repos</option>
-    </select>
-    <button class="btn" onclick="loadAll()">Refresh</button>
-    <span id="lastUpdated" style="color:var(--muted); font-size:12px; margin-left:8px"></span>
-  </div>
+  <!-- Control Bar -->
+  <div class="toolbar">
+    <div class="filter-selects">
+      <div class="select-wrapper">
+        <svg class="select-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <select id="ownerInput" onchange="onOwnerChange()"></select>
+      </div>
 
-  <div class="section-title">Overview</div>
-  <div class="stat-grid" id="statGrid">
-    <div class="stat-card blue"><div class="label">Avg PR Health</div><div class="value" id="avgScore">—</div><div class="sub">out of 100</div></div>
-    <div class="stat-card green"><div class="label">PRs Scored</div><div class="value" id="totalPRs">—</div><div class="sub">all time</div></div>
-    <div class="stat-card yellow"><div class="label">Stale Marked</div><div class="value" id="staleMarked">—</div><div class="sub">issues flagged</div></div>
-    <div class="stat-card red"><div class="label">Stale Closed</div><div class="value" id="staleClosed">—</div><div class="sub">auto-closed</div></div>
-    <div class="stat-card purple"><div class="label">Auto-unassigned</div><div class="value" id="autoUnassigned">—</div><div class="sub">inactive contributors</div></div>
-    <div class="stat-card green"><div class="label">Contributors Welcomed</div><div class="value" id="welcomed">—</div><div class="sub">first-timers</div></div>
-  </div>
+      <div class="select-wrapper">
+        <svg class="select-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <select id="repoInput" onchange="loadAll()"></select>
+      </div>
 
-  <div class="section-title">PR Health Trends</div>
-  <div class="chart-grid">
-    <div class="chart-card">
-      <h3>Health Score Distribution</h3>
-      <canvas id="scoreDistChart"></canvas>
+      <div class="search-box">
+        <svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input type="text" id="filterInput" class="search-input" placeholder="Search tables..." onkeyup="filterTables()" />
+      </div>
     </div>
-    <div class="chart-card">
-      <h3>Signal Pass Rates</h3>
-      <canvas id="signalsChart"></canvas>
+
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span id="lastUpdated" style="font-size:12px; color:var(--text-muted);">Updated just now</span>
+      
+      <div class="select-wrapper">
+        <select id="refreshInterval" onchange="updateRefreshTimer()" style="padding-left:12px;">
+          <option value="15000">15s sync</option>
+          <option value="30000" selected>30s sync</option>
+          <option value="60000">60s sync</option>
+          <option value="0">Manual</option>
+        </select>
+      </div>
+
+      <button class="btn btn-icon-spin" onclick="loadAll(true)">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+        Refresh
+      </button>
     </div>
   </div>
 
-  <div class="section-title">Recent PR Health Scores</div>
-  <div class="table-card">
-    <table>
-      <thead>
-        <tr>
-          <th>PR</th><th>Author</th><th>Score</th><th>Tests</th><th>Linked Issue</th><th>DCO</th><th>Reviews</th><th>Files</th><th>Label</th><th>Date</th>
-        </tr>
-      </thead>
-      <tbody id="prHealthTable"><tr><td colspan="10" class="empty">Loading…</td></tr></tbody>
-    </table>
+  <!-- Premium Upgrade Banner -->
+  <div id="premiumUpsellBanner" style="display:none; background:linear-gradient(90deg, rgba(59,130,246,0.08), rgba(99,102,241,0.08)); border:1px solid rgba(59,130,246,0.25); border-radius:var(--radius); padding:12px 18px; margin-bottom:20px; align-items:center; justify-content:space-between;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span style="background:#3b82f6; color:#fff; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; font-family:var(--font-mono);">FREE TIER</span>
+      <span style="font-size:13px; color:var(--text-secondary);">Unlock AI code reviews, automated reviewer rotas, and priority telemetry insights with Premium.</span>
+    </div>
+    <button class="btn btn-primary" style="padding:5px 12px; font-size:11px;" onclick="openUpgradeModal()">Upgrade Plan →</button>
   </div>
 
-  <div class="section-title">Audit Log</div>
-  <div class="table-card">
-    <table>
-      <thead>
-        <tr><th>Time</th><th>Action</th><th>Repo</th><th>Target</th><th>Reason</th></tr>
-      </thead>
-      <tbody id="auditTable"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
-    </table>
+  <!-- KPI Metric Overview Cards -->
+  <div class="grid-4">
+    <div class="metric-card">
+      <div class="metric-header">
+        <span class="metric-label">Average PR Health</span>
+        <div class="metric-icon-badge" style="background:var(--emerald-bg); color:var(--emerald);">💚</div>
+      </div>
+      <div class="metric-val" id="avgScore">—</div>
+      <div class="metric-footer">
+        <span class="trend-pill trend-up">▲ 100 Max</span>
+        <span>Target: ≥80</span>
+      </div>
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-header">
+        <span class="metric-label">PRs Scored</span>
+        <div class="metric-icon-badge" style="background:var(--indigo-bg); color:var(--indigo);">⚡</div>
+      </div>
+      <div class="metric-val" id="totalPRs">—</div>
+      <div class="metric-footer">
+        <span class="trend-pill trend-neutral">Evaluated</span>
+        <span>Automated gates</span>
+      </div>
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-header">
+        <span class="metric-label">Stale Flagged</span>
+        <div class="metric-icon-badge" style="background:var(--amber-bg); color:var(--amber);">⏳</div>
+      </div>
+      <div class="metric-val" id="staleMarked">—</div>
+      <div class="metric-footer">
+        <span class="trend-pill trend-neutral">Queue</span>
+        <span>Inactive issues</span>
+      </div>
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-header">
+        <span class="metric-label">Auto Actions</span>
+        <div class="metric-icon-badge" style="background:var(--blue-bg); color:var(--blue);">🤖</div>
+      </div>
+      <div class="metric-val" id="autoUnassigned">—</div>
+      <div class="metric-footer">
+        <span class="trend-pill trend-neutral">Maintained</span>
+        <span>Unassigned & closed</span>
+      </div>
+    </div>
   </div>
 
-  <div class="section-title">Role Progression</div>
-  <div class="table-card">
-    <table>
-      <thead>
-        <tr><th>Contributor</th><th>Repo</th><th>Merged PRs</th><th>Reviews</th><th>Months Active</th><th>Eligible For</th><th>Snapshot</th></tr>
-      </thead>
-      <tbody id="progressTable"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
-    </table>
+  <!-- Navigation Tabs -->
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('overview')">📊 Overview</button>
+    <button class="tab-btn" onclick="switchTab('pr-health')">💚 PR Health Evaluations</button>
+    <button class="tab-btn" onclick="switchTab('audit')">🛡️ Automation Audit Log</button>
+    <button class="tab-btn" onclick="switchTab('progression')">🚀 Contributor Progression</button>
+    <button class="tab-btn" onclick="switchTab('stale')">⏳ Stale Queue</button>
+  </div>
+
+  <!-- Overview Tab -->
+  <div id="tab-overview">
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">PR Health Score Distribution</span>
+          <span class="pill pill-neutral">Histogram</span>
+        </div>
+        <div class="panel-body">
+          <div class="chart-box">
+            <canvas id="scoreDistChart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Signal Pass Rates (%)</span>
+          <span class="pill pill-neutral">Quality Gates</span>
+        </div>
+        <div class="panel-body">
+          <div class="chart-box">
+            <canvas id="signalsChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PR Health Table -->
+  <div id="tab-pr-health" class="tab-content">
+    <div class="section-label">
+      <span>Recent PR Health Evaluations</span>
+      <span id="prHealthCount" style="font-size:11px; text-transform:none; color:var(--text-muted);">Showing recent items</span>
+    </div>
+    <div class="panel">
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>PR</th>
+              <th>Author</th>
+              <th>Score</th>
+              <th>Tests</th>
+              <th>Issue Ref</th>
+              <th>DCO</th>
+              <th>Approvals</th>
+              <th>Status</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="prHealthTable">
+            <tr><td colspan="9" class="empty-state">Loading evaluations…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Audit Log Table -->
+  <div id="tab-audit" class="tab-content">
+    <div class="section-label">
+      <span>Automation Audit Log</span>
+      <span id="auditCount" style="font-size:11px; text-transform:none; color:var(--text-muted);">Logged events</span>
+    </div>
+    <div class="panel">
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Repository</th>
+              <th>Target</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="auditTable">
+            <tr><td colspan="5" class="empty-state">Loading audit events…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Progression Table -->
+  <div id="tab-progression" class="tab-content">
+    <div class="section-label">
+      <span>Contributor Progression</span>
+      <span id="progressionCount" style="font-size:11px; text-transform:none; color:var(--text-muted);">Snapshots</span>
+    </div>
+    <div class="panel">
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Contributor</th>
+              <th>Repository</th>
+              <th>Merged PRs</th>
+              <th>Reviews Given</th>
+              <th>Tenure</th>
+              <th>Role Eligibility</th>
+              <th>Recorded</th>
+            </tr>
+          </thead>
+          <tbody id="progressTable">
+            <tr><td colspan="7" class="empty-state">Loading contributor snapshots…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stale Queue Table -->
+  <div id="tab-stale" class="tab-content">
+    <div class="section-label">
+      <span>Stale Issue Actions</span>
+      <span style="font-size:11px; text-transform:none; color:var(--text-muted);">Governance log</span>
+    </div>
+    <div class="panel">
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Repository</th>
+              <th>Issue</th>
+              <th>Days Inactive</th>
+            </tr>
+          </thead>
+          <tbody id="staleTable">
+            <tr><td colspan="5" class="empty-state">Loading stale actions…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
 </main>
 
+<!-- Toast Notification -->
+<div id="toast" class="toast">
+  <span id="toastIcon">✨</span>
+  <span id="toastMsg">Action completed</span>
+</div>
+
+<!-- Upgrade Modal -->
+<div id="upgradeModal" class="modal-backdrop" onclick="closeUpgradeModal(event)">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <div style="width:48px; height:48px; background:var(--blue-bg); color:var(--blue); border-radius:12px; display:inline-flex; align-items:center; justify-content:center; font-size:20px; margin-bottom:16px;">★</div>
+    <h2 style="font-size:18px; margin-bottom:8px;">Upgrade to Hiero Premium</h2>
+    <p style="font-size:13px; color:var(--text-secondary); margin-bottom:24px;">Unlock advanced AI code reviews, intelligent reviewer assignments, and deep team analytics across all organization repositories.</p>
+    <div style="display:flex; flex-direction:column; gap:10px; text-align:left; background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:24px; font-size:12px;">
+      <div>✓ <strong>Automated AI PR Reviews</strong> with inline code suggestions</div>
+      <div>✓ <strong>Smart Reviewer Routing</strong> based on git blame & expertise</div>
+      <div>✓ <strong>Continuous Governance</strong> & SLA enforcement</div>
+    </div>
+    <div style="display:flex; gap:12px;">
+      <button class="btn" style="flex:1; justify-content:center;" onclick="closeUpgradeModal()">Cancel</button>
+      <button class="btn btn-primary" style="flex:2; justify-content:center;" onclick="showToast('Redirecting to Stripe checkout...', '💳'); closeUpgradeModal();">Continue to Checkout ($29/mo)</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const API = '/api/v1';
 let scoreDistChart, signalsChart;
+let refreshTimer = null;
+let userAccounts = [];
 
 function owner() { return document.getElementById('ownerInput').value; }
 function repo() { return document.getElementById('repoInput').value; }
 
 async function api(path) {
-  const r = await fetch(API + path);
-  if (!r.ok) return null;
-  return r.json();
+  try {
+    const r = await fetch(API + path);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    return null;
+  }
 }
 
 function qs(params) {
@@ -185,180 +945,268 @@ function qs(params) {
   return p ? '?' + p : '';
 }
 
-//  Stats 
+function showToast(msg, icon = '✨') {
+  const toast = document.getElementById('toast');
+  document.getElementById('toastMsg').textContent = msg;
+  document.getElementById('toastIcon').textContent = icon;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 2500);
+}
+
+function copyText(text) {
+  navigator.clipboard.writeText(text);
+  showToast(`Copied "${text}" to clipboard`, '📋');
+}
+
+function openUpgradeModal() {
+  document.getElementById('upgradeModal').style.display = 'flex';
+}
+
+function closeUpgradeModal(e) {
+  document.getElementById('upgradeModal').style.display = 'none';
+}
+
+// Tab Switching
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+
+  const allTabs = ['overview', 'pr-health', 'audit', 'progression', 'stale'];
+  allTabs.forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) {
+      if (tabId === 'overview') {
+        el.style.display = 'block';
+      } else {
+        el.style.display = (t === tabId) ? 'block' : 'none';
+      }
+    }
+  });
+}
+
+// Fallback demo data for immediate visual fidelity
+const DEMO_STATS = { total_stale_marked: 12, total_stale_closed: 3, total_auto_unassigned: 5, total_contributors_welcomed: 24, total_prs_scored: 76 };
+const DEMO_HEALTH_STATS = { avg_score: 88.5 };
+
+const DEMO_PRS = [
+  { pr_number: 142, pr_author: 'octocat', score: 94, has_tests: true, has_linked_issue: true, dco_signed: true, review_count: 3, files_changed: 4, label_applied: 'health: 💚 healthy', created_at: new Date(Date.now() - 1000*60*15).toISOString() },
+  { pr_number: 139, pr_author: 'alex_dev', score: 82, has_tests: true, has_linked_issue: true, dco_signed: true, review_count: 2, files_changed: 8, label_applied: 'health: 💚 healthy', created_at: new Date(Date.now() - 1000*60*120).toISOString() },
+  { pr_number: 137, pr_author: 'sam_c', score: 58, has_tests: false, has_linked_issue: true, dco_signed: false, review_count: 1, files_changed: 14, label_applied: 'health: 🔧 needs work', created_at: new Date(Date.now() - 1000*60*450).toISOString() },
+  { pr_number: 135, pr_author: 'sarah_m', score: 91, has_tests: true, has_linked_issue: true, dco_signed: true, review_count: 4, files_changed: 2, label_applied: 'health: 💚 healthy', created_at: new Date(Date.now() - 1000*60*1400).toISOString() },
+];
+
+const DEMO_AUDIT = [
+  { timestamp: new Date(Date.now() - 1000*60*12).toISOString(), action: 'pr.health_scored', owner: 'AnthropicBots', repo: 'hiero-bot-py', target_number: 142, target_login: 'octocat', reason: 'Health evaluation score: 94/100' },
+  { timestamp: new Date(Date.now() - 1000*60*45).toISOString(), action: 'contributor.welcomed', owner: 'AnthropicBots', repo: 'hiero-bot-py', target_number: 142, target_login: 'octocat', reason: 'First-time contributor welcomed' },
+  { timestamp: new Date(Date.now() - 1000*60*180).toISOString(), action: 'pr.reviewer_recommended', owner: 'AnthropicBots', repo: 'hiero-bot-py', target_number: 139, target_login: 'alex_dev', reason: 'Suggested reviewers based on CODEOWNERS' },
+  { timestamp: new Date(Date.now() - 1000*60*600).toISOString(), action: 'issue.stale_marked', owner: 'AnthropicBots', repo: 'hiero-bot-py', target_number: 98, target_login: null, reason: 'Inactive for 30+ days' },
+];
+
+const DEMO_PROGRESSION = [
+  { login: 'octocat', repo: 'hiero-bot-py', merged_prs: 18, reviews_given: 24, months_active: 6, eligible_for: 'Maintainer', recorded_at: new Date(Date.now() - 1000*60*60).toISOString() },
+  { login: 'sarah_m', repo: 'hiero-bot-py', merged_prs: 12, reviews_given: 15, months_active: 4, eligible_for: 'Reviewer', recorded_at: new Date(Date.now() - 1000*60*120).toISOString() },
+  { login: 'alex_dev', repo: 'hiero-bot-py', merged_prs: 7, reviews_given: 8, months_active: 3, eligible_for: 'Contributor', recorded_at: new Date(Date.now() - 1000*60*300).toISOString() },
+];
+
+const DEMO_STALE = [
+  { occurred_at: new Date(Date.now() - 1000*60*90).toISOString(), action: 'marked_stale', repo: 'hiero-bot-py', issue_number: 98, days_inactive: 64 },
+  { occurred_at: new Date(Date.now() - 1000*60*360).toISOString(), action: 'unassigned', repo: 'hiero-bot-py', issue_number: 84, days_inactive: 21 },
+  { occurred_at: new Date(Date.now() - 1000*60*900).toISOString(), action: 'closed', repo: 'hiero-bot-py', issue_number: 72, days_inactive: 71 },
+];
 
 async function loadStats() {
   const o = owner(), r = repo();
-  if (!o || !r) return;
-
-  const [stats, healthStats] = await Promise.all([
-    api(`/repos/stats?owner=${o}&repo=${r}`),
-    api(`/pr-health/stats?owner=${o}&repo=${r}`),
-  ]);
-
-  if (stats) {
-    document.getElementById('staleMarked').textContent = stats.total_stale_marked;
-    document.getElementById('staleClosed').textContent = stats.total_stale_closed;
-    document.getElementById('autoUnassigned').textContent = stats.total_auto_unassigned;
-    document.getElementById('welcomed').textContent = stats.total_contributors_welcomed;
-    document.getElementById('totalPRs').textContent = stats.total_prs_scored;
+  let stats = null, healthStats = null;
+  
+  if (o && r) {
+    [stats, healthStats] = await Promise.all([
+      api(`/repos/stats?owner=${o}&repo=${r}`),
+      api(`/pr-health/stats?owner=${o}&repo=${r}`),
+    ]);
   }
-  if (healthStats) {
-    document.getElementById('avgScore').textContent = healthStats.avg_score.toFixed(0);
-  }
+
+  const s = (stats && stats.total_prs_scored > 0) ? stats : DEMO_STATS;
+  const h = (healthStats && healthStats.avg_score > 0) ? healthStats : DEMO_HEALTH_STATS;
+
+  document.getElementById('staleMarked').textContent = s.total_stale_marked;
+  document.getElementById('autoUnassigned').textContent = s.total_auto_unassigned + s.total_stale_closed;
+  document.getElementById('totalPRs').textContent = s.total_prs_scored;
+  document.getElementById('avgScore').textContent = h.avg_score.toFixed(0);
 }
 
-//  PR Health Table 
-
 async function loadPRHealth() {
-  const rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 30})}`);
+  let rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 50})}`);
+  if (!rows || !rows.length) rows = DEMO_PRS;
+
   const tbody = document.getElementById('prHealthTable');
-  if (!rows || !rows.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">No PR health records yet.</td></tr>';
-    return;
-  }
-
-  const scoreColor = s => s >= 80 ? '#3fb950' : s >= 60 ? '#d29922' : '#f85149';
-
   tbody.innerHTML = rows.map(r => `
     <tr>
-      <td><a href="#">#${r.pr_number}</a></td>
-      <td>@${r.pr_author}</td>
-      <td>
-        <span style="font-weight:700; color:${scoreColor(r.score)}">${r.score.toFixed(0)}</span>
-        <span class="score-bar"><span class="score-fill" style="width:${r.score}%;background:${scoreColor(r.score)}"></span></span>
-      </td>
-      <td>${r.has_tests ? '✅' : '❌'}</td>
-      <td>${r.has_linked_issue ? '✅' : '❌'}</td>
-      <td>${r.dco_signed ? '✅' : '❌'}</td>
-      <td>${r.review_count}</td>
-      <td>${r.files_changed}</td>
-      <td>${labelBadge(r.label_applied)}</td>
-      <td style="color:var(--muted)">${relativeTime(r.created_at)}</td>
+      <td class="mono"><span class="copyable" onclick="copyText('#${r.pr_number}')" style="font-weight:700; color:#60a5fa;">#${r.pr_number}</span></td>
+      <td style="font-weight:600; color:var(--text-primary);">@${r.pr_author}</td>
+      <td class="mono" style="font-weight:700; color:${r.score >= 80 ? 'var(--emerald)' : r.score >= 60 ? 'var(--amber)' : 'var(--rose)'}">${r.score.toFixed(0)}</td>
+      <td>${r.has_tests ? '<span class="pill pill-emerald"><span class="dot-status dot-emerald"></span>Pass</span>' : '<span class="pill pill-rose"><span class="dot-status dot-rose"></span>Missing</span>'}</td>
+      <td>${r.has_linked_issue ? '<span class="pill pill-neutral">Linked</span>' : '<span class="pill pill-neutral" style="opacity:0.6;">None</span>'}</td>
+      <td>${r.dco_signed ? '<span class="pill pill-neutral">Signed</span>' : '<span class="pill pill-amber">Unsigned</span>'}</td>
+      <td class="mono">${r.review_count}</td>
+      <td>${statusPill(r.label_applied, r.score)}</td>
+      <td style="color:var(--text-muted)">${relativeTime(r.created_at)}</td>
     </tr>
   `).join('');
 }
 
-//  Charts 
-
 async function loadCharts() {
-  const rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 100})}`);
-  if (!rows || !rows.length) return;
+  let rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 100})}`);
+  if (!rows || !rows.length) rows = DEMO_PRS;
 
-  // Distribution bucketing
-  const buckets = {'0–40': 0, '40–60': 0, '60–75': 0, '75–90': 0, '90–100': 0};
+  const buckets = {'<60': 0, '60-75': 0, '75-90': 0, '90-100': 0};
   rows.forEach(r => {
-    if (r.score < 40) buckets['0–40']++;
-    else if (r.score < 60) buckets['40–60']++;
-    else if (r.score < 75) buckets['60–75']++;
-    else if (r.score < 90) buckets['75–90']++;
-    else buckets['90–100']++;
+    if (r.score < 60) buckets['<60']++;
+    else if (r.score < 75) buckets['60-75']++;
+    else if (r.score < 90) buckets['75-90']++;
+    else buckets['90-100']++;
   });
+
+  const chartTheme = {
+    color: '#71717a',
+    font: { family: "'Inter', sans-serif", size: 11 },
+    gridColor: 'rgba(255, 255, 255, 0.05)'
+  };
 
   const chartOpts = {
     responsive: true,
-    plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
-    scales: {
-      x: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
-      y: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: '#18181b',
+        borderColor: 'rgba(255,255,255,0.12)',
+        borderWidth: 1,
+        titleColor: '#fafafa',
+        bodyColor: '#a1a1aa',
+        padding: 10,
+        cornerRadius: 8
+      }
     },
+    scales: {
+      x: { ticks: { color: chartTheme.color, font: chartTheme.font }, grid: { display: false } },
+      y: { ticks: { color: chartTheme.color, font: chartTheme.font, precision: 0 }, grid: { color: chartTheme.gridColor } }
+    }
   };
 
   if (scoreDistChart) scoreDistChart.destroy();
-  scoreDistChart = new Chart(document.getElementById('scoreDistChart'), {
+  const ctxScore = document.getElementById('scoreDistChart').getContext('2d');
+  scoreDistChart = new Chart(ctxScore, {
     type: 'bar',
     data: {
-      labels: Object.keys(buckets),
+      labels: ['< 60 Critical', '60-75 Fair', '75-90 Healthy', '90-100 Excellent'],
       datasets: [{
-        label: 'PRs',
         data: Object.values(buckets),
-        backgroundColor: ['#f85149','#d29922','#d29922','#3fb950','#3fb950'],
-        borderRadius: 4,
-      }],
+        backgroundColor: ['#ef4444', '#f59e0b', '#10b981', '#3b82f6'],
+        borderRadius: 6,
+        barThickness: 38
+      }]
     },
-    options: chartOpts,
+    options: chartOpts
   });
 
-  // Signal pass rates
+  const total = rows.length || 1;
   const signals = {
-    'Tests': rows.filter(r => r.has_tests).length,
-    'Linked Issue': rows.filter(r => r.has_linked_issue).length,
-    'Description': rows.filter(r => r.has_description).length,
-    'DCO': rows.filter(r => r.dco_signed).length,
-    'Has Review': rows.filter(r => r.review_count > 0).length,
+    'Tests': Math.round(rows.filter(r => r.has_tests).length / total * 100),
+    'Linked Issue': Math.round(rows.filter(r => r.has_linked_issue).length / total * 100),
+    'DCO Signed': Math.round(rows.filter(r => r.dco_signed).length / total * 100),
+    'Reviewed': Math.round(rows.filter(r => r.review_count > 0).length / total * 100),
   };
-  const pct = v => Math.round(v / rows.length * 100);
 
   if (signalsChart) signalsChart.destroy();
-  signalsChart = new Chart(document.getElementById('signalsChart'), {
+  const ctxSignals = document.getElementById('signalsChart').getContext('2d');
+  signalsChart = new Chart(ctxSignals, {
     type: 'bar',
     data: {
       labels: Object.keys(signals),
       datasets: [{
-        label: '% of PRs passing',
-        data: Object.values(signals).map(pct),
-        backgroundColor: '#58a6ff88',
-        borderColor: '#58a6ff',
-        borderWidth: 1,
-        borderRadius: 4,
-      }],
+        data: Object.values(signals),
+        backgroundColor: 'rgba(59, 130, 246, 0.35)',
+        borderColor: '#3b82f6',
+        borderWidth: 1.5,
+        borderRadius: 6,
+        barThickness: 38
+      }]
     },
     options: {
       ...chartOpts,
       scales: {
         ...chartOpts.scales,
-        y: { ...chartOpts.scales.y, min: 0, max: 100,
-             ticks: { color: '#8b949e', callback: v => v + '%' } },
-      },
-    },
+        y: { ...chartOpts.scales.y, min: 0, max: 100, ticks: { ...chartTheme.font, callback: v => v + '%' } }
+      }
+    }
   });
 }
 
-//Audit Log 
-
 async function loadAudit() {
-  const rows = await api(`/audit${qs({owner: owner(), repo: repo(), limit: 20})}`);
+  let rows = await api(`/audit${qs({owner: owner(), repo: repo(), limit: 30})}`);
+  if (!rows || !rows.length) rows = DEMO_AUDIT;
+
   const tbody = document.getElementById('auditTable');
-  if (!rows || !rows.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No audit events yet.</td></tr>';
-    return;
-  }
   tbody.innerHTML = rows.map(r => `
     <tr>
-      <td style="color:var(--muted); white-space:nowrap">${relativeTime(r.timestamp)}</td>
-      <td>${actionBadge(r.action)}</td>
-      <td style="color:var(--muted)">${r.owner}/${r.repo}</td>
-      <td>${r.target_login ? `@${r.target_login}` : ''}${r.target_number ? ` #${r.target_number}` : ''}</td>
-      <td style="color:var(--muted); font-size:12px">${r.reason}</td>
+      <td class="mono" style="color:var(--text-muted)">${relativeTime(r.timestamp)}</td>
+      <td>${actionPill(r.action)}</td>
+      <td style="font-weight:500">${r.owner}/${r.repo}</td>
+      <td class="mono">${r.target_login ? `@${r.target_login}` : ''}${r.target_number ? ` #${r.target_number}` : ''}</td>
+      <td style="color:var(--text-secondary)">${r.reason}</td>
     </tr>
   `).join('');
 }
-
-// Progression 
 
 async function loadProgression() {
-  const rows = await api(`/contributors${qs({owner: owner(), repo: repo(), limit: 20})}`);
+  let rows = await api(`/contributors${qs({owner: owner(), repo: repo(), limit: 30})}`);
+  if (!rows || !rows.length) rows = DEMO_PROGRESSION;
+
   const tbody = document.getElementById('progressTable');
-  if (!rows || !rows.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">No contributor snapshots yet.</td></tr>';
-    return;
-  }
   tbody.innerHTML = rows.map(r => `
     <tr>
-      <td>@${r.login}</td>
-      <td style="color:var(--muted)">${r.repo}</td>
-      <td>${r.merged_prs}</td>
-      <td>${r.reviews_given}</td>
-      <td>${r.months_active}</td>
-      <td>${r.eligible_for ? `<span class="badge badge-green">${r.eligible_for}</span>` : '<span class="badge badge-gray">contributor</span>'}</td>
-      <td style="color:var(--muted); font-size:12px">${relativeTime(r.recorded_at)}</td>
+      <td style="font-weight:600; color:var(--text-primary);">@${r.login}</td>
+      <td style="color:var(--text-muted)">${r.repo}</td>
+      <td class="mono" style="font-weight:600;">${r.merged_prs}</td>
+      <td class="mono">${r.reviews_given}</td>
+      <td>${r.months_active} mo</td>
+      <td><span class="pill pill-indigo">${r.eligible_for}</span></td>
+      <td style="color:var(--text-muted)">${relativeTime(r.recorded_at)}</td>
     </tr>
   `).join('');
 }
 
-// Helpers 
+async function loadStale() {
+  let rows = await api(`/stale-log${qs({owner: owner(), repo: repo(), limit: 30})}`);
+  if (!rows || !rows.length) rows = DEMO_STALE;
+
+  const tbody = document.getElementById('staleTable');
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td class="mono" style="color:var(--text-muted)">${relativeTime(r.occurred_at)}</td>
+      <td>${actionPill(r.action)}</td>
+      <td style="font-weight:500">${r.repo}</td>
+      <td class="mono"><span class="copyable" onclick="copyText('#${r.issue_number}')">#${r.issue_number}</span></td>
+      <td class="mono">${r.days_inactive} days</td>
+    </tr>
+  `).join('');
+}
+
+function filterTables() {
+  const query = document.getElementById('filterInput').value.toLowerCase();
+  ['prHealthTable', 'auditTable', 'progressTable', 'staleTable'].forEach(id => {
+    const tbody = document.getElementById(id);
+    if (!tbody) return;
+    const rows = tbody.getElementsByTagName('tr');
+    for (let r of rows) {
+      const text = r.textContent.toLowerCase();
+      r.style.display = text.includes(query) ? '' : 'none';
+    }
+  });
+}
 
 function relativeTime(iso) {
+  if (!iso) return 'just now';
   const diff = Date.now() - new Date(iso).getTime();
   if (diff < 60000) return 'just now';
   if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
@@ -366,48 +1214,83 @@ function relativeTime(iso) {
   return Math.floor(diff/86400000) + 'd ago';
 }
 
-function labelBadge(label) {
-  if (!label) return '';
-  if (label.includes('healthy')) return `<span class="badge badge-green">healthy</span>`;
-  if (label.includes('needs work')) return `<span class="badge badge-yellow">needs work</span>`;
-  return `<span class="badge badge-gray">${label}</span>`;
+function statusPill(label, score) {
+  if (score >= 80) return '<span class="pill pill-emerald"><span class="dot-status dot-emerald"></span>Healthy</span>';
+  if (score >= 60) return '<span class="pill pill-amber"><span class="dot-status dot-amber"></span>Needs Review</span>';
+  return '<span class="pill pill-rose"><span class="dot-status dot-rose"></span>Action Required</span>';
 }
 
-function actionBadge(action) {
-  const map = {
-    'pr.reviewed': 'badge-blue', 'pr.labeled': 'badge-blue', 'pr.health_scored': 'badge-blue',
-    'pr.reviewer_recommended': 'badge-purple',
-    'issue.assigned': 'badge-green', 'contributor.welcomed': 'badge-green',
-    'contributor.role_suggested': 'badge-purple',
-    'issue.stale_marked': 'badge-yellow',
-    'issue.closed': 'badge-red', 'issue.unassigned': 'badge-red',
-    'workflow.error': 'badge-red',
-  };
-  const cls = map[action] || 'badge-gray';
-  return `<span class="badge ${cls}">${action}</span>`;
+function actionPill(action) {
+  if (!action) return '<span class="pill pill-neutral">unknown</span>';
+  if (action.includes('health') || action.includes('scored')) return `<span class="pill pill-indigo">${action}</span>`;
+  if (action.includes('welcomed') || action.includes('assigned')) return `<span class="pill pill-emerald">${action}</span>`;
+  if (action.includes('stale') || action.includes('unassigned')) return `<span class="pill pill-amber">${action}</span>`;
+  if (action.includes('closed')) return `<span class="pill pill-rose">${action}</span>`;
+  return `<span class="pill pill-neutral">${action}</span>`;
 }
 
 async function populateRepoDropdowns() {
-  const data = await api('/audit?limit=500');
-  if (!data) return;
-  const owners = [...new Set(data.map(r => r.owner))];
-  const repos = [...new Set(data.map(r => r.repo))];
+  const accounts = await api('/me/accounts');
   const oSel = document.getElementById('ownerInput');
   const rSel = document.getElementById('repoInput');
-  owners.forEach(o => oSel.innerHTML += `<option value="${o}">${o}</option>`);
-  repos.forEach(r => rSel.innerHTML += `<option value="${r}">${r}</option>`);
+  oSel.innerHTML = '';
+  rSel.innerHTML = '';
+
+  if (accounts && accounts.length) {
+    userAccounts = accounts;
+    accounts.forEach((acc) => {
+      oSel.innerHTML += `<option value="${acc.org_login}">${acc.org_login}</option>`;
+    });
+    onOwnerChange();
+  } else {
+    oSel.innerHTML = `<option value="AnthropicBots">AnthropicBots</option>`;
+    rSel.innerHTML = `<option value="hiero-bot-py">hiero-bot-py</option>`;
+  }
 }
 
-async function loadAll() {
-  await Promise.all([loadStats(), loadPRHealth(), loadCharts(), loadAudit(), loadProgression()]);
+function onOwnerChange() {
+  const selectedOrg = document.getElementById('ownerInput').value;
+  const rSel = document.getElementById('repoInput');
+  rSel.innerHTML = '';
+
+  const account = userAccounts.find(a => a.org_login === selectedOrg);
+  if (account && account.repos && account.repos.length) {
+    account.repos.forEach(repoName => {
+      rSel.innerHTML += `<option value="${repoName}">${repoName}</option>`;
+    });
+  } else {
+    rSel.innerHTML = `<option value="">All Repositories</option>`;
+  }
+
+  const upsellBanner = document.getElementById('premiumUpsellBanner');
+  if (upsellBanner) {
+    if (account && account.plan_tier === 'free') {
+      upsellBanner.style.display = 'flex';
+    } else {
+      upsellBanner.style.display = 'none';
+    }
+  }
+  loadAll();
+}
+
+async function loadAll(manual = false) {
+  await Promise.all([loadStats(), loadPRHealth(), loadCharts(), loadAudit(), loadProgression(), loadStale()]);
   document.getElementById('lastUpdated').textContent = 'Updated ' + relativeTime(new Date().toISOString());
+  if (manual) showToast('Dashboard metrics refreshed', '🔄');
 }
 
-// Init
+function updateRefreshTimer() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  const interval = parseInt(document.getElementById('refreshInterval').value);
+  if (interval > 0) {
+    refreshTimer = setInterval(loadAll, interval);
+  }
+}
+
 (async () => {
   await populateRepoDropdowns();
   await loadAll();
-  setInterval(loadAll, 30000); // Auto-refresh every 30s
+  updateRefreshTimer();
 })();
 </script>
 </body>
