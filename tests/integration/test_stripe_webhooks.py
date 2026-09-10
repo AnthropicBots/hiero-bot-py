@@ -25,8 +25,18 @@ def sig_header(payload: bytes, secret: str, timestamp: int | None = None) -> str
     return f"t={ts},v1={v1}"
 
 
-def stripe_event(event_type: str, **data_obj_fields) -> bytes:
-    return json.dumps({"type": event_type, "data": {"object": data_obj_fields}}).encode()
+def stripe_event(
+    event_type: str,
+    event_id: str = "evt_test_123",
+    **data_obj_fields,
+) -> bytes:
+    return json.dumps(
+        {
+            "id": event_id,
+            "type": event_type,
+            "data": {"object": data_obj_fields},
+        }
+    ).encode()
 
 
 @pytest_asyncio.fixture

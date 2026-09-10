@@ -116,6 +116,18 @@ class ReviewerRecommendation(Base):
     was_assigned: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class StripeEvent(Base):
+    __tablename__ = "stripe_events"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(128), index=True)
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
