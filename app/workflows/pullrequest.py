@@ -110,9 +110,14 @@ class PullRequestWorkflow:
 
         # AI review
         if action in ("opened", "reopened") and cfg.ai_review.enabled:
-            await self._run_ai_review(ctx, pr)
+            try:
+                await self._run_ai_review(ctx, pr)
+            finally:
+                # PullRequestWorkflow owns its AIReviewer, so always release
+                # provider connections after the review attempt completes.
+                await self._ai.close()
 
-# Reviewer recommendation
+        # Reviewer recommendation
         if action in ("opened", "reopened") and cfg.reviewer_recommendation:
             await self._recommend_reviewers(ctx, pr)
 

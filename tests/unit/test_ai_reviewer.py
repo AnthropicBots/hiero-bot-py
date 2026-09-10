@@ -1,10 +1,17 @@
 # tests/unit/test_ai_reviewer.py
 
 import json
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.ai import reviewer as reviewer_module
+from app.ai.backends import (
+    BackendError,
+    BackendPermanentError,
+    BackendTransientError,
+    BackendUnavailable,
+    ReviewBackend,
+)
 from app.ai.reviewer import AIReviewer
 from app.config.schema import AIReviewConfig
 
@@ -12,34 +19,70 @@ CFG = AIReviewConfig(enabled=True, max_comments=5, focus_areas=["security", "log
 DIFFS = [{"path": "src/auth.py", "diff": "+password = 'admin123'"}]
 
 
-def make_response(data: dict):
-    mock_msg = MagicMock()
-    mock_msg.content = [MagicMock(text=json.dumps(data))]
-    return mock_msg
+class StubBackend(ReviewBackend):
+    """A backend that replays canned responses, so no provider SDK is involved."""
+
+    name = "stub"
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.requests = []
+        self.close_calls = 0
+
+    @classmethod
+    def available(cls):
+        return True
+
+    async def complete(self, request):
+        self.requests.append(request)
+        result = self.responses.pop(0) if self.responses else ""
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def close(self):
+        self.close_calls += 1
+
+
+@pytest.fixture(autouse=True)
+def no_retry_sleep(monkeypatch):
+    monkeypatch.setattr(reviewer_module, "RETRY_BASE_DELAY", 0)
+
+
+def review_json(**overrides):
+    payload = {
+        "summary": "Hardcoded credential found.",
+        "verdict": "request_changes",
+        "score": 35,
+        "comments": [
+            {
+                "path": "src/auth.py",
+                "line": 1,
+                "body": "Never hardcode passwords.",
+                "severity": "error",
+            }
+        ],
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+# ── Review flow ───────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_raises_when_disabled():
     disabled = AIReviewConfig(enabled=False)
     with pytest.raises(ValueError, match="disabled"):
-        await AIReviewer().review(disabled, "title", "body", DIFFS)
+        await AIReviewer(StubBackend()).review(disabled, "title", "body", DIFFS)
 
 
 @pytest.mark.asyncio
 async def test_returns_parsed_review():
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=make_response({
-        "summary": "Hardcoded credential found.",
-        "verdict": "request_changes",
-        "score": 35,
-        "comments": [
-            {"path": "src/auth.py", "line": 1, "body": "Never hardcode passwords.", "severity": "error"}
-        ],
-    }))
-    r = AIReviewer()
-    r._client = mock_client
-    r._client_type = "anthropic"
-    result = await r.review(CFG, "feat: auth", "Adds login", DIFFS)
+    result = await AIReviewer(StubBackend(review_json())).review(
+        CFG, "feat: auth", "Adds login", DIFFS
+    )
+
     assert result["verdict"] == "request_changes"
     assert result["score"] == 35
     assert len(result["comments"]) == 1
@@ -47,41 +90,197 @@ async def test_returns_parsed_review():
 
 
 @pytest.mark.asyncio
-async def test_graceful_fallback_on_api_error():
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(side_effect=Exception("Network error"))
-    r = AIReviewer()
-    r._client = mock_client
-    r._client_type = "anthropic"
-    result = await r.review(CFG, "PR", "", DIFFS)
-    assert result["verdict"] == "comment"
-    assert result["comments"] == []
-    assert result["score"] == 50
-
-
-@pytest.mark.asyncio
 async def test_strips_markdown_fences():
-    mock_client = AsyncMock()
-    text = '```json\n{"summary":"ok","verdict":"approve","score":90,"comments":[]}\n```'
-    mock_msg = MagicMock()
-    mock_msg.content = [MagicMock(text=text)]
-    mock_client.messages.create = AsyncMock(return_value=mock_msg)
-    r = AIReviewer()
-    r._client = mock_client
-    r._client_type = "anthropic"
-    result = await r.review(CFG, "PR", "", DIFFS)
+    fenced = '```json\n{"summary":"ok","verdict":"approve","score":90,"comments":[]}\n```'
+
+    result = await AIReviewer(StubBackend(fenced)).review(CFG, "PR", "", DIFFS)
+
     assert result["verdict"] == "approve"
     assert result["score"] == 90
 
 
+@pytest.mark.asyncio
+async def test_request_carries_config_model_and_timeout():
+    backend = StubBackend(review_json())
+    cfg = AIReviewConfig(enabled=True, model="local-model:7b", timeout_seconds=120)
+
+    await AIReviewer(backend).review(cfg, "PR", "", DIFFS)
+
+    assert backend.requests[0].model == "local-model:7b"
+    assert backend.requests[0].timeout_seconds == 120
+
+
+@pytest.mark.asyncio
+async def test_request_does_not_force_temperature():
+    backend = StubBackend(review_json())
+
+    await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert backend.requests[0].temperature is None
+
+
+@pytest.mark.asyncio
+async def test_prompt_contains_the_diff():
+    backend = StubBackend(review_json())
+
+    await AIReviewer(backend).review(CFG, "feat: auth", "Adds login", DIFFS)
+
+    assert "src/auth.py" in backend.requests[0].prompt
+    assert "admin123" in backend.requests[0].prompt
+
+
+# ── Failure handling ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_graceful_fallback_on_backend_error():
+    backend = StubBackend(BackendError("network"))
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["verdict"] == "comment"
+    assert result["comments"] == []
+    assert result["score"] == 50
+    assert len(backend.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_failures_are_retried():
+    backend = StubBackend(
+        BackendTransientError("429"),
+        review_json(),
+    )
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["score"] == 35
+    assert len(backend.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_permanent_failures_are_not_retried():
+    backend = StubBackend(
+        BackendPermanentError("401 unauthorized"),
+        review_json(),
+        review_json(),
+    )
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["verdict"] == "comment"
+    assert result["score"] == 50
+    assert len(backend.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_count_is_configurable():
+    cfg = AIReviewConfig(enabled=True, max_retries=4)
+    backend = StubBackend(
+        BackendTransientError("boom 1"),
+        BackendTransientError("boom 2"),
+        BackendTransientError("boom 3"),
+        BackendTransientError("boom 4"),
+        BackendTransientError("boom 5"),
+    )
+
+    await AIReviewer(backend).review(cfg, "PR", "", DIFFS)
+
+    assert len(backend.requests) == 5
+
+
+@pytest.mark.asyncio
+async def test_zero_retries_means_one_attempt():
+    cfg = AIReviewConfig(enabled=True, max_retries=0)
+    backend = StubBackend(
+        BackendTransientError("temporary failure"),
+        review_json(),
+    )
+
+    result = await AIReviewer(backend).review(cfg, "PR", "", DIFFS)
+
+    assert result["verdict"] == "comment"
+    assert len(backend.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_misconfiguration_is_not_retried():
+    """A missing API key will not fix itself; retrying just delays the PR."""
+    backend = StubBackend(
+        BackendUnavailable("no key"),
+        BackendUnavailable("no key"),
+        BackendUnavailable("no key"),
+    )
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["score"] == 50
+    assert len(backend.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_unexpected_errors_do_not_escape_or_retry():
+    backend = StubBackend(RuntimeError("something odd"))
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["verdict"] == "comment"
+    assert len(backend.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_final_transient_failure_returns_fallback():
+    cfg = AIReviewConfig(enabled=True, max_retries=2)
+    backend = StubBackend(
+        BackendTransientError("temporary 1"),
+        BackendTransientError("temporary 2"),
+        BackendTransientError("temporary 3"),
+        review_json(),
+    )
+
+    result = await AIReviewer(backend).review(cfg, "PR", "", DIFFS)
+
+    assert result["verdict"] == "comment"
+    assert result["score"] == 50
+    assert len(backend.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_backend_close_is_forwarded():
+    backend = StubBackend(review_json())
+    reviewer = AIReviewer(backend)
+
+    await reviewer.review(CFG, "PR", "", DIFFS)
+    await reviewer.close()
+
+    assert backend.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_without_backend_is_safe():
+    await AIReviewer().close()
+
+
+@pytest.mark.asyncio
+async def test_unparseable_response_degrades_gracefully():
+    result = await AIReviewer(StubBackend("I'm afraid I can't do that")).review(
+        CFG, "PR", "", DIFFS
+    )
+
+    assert result["verdict"] == "comment"
+    assert result["comments"] == []
+
+
+# ── Parsing ───────────────────────────────────────────────────
+
+
 def test_parse_invalid_verdict_defaults_to_comment():
-    r = AIReviewer()
+    r = AIReviewer(StubBackend())
     result = r._parse('{"summary":"x","verdict":"blah","score":50,"comments":[]}')
     assert result["verdict"] == "comment"
 
 
 def test_parse_clamps_score():
-    r = AIReviewer()
+    r = AIReviewer(StubBackend())
     result = r._parse('{"summary":"x","verdict":"approve","score":999,"comments":[]}')
     assert result["score"] == 100
 
@@ -90,25 +289,59 @@ def test_parse_clamps_score():
 
 
 def test_parse_caps_comments_at_20():
-    many = [{"path": f"f{i}.py", "line": i+1, "body": "issue", "severity": "info"}
-            for i in range(30)]
-    r = AIReviewer()
-    result = r._parse(json.dumps({
-        "summary": "many issues", "verdict": "request_changes",
-        "score": 20, "comments": many
-    }))
+    many = [
+        {
+            "path": f"f{i}.py",
+            "line": i + 1,
+            "body": "issue",
+            "severity": "info",
+        }
+        for i in range(30)
+    ]
+    r = AIReviewer(StubBackend())
+    result = r._parse(
+        json.dumps(
+            {
+                "summary": "many issues",
+                "verdict": "request_changes",
+                "score": 20,
+                "comments": many,
+            }
+        )
+    )
     assert len(result["comments"]) <= 20
 
 
 def test_parse_filters_empty_comments():
-    r = AIReviewer()
-    result = r._parse(json.dumps({
-        "summary": "ok", "verdict": "comment", "score": 50,
-        "comments": [
-            {"path": "", "line": 1, "body": "has no path", "severity": "info"},
-            {"path": "real.py", "line": 1, "body": "", "severity": "info"},
-            {"path": "real.py", "line": 2, "body": "valid comment", "severity": "warning"},
-        ]
-    }))
+    r = AIReviewer(StubBackend())
+    result = r._parse(
+        json.dumps(
+            {
+                "summary": "ok",
+                "verdict": "comment",
+                "score": 50,
+                "comments": [
+                    {
+                        "path": "",
+                        "line": 1,
+                        "body": "has no path",
+                        "severity": "info",
+                    },
+                    {
+                        "path": "real.py",
+                        "line": 1,
+                        "body": "",
+                        "severity": "info",
+                    },
+                    {
+                        "path": "real.py",
+                        "line": 2,
+                        "body": "valid comment",
+                        "severity": "warning",
+                    },
+                ],
+            }
+        )
+    )
     assert len(result["comments"]) == 1
     assert result["comments"][0]["body"] == "valid comment"
