@@ -346,6 +346,11 @@ async def test_account_check_failure_does_not_block_assignment(mock_gh, ctx):
 # ── Bounded lock registry (#101) ──────────────────────────────
 
 
+def test_bounded_lock_registry_rejects_invalid_capacity():
+    with pytest.raises(ValueError, match="max_capacity must be at least 1"):
+        BoundedLockRegistry(max_capacity=0)
+
+
 def test_bounded_lock_registry_reuses_lock_for_same_key():
     registry = BoundedLockRegistry(max_capacity=4)
 
@@ -356,7 +361,7 @@ def test_bounded_lock_registry_reuses_lock_for_same_key():
     assert len(registry._locks) == 1
 
 
-def test_bounded_lock_registry_evicts_oldest_unlocked_lock():
+def test_bounded_lock_registry_evicts_oldest_unused_entry():
     registry = BoundedLockRegistry(max_capacity=2)
 
     first = registry.get(("hiero", "sdk-js", 1))
@@ -375,20 +380,135 @@ def test_bounded_lock_registry_evicts_oldest_unlocked_lock():
 async def test_bounded_lock_registry_does_not_evict_held_lock():
     registry = BoundedLockRegistry(max_capacity=2)
 
-    held = registry.get(("hiero", "sdk-js", 1))
-    await held.acquire()
+    async with registry.get(("hiero", "sdk-js", 1)).acquire():
+        held = registry.get(("hiero", "sdk-js", 1))
+        registry.get(("hiero", "sdk-js", 2))
+        replacement = registry.get(("hiero", "sdk-js", 3))
 
-    unlocked = registry.get(("hiero", "sdk-js", 2))
-    replacement = registry.get(("hiero", "sdk-js", 3))
+        assert len(registry._locks) == 2
+        assert registry.get(("hiero", "sdk-js", 1)) is held
+        assert ("hiero", "sdk-js", 2) not in registry._locks
+        assert registry.get(("hiero", "sdk-js", 3)) is replacement
+        assert held.users == 1
 
-    assert len(registry._locks) == 2
-    assert registry.get(("hiero", "sdk-js", 1)) is held
-    assert ("hiero", "sdk-js", 2) not in registry._locks
-    assert registry.get(("hiero", "sdk-js", 3)) is replacement
-    assert held.locked()
-    assert not unlocked.locked()
 
-    held.release()
+@pytest.mark.asyncio
+async def test_bounded_lock_registry_does_not_evict_lock_with_waiter():
+    registry = BoundedLockRegistry(max_capacity=2)
+
+    first_key = ("hiero", "sdk-js", 1)
+    second_key = ("hiero", "sdk-js", 2)
+    third_key = ("hiero", "sdk-js", 3)
+
+    async with registry.get(first_key).acquire():
+        first = registry.get(first_key)
+        registry.get(second_key)
+
+        waiter_ready = asyncio.Event()
+        waiter_acquired = asyncio.Event()
+
+        async def wait_for_first():
+            waiter_ready.set()
+            async with registry.get(first_key).acquire():
+                waiter_acquired.set()
+
+        waiter = asyncio.create_task(wait_for_first())
+        await waiter_ready.wait()
+
+        while first.users != 2:
+            await asyncio.sleep(0)
+
+        replacement = registry.get(third_key)
+
+        assert len(registry._locks) == 2
+        assert registry.get(first_key) is first
+        assert second_key not in registry._locks
+        assert registry.get(third_key) is replacement
+        assert not waiter_acquired.is_set()
+        assert first.users == 2
+
+        await asyncio.sleep(0)
+        assert first.users == 2
+
+    await waiter
+
+    assert waiter_acquired.is_set()
+    assert first.users == 0
+
+
+@pytest.mark.asyncio
+async def test_bounded_lock_registry_removes_cancelled_waiter():
+    registry = BoundedLockRegistry(max_capacity=2)
+
+    first_key = ("hiero", "sdk-js", 1)
+    second_key = ("hiero", "sdk-js", 2)
+    third_key = ("hiero", "sdk-js", 3)
+
+    async with registry.get(first_key).acquire():
+        first = registry.get(first_key)
+        registry.get(second_key)
+
+        waiter_started = asyncio.Event()
+
+        async def wait_for_first():
+            waiter_started.set()
+            async with registry.get(first_key).acquire():
+                pass
+
+        waiter = asyncio.create_task(wait_for_first())
+        await waiter_started.wait()
+
+        while first.users != 2:
+            await asyncio.sleep(0)
+
+        waiter.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        assert first.users == 1
+
+        replacement = registry.get(third_key)
+
+        assert len(registry._locks) == 2
+        assert registry.get(first_key) is first
+        assert second_key not in registry._locks
+        assert registry.get(third_key) is replacement
+
+    assert first.users == 0
+
+
+@pytest.mark.asyncio
+async def test_bounded_lock_registry_releases_usage_after_exception():
+    registry = BoundedLockRegistry(max_capacity=1)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with registry.get(("hiero", "sdk-js", 1)).acquire():
+            first = registry.get(("hiero", "sdk-js", 1))
+            assert first.users == 1
+            raise RuntimeError("boom")
+
+    assert first.users == 0
+
+    replacement = registry.get(("hiero", "sdk-js", 2))
+
+    assert replacement is registry.get(("hiero", "sdk-js", 2))
+    assert ("hiero", "sdk-js", 1) not in registry._locks
+
+
+@pytest.mark.asyncio
+async def test_bounded_lock_registry_raises_when_all_locks_are_in_use():
+    registry = BoundedLockRegistry(max_capacity=2)
+
+    async with (
+        registry.get(("hiero", "sdk-js", 1)).acquire(),
+        registry.get(("hiero", "sdk-js", 2)).acquire(),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="registry is at capacity and all locks are currently in use",
+        ):
+            registry.get(("hiero", "sdk-js", 3))
 
 
 def test_bounded_lock_registry_refreshes_lru_order():

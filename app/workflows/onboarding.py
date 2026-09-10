@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -18,31 +19,57 @@ from app.utils.logger import get_logger
 log = get_logger("workflow.onboarding")
 
 
+class _TrackedLock:
+    """Track active users of an underlying asyncio lock."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._users = 0
+
+    @asynccontextmanager
+    async def acquire(self):
+        self._users += 1
+        try:
+            await self._lock.acquire()
+            try:
+                yield
+            finally:
+                self._lock.release()
+        finally:
+            self._users -= 1
+
+    @property
+    def users(self) -> int:
+        return self._users
+
+
 class BoundedLockRegistry:
-    """Bounded registry for asyncio.Lock instances with LRU eviction."""
+    """Bounded registry for asyncio locks with LRU eviction."""
 
     def __init__(self, max_capacity: int = 1024) -> None:
-        self._max_capacity = max_capacity
-        self._locks: OrderedDict[tuple, asyncio.Lock] = OrderedDict()
+        if max_capacity < 1:
+            raise ValueError("max_capacity must be at least 1")
 
-    def get(self, key: tuple) -> asyncio.Lock:
+        self._max_capacity = max_capacity
+        self._locks: OrderedDict[tuple, _TrackedLock] = OrderedDict()
+
+    def get(self, key: tuple) -> _TrackedLock:
         if key in self._locks:
             self._locks.move_to_end(key)
             return self._locks[key]
 
-        # Evict the oldest unheld lock when the registry reaches capacity.
         if len(self._locks) >= self._max_capacity:
             for existing_key in list(self._locks.keys()):
                 lock = self._locks[existing_key]
-                if not lock.locked():
+                if lock.users == 0:
                     del self._locks[existing_key]
                     break
             else:
                 raise RuntimeError(
-                    "Lock registry is at capacity and all locks are currently held"
+                    "Lock registry is at capacity and all locks are currently in use"
                 )
 
-        lock = asyncio.Lock()
+        lock = _TrackedLock()
         self._locks[key] = lock
         return lock
 
@@ -51,7 +78,11 @@ _assign_locks = BoundedLockRegistry(max_capacity=2048)
 _contributor_assign_locks = BoundedLockRegistry(max_capacity=2048)
 
 
-def _get_assign_lock(owner: str, repo: str, issue_number: int) -> asyncio.Lock:
+def _get_assign_lock(
+    owner: str,
+    repo: str,
+    issue_number: int,
+) -> _TrackedLock:
     return _assign_locks.get((owner, repo, issue_number))
 
 
@@ -59,7 +90,7 @@ def _get_contributor_assign_lock(
     owner: str,
     repo: str,
     login: str,
-) -> asyncio.Lock:
+) -> _TrackedLock:
     return _contributor_assign_locks.get((owner, repo, login.lower()))
 
 
@@ -177,7 +208,7 @@ class OnboardingWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db = ctx["db"]
 
-        async with _get_assign_lock(owner, repo, issue_number):
+        async with _get_assign_lock(owner, repo, issue_number).acquire():
             live_issue = await self._gh.get(
                 f"/repos/{owner}/{repo}/issues/{issue_number}", inst
             )
@@ -192,7 +223,7 @@ class OnboardingWorkflow:
                 return
 
             if cfg.max_concurrent_assignments is not None:
-                async with _get_contributor_assign_lock(owner, repo, login):
+                async with _get_contributor_assign_lock(owner, repo, login).acquire():
                     ok, reason = await self._check_eligibility(ctx, login)
                     if not ok:
                         await self._gh.post_comment(
