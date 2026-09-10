@@ -34,8 +34,18 @@ def make_request(body: bytes, sig_header: str | None) -> Request:
     return Request(scope, receive)
 
 
-def stripe_event(event_type: str, **data_obj_fields) -> bytes:
-    return json.dumps({"type": event_type, "data": {"object": data_obj_fields}}).encode()
+def stripe_event(
+    event_type: str,
+    event_id: str = "evt_test_123",
+    **data_obj_fields,
+) -> bytes:
+    return json.dumps(
+        {
+            "id": event_id,
+            "type": event_type,
+            "data": {"object": data_obj_fields},
+        }
+    ).encode()
 
 
 @pytest.mark.asyncio
@@ -53,6 +63,90 @@ async def test_checkout_completed_upgrades_account(db, monkeypatch):
     assert result == {"status": "success"}
     await db.refresh(acc)
     assert acc.plan_tier == "premium"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_event_id_is_ignored(db, monkeypatch):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=605,
+        org_login="duplicate-org",
+        plan_tier="free",
+    )
+    db.add(acc)
+    await db.commit()
+
+    body = stripe_event(
+        "checkout.session.completed",
+        event_id="evt_duplicate_test",
+        metadata={"org_login": "duplicate-org"},
+    )
+    signature = sign(SECRET, body, int(time.time()))
+
+    first_result = await stripe_webhook(
+        make_request(body, signature),
+        db,
+    )
+
+    await db.refresh(acc)
+    assert first_result == {"status": "success"}
+    assert acc.plan_tier == "premium"
+
+    acc.plan_tier = "free"
+    await db.commit()
+
+    second_result = await stripe_webhook(
+        make_request(body, signature),
+        db,
+    )
+
+    await db.refresh(acc)
+    assert second_result == {"status": "success"}
+    assert acc.plan_tier == "free"
+
+
+@pytest.mark.asyncio
+async def test_distinct_event_ids_are_processed_independently(db, monkeypatch):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=606,
+        org_login="distinct-events-org",
+        plan_tier="free",
+    )
+    db.add(acc)
+    await db.commit()
+
+    first_body = stripe_event(
+        "checkout.session.completed",
+        event_id="evt_distinct_1",
+        metadata={"org_login": "distinct-events-org"},
+    )
+    first_signature = sign(SECRET, first_body, int(time.time()))
+
+    first_result = await stripe_webhook(
+        make_request(first_body, first_signature),
+        db,
+    )
+
+    await db.refresh(acc)
+    assert first_result == {"status": "success"}
+    assert acc.plan_tier == "premium"
+
+    second_body = stripe_event(
+        "customer.subscription.deleted",
+        event_id="evt_distinct_2",
+        metadata={"org_login": "distinct-events-org"},
+    )
+    second_signature = sign(SECRET, second_body, int(time.time()))
+
+    second_result = await stripe_webhook(
+        make_request(second_body, second_signature),
+        db,
+    )
+
+    await db.refresh(acc)
+    assert second_result == {"status": "success"}
+    assert acc.plan_tier == "free"
 
 
 @pytest.mark.asyncio
