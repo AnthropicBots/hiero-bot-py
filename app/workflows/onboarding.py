@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -16,15 +17,42 @@ from app.utils.logger import get_logger
 
 log = get_logger("workflow.onboarding")
 
-_assign_locks: dict[tuple[str, str, int], asyncio.Lock] = {}
-_contributor_assign_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+
+class BoundedLockRegistry:
+    """Bounded registry for asyncio.Lock instances with LRU eviction."""
+
+    def __init__(self, max_capacity: int = 1024) -> None:
+        self._max_capacity = max_capacity
+        self._locks: OrderedDict[tuple, asyncio.Lock] = OrderedDict()
+
+    def get(self, key: tuple) -> asyncio.Lock:
+        if key in self._locks:
+            self._locks.move_to_end(key)
+            return self._locks[key]
+
+        # Evict the oldest unheld lock when the registry reaches capacity.
+        if len(self._locks) >= self._max_capacity:
+            for existing_key in list(self._locks.keys()):
+                lock = self._locks[existing_key]
+                if not lock.locked():
+                    del self._locks[existing_key]
+                    break
+            else:
+                raise RuntimeError(
+                    "Lock registry is at capacity and all locks are currently held"
+                )
+
+        lock = asyncio.Lock()
+        self._locks[key] = lock
+        return lock
+
+
+_assign_locks = BoundedLockRegistry(max_capacity=2048)
+_contributor_assign_locks = BoundedLockRegistry(max_capacity=2048)
 
 
 def _get_assign_lock(owner: str, repo: str, issue_number: int) -> asyncio.Lock:
-    key = (owner, repo, issue_number)
-    if key not in _assign_locks:
-        _assign_locks[key] = asyncio.Lock()
-    return _assign_locks[key]
+    return _assign_locks.get((owner, repo, issue_number))
 
 
 def _get_contributor_assign_lock(
@@ -32,10 +60,7 @@ def _get_contributor_assign_lock(
     repo: str,
     login: str,
 ) -> asyncio.Lock:
-    key = (owner, repo, login.lower())
-    if key not in _contributor_assign_locks:
-        _contributor_assign_locks[key] = asyncio.Lock()
-    return _contributor_assign_locks[key]
+    return _contributor_assign_locks.get((owner, repo, login.lower()))
 
 
 # Bot detection. Substring matching is deliberately avoided — "bot" appears in
@@ -319,7 +344,7 @@ class OnboardingWorkflow:
                     False,
                     (
                         f"⚠️ @{login} You already have {current} open issue(s) "
-                        "assigned in this repository. Please finish one before "
+                        f"assigned in this repository. Please finish one before "
                         "taking another issue."
                     ),
                 )

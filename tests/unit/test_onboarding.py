@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.utils import audit
-from app.workflows.onboarding import OnboardingWorkflow, looks_like_bot
+from app.workflows.onboarding import (
+    BoundedLockRegistry,
+    OnboardingWorkflow,
+    _get_contributor_assign_lock,
+    looks_like_bot,
+)
 
 
 def make_payload(
@@ -201,7 +206,6 @@ async def test_self_assign_blocked_at_assignment_limit(mock_gh, ctx):
 
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(assignees=[]))
-
     mock_gh.add_assignees.assert_not_awaited()
     mock_gh.count_assigned_open_issues.assert_awaited_once_with(
         "hiero",
@@ -221,7 +225,6 @@ async def test_self_assign_allowed_under_assignment_limit(mock_gh, ctx):
 
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(assignees=[]))
-
     mock_gh.count_assigned_open_issues.assert_awaited_once_with(
         "hiero",
         "sdk-js",
@@ -235,7 +238,6 @@ async def test_self_assign_allowed_under_assignment_limit(mock_gh, ctx):
 async def test_self_assign_skips_assignment_limit_when_unset(mock_gh, ctx):
     ctx["config"].workflows.onboarding.max_concurrent_assignments = None
     mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})
-
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(assignees=[]))
 
@@ -255,7 +257,6 @@ async def test_self_assign_fails_closed_when_assignment_count_lookup_fails(
 
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(assignees=[]))
-
     mock_gh.add_assignees.assert_not_awaited()
     body = mock_gh.post_comment.call_args[0][3]
     assert "couldn't verify your current issue assignments" in body
@@ -271,7 +272,6 @@ async def test_self_assign_concurrent_requests_respect_assignment_limit(mock_gh,
             {"number": 2, "assignees": []},
         ]
     )
-
     assignment_count = 2
 
     async def count_assigned_open_issues(*args):
@@ -288,7 +288,6 @@ async def test_self_assign_concurrent_requests_respect_assignment_limit(mock_gh,
     mock_gh.add_assignees = AsyncMock(side_effect=add_assignee)
 
     wf = OnboardingWorkflow(mock_gh)
-
     payload_one = make_payload(issue_number=1, assignees=[])
     payload_two = make_payload(issue_number=2, assignees=[])
 
@@ -303,7 +302,9 @@ async def test_self_assign_concurrent_requests_respect_assignment_limit(mock_gh,
 
 @pytest.mark.asyncio
 async def test_self_assign_already_assigned(mock_gh, ctx):
-    mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": [{"login": "alice"}]})
+    mock_gh.get = AsyncMock(
+        return_value={"number": 1, "assignees": [{"login": "alice"}]}
+    )
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload(assignees=[{"login": "alice"}]))
     mock_gh.add_assignees.assert_not_awaited()
@@ -318,7 +319,6 @@ async def test_self_assign_blocked_by_min_age(mock_gh, ctx):
     recent_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-
     mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})
     mock_gh.get_user = AsyncMock(
         return_value={
@@ -343,6 +343,86 @@ async def test_account_check_failure_does_not_block_assignment(mock_gh, ctx):
     mock_gh.add_assignees.assert_awaited_once()
 
 
+# ── Bounded lock registry (#101) ──────────────────────────────
+
+
+def test_bounded_lock_registry_reuses_lock_for_same_key():
+    registry = BoundedLockRegistry(max_capacity=4)
+
+    first = registry.get(("hiero", "sdk-js", 1))
+    second = registry.get(("hiero", "sdk-js", 1))
+
+    assert first is second
+    assert len(registry._locks) == 1
+
+
+def test_bounded_lock_registry_evicts_oldest_unlocked_lock():
+    registry = BoundedLockRegistry(max_capacity=2)
+
+    first = registry.get(("hiero", "sdk-js", 1))
+    second = registry.get(("hiero", "sdk-js", 2))
+
+    third = registry.get(("hiero", "sdk-js", 3))
+
+    assert len(registry._locks) == 2
+    assert ("hiero", "sdk-js", 1) not in registry._locks
+    assert registry.get(("hiero", "sdk-js", 2)) is second
+    assert registry.get(("hiero", "sdk-js", 3)) is third
+    assert registry.get(("hiero", "sdk-js", 1)) is not first
+
+
+@pytest.mark.asyncio
+async def test_bounded_lock_registry_does_not_evict_held_lock():
+    registry = BoundedLockRegistry(max_capacity=2)
+
+    held = registry.get(("hiero", "sdk-js", 1))
+    await held.acquire()
+
+    unlocked = registry.get(("hiero", "sdk-js", 2))
+    replacement = registry.get(("hiero", "sdk-js", 3))
+
+    assert len(registry._locks) == 2
+    assert registry.get(("hiero", "sdk-js", 1)) is held
+    assert ("hiero", "sdk-js", 2) not in registry._locks
+    assert registry.get(("hiero", "sdk-js", 3)) is replacement
+    assert held.locked()
+    assert not unlocked.locked()
+
+    held.release()
+
+
+def test_bounded_lock_registry_refreshes_lru_order():
+    registry = BoundedLockRegistry(max_capacity=2)
+
+    first = registry.get(("hiero", "sdk-js", 1))
+    second = registry.get(("hiero", "sdk-js", 2))
+
+    assert registry.get(("hiero", "sdk-js", 1)) is first
+
+    third = registry.get(("hiero", "sdk-js", 3))
+
+    assert len(registry._locks) == 2
+    assert ("hiero", "sdk-js", 2) not in registry._locks
+    assert registry.get(("hiero", "sdk-js", 1)) is first
+    assert registry.get(("hiero", "sdk-js", 3)) is third
+
+
+def test_contributor_assign_lock_is_case_insensitive():
+    first = _get_contributor_assign_lock("hiero", "sdk-js", "Alice")
+    second = _get_contributor_assign_lock("hiero", "sdk-js", "alice")
+
+    assert first is second
+
+
+def test_bounded_lock_registry_stays_within_capacity_for_many_keys():
+    registry = BoundedLockRegistry(max_capacity=32)
+
+    for issue_number in range(5000):
+        registry.get(("hiero", "sdk-js", issue_number))
+
+    assert len(registry._locks) <= 32
+
+
 # ── CLA gate (#42: require_signed_cla) ────────────────────────
 
 
@@ -355,7 +435,6 @@ async def test_cla_gate_blocks_unsigned_contributor(mock_gh, ctx):
     mock_gh.get_file_content = AsyncMock(
         return_value=encode({"signedContributors": [{"name": "bob"}]})
     )
-
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload())
 
@@ -375,7 +454,6 @@ async def test_cla_gate_allows_signed_contributor(mock_gh, ctx):
 
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_self_assign(ctx, make_payload())
-
     mock_gh.add_assignees.assert_awaited_once()
 
 
