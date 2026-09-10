@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str | None = None
-    # A local Ollama endpoint, e.g. http://localhost:11434. The one backend
-    # that keeps source code on your own infrastructure.
+    # An Ollama endpoint, e.g. http://localhost:11434. When the endpoint is
+    # local or otherwise trusted, source code stays within that infrastructure.
     ollama_base_url: str | None = None
 
     # Database
