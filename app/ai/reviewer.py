@@ -9,6 +9,7 @@ from typing import Any
 
 from app.ai.backends import (
     BackendError,
+    BackendTransientError,
     BackendUnavailable,
     CompletionRequest,
     ReviewBackend,
@@ -26,6 +27,7 @@ def _unavailable() -> dict[str, Any]:
         "score": 50,
         "comments": [],
     }
+
 
 SYSTEM_PROMPT = """You are a senior staff engineer doing a rigorous code review for the Hiero open source project. You take this seriously — sloppy or generic reviews waste contributors' time.
 
@@ -48,7 +50,7 @@ Rules:
 - Do not flag something unless you can point to the exact mechanism by which it fails — no speculative "this might cause issues"
 - Do not pad the review with restated diff content or praise-only comments; every comment must be actionable
 - Be respectful and educational, especially for first-time contributors — explain the "why", don't just command
-- Never hallucinate file paths, line numbers, or function names — only reference what's literally in the file content or diff given to you
+- Never hallucinate file paths, line numbers, or function names — only reference what's literally in the file content or diff given
 - If the code is genuinely clean, say so plainly in the summary instead of inventing minor nitpicks to fill space
 - Respond with valid JSON ONLY — no markdown fences, no preamble, no reasoning shown"""
 
@@ -94,6 +96,9 @@ class AIReviewer:
             model=cfg.model,
             max_tokens=MAX_TOKENS,
             timeout_seconds=getattr(cfg, "timeout_seconds", 60),
+            # Do not force a temperature value here. The pre-backend reviewer
+            # did not set one, so provider defaults must remain unchanged.
+            temperature=None,
         )
 
         try:
@@ -112,28 +117,43 @@ class AIReviewer:
 
         return self._parse(text)
 
-    async def _complete_with_retries(self, cfg, request: CompletionRequest) -> str:
+    async def _complete_with_retries(
+        self, cfg, request: CompletionRequest
+    ) -> str:
         backend = self._get_backend(cfg)
-        attempts = getattr(cfg, "max_retries", 2) + 1
-        last_error: BackendError | None = None
+
+        max_retries = max(0, int(getattr(cfg, "max_retries", 2)))
+        attempts = max_retries + 1
+        last_error: BackendTransientError | None = None
 
         for attempt in range(attempts):
             try:
                 return await backend.complete(request)
             except BackendUnavailable:
-                raise  # Retrying a missing API key never helps.
-            except BackendError as exc:
+                # Retrying a missing API key or unavailable dependency never
+                # helps, so this is deliberately outside the retry contract.
+                raise
+            except BackendTransientError as exc:
                 last_error = exc
-                if attempt + 1 < attempts:
-                    delay = RETRY_BASE_DELAY * (2**attempt)
-                    log.warning(
-                        "AI review attempt %d/%d failed (%s) — retrying in %.1fs",
-                        attempt + 1,
-                        attempts,
-                        exc,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
+
+                if attempt + 1 >= attempts:
+                    break
+
+                delay = RETRY_BASE_DELAY * (2**attempt)
+                log.warning(
+                    "AI review attempt %d/%d failed transiently (%s) "
+                    "— retrying in %.1fs",
+                    attempt + 1,
+                    attempts,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            except BackendError:
+                # Permanent backend failures are intentionally not retried.
+                # The backend has already determined that another identical
+                # request is not expected to succeed.
+                raise
 
         raise last_error or BackendError("AI review produced no response")
 
@@ -196,18 +216,24 @@ Respond with JSON only:
             parsed = json.loads(clean)
             return {
                 "summary": str(parsed.get("summary", "")),
-                "verdict": parsed.get("verdict", "comment")
-                           if parsed.get("verdict") in ("approve", "request_changes", "comment")
-                           else "comment",
+                "verdict": (
+                    parsed.get("verdict", "comment")
+                    if parsed.get("verdict")
+                    in ("approve", "request_changes", "comment")
+                    else "comment"
+                ),
                 "score": max(0, min(100, int(parsed.get("score", 50)))),
                 "comments": [
                     {
                         "path": str(c.get("path", "")),
                         "line": max(1, int(c.get("line", 1))),
                         "body": str(c.get("body", "")),
-                        "severity": c.get("severity", "info")
-                                    if c.get("severity") in ("info", "warning", "error")
-                                    else "info",
+                        "severity": (
+                            c.get("severity", "info")
+                            if c.get("severity")
+                            in ("info", "warning", "error")
+                            else "info"
+                        ),
                     }
                     for c in (parsed.get("comments") or [])[:20]
                     if c.get("path") and c.get("body")

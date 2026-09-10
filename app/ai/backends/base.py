@@ -7,11 +7,19 @@ from dataclasses import dataclass
 
 
 class BackendError(Exception):
-    """The backend was reachable but could not produce a completion."""
+    """Base class for errors raised while using an AI review backend."""
 
 
 class BackendUnavailable(BackendError):
-    """The backend is not configured — no key, no endpoint, or no SDK installed."""
+    """The backend is not configured or its required SDK is unavailable."""
+
+
+class BackendTransientError(BackendError):
+    """A temporary backend failure that may succeed if retried."""
+
+
+class BackendPermanentError(BackendError):
+    """A backend failure that should not be retried."""
 
 
 @dataclass(frozen=True)
@@ -22,7 +30,7 @@ class CompletionRequest:
     prompt: str
     model: str
     max_tokens: int = 4096
-    temperature: float = 0.0
+    temperature: float | None = None
     timeout_seconds: int = 60
 
 
@@ -33,8 +41,8 @@ class ReviewBackend(ABC):
     Kept to a single method on purpose. The reviewer owns prompt construction
     and response parsing; a backend's only job is turning a
     `CompletionRequest` into raw text. That keeps a new provider — a local
-    open-weight model, a gateway, a self-hosted endpoint — to one small class
-    with no knowledge of how reviews are shaped.
+    open-weight model, a self-hosted endpoint, or a gateway — to one small
+    class with no knowledge of how reviews are shaped.
     """
 
     #: Identifier used in config (`ai_review.provider`) and in logs.
@@ -47,7 +55,15 @@ class ReviewBackend(ABC):
 
     @abstractmethod
     async def complete(self, request: CompletionRequest) -> str:
-        """Return the model's raw text response, or raise `BackendError`."""
+        """
+        Return the model's raw text response.
+
+        Implementations raise `BackendUnavailable` when the backend cannot be
+        used because it is not configured or its required SDK is unavailable,
+        `BackendTransientError` for failures that may succeed when retried,
+        and `BackendPermanentError` for failures that should not be retried.
+        """
+        ...
 
     async def close(self) -> None:
         """Release held connections. Overridden by backends owning a client."""

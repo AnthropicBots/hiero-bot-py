@@ -29,73 +29,213 @@ def test_defaults_applied():
 
 
 def test_max_concurrent_assignments_validation():
-    unlimited = RepoConfig.model_validate({
-        "repo": "hiero/x",
-        "workflows": {
-            "onboarding": {
-                "max_concurrent_assignments": None,
-            }
-        },
-    })
-    assert unlimited.workflows.onboarding.max_concurrent_assignments is None
-
-    limited = RepoConfig.model_validate({
-        "repo": "hiero/x",
-        "workflows": {
-            "onboarding": {
-                "max_concurrent_assignments": 5,
-            }
-        },
-    })
-    assert limited.workflows.onboarding.max_concurrent_assignments == 5
-
-    with pytest.raises(ValidationError):
-        RepoConfig.model_validate({
+    unlimited = RepoConfig.model_validate(
+        {
             "repo": "hiero/x",
             "workflows": {
                 "onboarding": {
-                    "max_concurrent_assignments": 0,
+                    "max_concurrent_assignments": None,
                 }
             },
-        })
+        }
+    )
+    assert unlimited.workflows.onboarding.max_concurrent_assignments is None
+
+    limited = RepoConfig.model_validate(
+        {
+            "repo": "hiero/x",
+            "workflows": {
+                "onboarding": {
+                    "max_concurrent_assignments": 5,
+                }
+            },
+        }
+    )
+    assert limited.workflows.onboarding.max_concurrent_assignments == 5
+
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/x",
+                "workflows": {
+                    "onboarding": {
+                        "max_concurrent_assignments": 0,
+                    }
+                },
+            }
+        )
+
+
+def test_ai_review_defaults():
+    cfg = RepoConfig.model_validate(MINIMAL).workflows.pull_request.ai_review
+
+    assert cfg.enabled is False
+    assert cfg.model == "claude-sonnet-4-20250514"
+    assert cfg.max_comments == 5
+    assert cfg.focus_areas == ["security", "logic"]
+    assert cfg.provider == "auto"
+    assert cfg.max_retries == 2
+    assert cfg.timeout_seconds == 60
+
+
+@pytest.mark.parametrize("provider", ["auto", "anthropic", "openai", "ollama"])
+def test_ai_review_provider_values(provider):
+    cfg = RepoConfig.model_validate(
+        {
+            "repo": "hiero/x",
+            "workflows": {
+                "pull_request": {
+                    "ai_review": {
+                        "provider": provider,
+                    }
+                }
+            },
+        }
+    )
+
+    assert cfg.workflows.pull_request.ai_review.provider == provider
+
+
+def test_ai_review_provider_rejects_unknown_value():
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/x",
+                "workflows": {
+                    "pull_request": {
+                        "ai_review": {
+                            "provider": "unknown",
+                        }
+                    }
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("max_retries", [0, 1, 2, 5])
+def test_ai_review_max_retries_accepts_valid_values(max_retries):
+    cfg = RepoConfig.model_validate(
+        {
+            "repo": "hiero/x",
+            "workflows": {
+                "pull_request": {
+                    "ai_review": {
+                        "max_retries": max_retries,
+                    }
+                }
+            },
+        }
+    )
+
+    assert cfg.workflows.pull_request.ai_review.max_retries == max_retries
+
+
+@pytest.mark.parametrize("max_retries", [-1, 6])
+def test_ai_review_max_retries_rejects_out_of_range_values(max_retries):
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/x",
+                "workflows": {
+                    "pull_request": {
+                        "ai_review": {
+                            "max_retries": max_retries,
+                        }
+                    }
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("timeout_seconds", [5, 60, 600])
+def test_ai_review_timeout_accepts_valid_values(timeout_seconds):
+    cfg = RepoConfig.model_validate(
+        {
+            "repo": "hiero/x",
+            "workflows": {
+                "pull_request": {
+                    "ai_review": {
+                        "timeout_seconds": timeout_seconds,
+                    }
+                }
+            },
+        }
+    )
+
+    assert cfg.workflows.pull_request.ai_review.timeout_seconds == timeout_seconds
+
+
+@pytest.mark.parametrize("timeout_seconds", [4, 601])
+def test_ai_review_timeout_rejects_out_of_range_values(timeout_seconds):
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/x",
+                "workflows": {
+                    "pull_request": {
+                        "ai_review": {
+                            "timeout_seconds": timeout_seconds,
+                        }
+                    }
+                },
+            }
+        )
 
 
 def test_ai_review_max_comments_capped():
     with pytest.raises(ValidationError):
-        RepoConfig.model_validate({
-            "repo": "hiero/x",
-            "workflows": {"pull_request": {"ai_review": {"max_comments": 999}}}
-        })
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/x",
+                "workflows": {
+                    "pull_request": {"ai_review": {"max_comments": 999}}
+                },
+            }
+        )
 
 
 def test_invalid_ai_focus_area():
     with pytest.raises(ValidationError):
-        RepoConfig.model_validate({
-            "repo": "hiero/x",
-            "workflows": {"pull_request": {"ai_review": {"focus_areas": ["invalid"]}}}
-        })
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/x",
+                "workflows": {
+                    "pull_request": {
+                        "ai_review": {"focus_areas": ["invalid"]}
+                    }
+                },
+            }
+        )
 
 
 def test_stale_order_validator():
     """close_stale_after_days must be less than stale_issue_days."""
     with pytest.raises(ValidationError, match="close_stale_after_days"):
-        RepoConfig.model_validate({
-            "repo": "hiero/x",
-            "workflows": {
-                "issue_management": {
-                    "stale_issue_days": 7,
-                    "close_stale_after_days": 60,
-                }
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/x",
+                "workflows": {
+                    "issue_management": {
+                        "stale_issue_days": 7,
+                        "close_stale_after_days": 60,
+                    }
+                },
             }
-        })
+        )
 
 
 def test_mentor_strategy_validated():
     with pytest.raises(ValidationError):
-        RepoConfig.model_validate({
-            "repo": "hiero/x",
-            "workflows": {"onboarding": {"mentor_assignment_strategy": "magic"}}
-        })
+        RepoConfig.model_validate(
+            {
+                "repo": "hiero/x",
+                "workflows": {
+                    "onboarding": {
+                        "mentor_assignment_strategy": "magic"
+                    }
+                },
+            }
+        )
 
 
 def test_full_valid_config():
@@ -111,34 +251,55 @@ def test_full_valid_config():
             },
             "pull_request": {
                 "enabled": True,
-                "ai_review": {"enabled": True, "max_comments": 8, "focus_areas": ["security", "tests"]},
-                "quality_gates": {"require_dco": True, "require_tests": True},
+                "ai_review": {
+                    "enabled": True,
+                    "max_comments": 8,
+                    "focus_areas": ["security", "tests"],
+                },
+                "quality_gates": {
+                    "require_dco": True,
+                    "require_tests": True,
+                },
                 "reviewer_recommendation": True,
             },
             "progression": {
                 "requirements_for_junior_committer": {
-                    "min_merged_prs": 3, "min_reviews_given": 2,
-                    "min_months_active": 1, "require_endorsement_from": "committer"
+                    "min_merged_prs": 3,
+                    "min_reviews_given": 2,
+                    "min_months_active": 1,
+                    "require_endorsement_from": "committer",
                 },
                 "requirements_for_committer": {
-                    "min_merged_prs": 15, "min_reviews_given": 10,
-                    "min_months_active": 6, "require_endorsement_from": "maintainer"
+                    "min_merged_prs": 15,
+                    "min_reviews_given": 10,
+                    "min_months_active": 6,
+                    "require_endorsement_from": "maintainer",
                 },
                 "requirements_for_maintainer": {
-                    "min_merged_prs": 50, "min_reviews_given": 30,
-                    "min_months_active": 12, "require_endorsement_from": "maintainer"
+                    "min_merged_prs": 50,
+                    "min_reviews_given": 30,
+                    "min_months_active": 12,
+                    "require_endorsement_from": "maintainer",
                 },
             },
             "issue_management": {
                 "stale_issue_days": 90,
                 "close_stale_after_days": 14,
                 "label_escalation_rules": [
-                    {"label": "security", "notify_team": "sec-team", "after_hours": 24}
+                    {
+                        "label": "security",
+                        "notify_team": "sec-team",
+                        "after_hours": 24,
+                    }
                 ],
             },
         },
-        "teams": {"maintainers": "maint", "committers": "comm",
-                  "junior_committers": "jc", "mentors": "mentors"},
+        "teams": {
+            "maintainers": "maint",
+            "committers": "comm",
+            "junior_committers": "jc",
+            "mentors": "mentors",
+        },
     }
     cfg = RepoConfig.model_validate(data)
     assert cfg.workflows.pull_request.ai_review.max_comments == 8

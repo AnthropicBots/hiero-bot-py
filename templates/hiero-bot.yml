@@ -60,17 +60,19 @@ workflows:
 
     ai_review:
       enabled: false
-      # auto     — first backend with credentials (openai → anthropic → ollama)
-      # anthropic— ANTHROPIC_API_KEY
-      # openai   — OPENAI_API_KEY and/or OPENAI_BASE_URL (vLLM, LM Studio, …)
-      # ollama   — OLLAMA_BASE_URL; a local open-weight model, so no source
-      #            code leaves your infrastructure
+      # auto       — first configured backend in registry order
+      #              (openai → anthropic → ollama)
+      # anthropic  — requires ANTHROPIC_API_KEY
+      # openai     — requires OPENAI_API_KEY and/or OPENAI_BASE_URL
+      #              (OpenAI, vLLM, LM Studio, gateways, etc.)
+      # ollama     — requires OLLAMA_BASE_URL; the endpoint may be local
+      #              or hosted on trusted remote infrastructure
       provider: auto
       model: "claude-sonnet-4-20250514"
       max_comments: 5                 # 1–20
       focus_areas: [security, logic]  # security | performance | style | logic | tests
       max_retries: 2                  # transient failures only; 0–5
-      timeout_seconds: 60             # raise this for slow local models
+      timeout_seconds: 60             # maximum time allowed per request
 
     quality_gates:
       require_tests: true

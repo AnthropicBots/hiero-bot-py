@@ -63,8 +63,8 @@ class AIReviewConfig(BaseModel):
     max_comments: int = Field(default=5, ge=1, le=20)
     focus_areas: list[FocusArea] = ["security", "logic"]
 
-    # Which model backend answers. "auto" picks the first one the environment
-    # has credentials for; naming one explicitly fails loudly if it is not
+    # Which model backend answers. "auto" picks the first configured backend
+    # in the registry order; naming one explicitly fails loudly if it is not
     # configured, rather than quietly reviewing with a different model.
     provider: AIProvider = "auto"
 
@@ -72,7 +72,7 @@ class AIReviewConfig(BaseModel):
     # never retried.
     max_retries: int = Field(default=2, ge=0, le=5)
 
-    # Local open-weight models are slow; give them room.
+    # Maximum time allowed for each backend request.
     timeout_seconds: int = Field(default=60, ge=5, le=600)
 
 

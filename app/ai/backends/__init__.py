@@ -3,6 +3,8 @@
 from app.ai.backends.anthropic_backend import AnthropicBackend
 from app.ai.backends.base import (
     BackendError,
+    BackendPermanentError,
+    BackendTransientError,
     BackendUnavailable,
     CompletionRequest,
     ReviewBackend,
@@ -16,6 +18,8 @@ __all__ = [
     "BACKENDS",
     "AnthropicBackend",
     "BackendError",
+    "BackendPermanentError",
+    "BackendTransientError",
     "BackendUnavailable",
     "CompletionRequest",
     "OllamaBackend",

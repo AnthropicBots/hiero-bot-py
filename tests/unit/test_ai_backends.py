@@ -9,7 +9,8 @@ from app.ai.backends import (
     AUTO_ORDER,
     BACKENDS,
     AnthropicBackend,
-    BackendError,
+    BackendPermanentError,
+    BackendTransientError,
     BackendUnavailable,
     CompletionRequest,
     OllamaBackend,
@@ -123,6 +124,7 @@ def test_ollama_availability_needs_an_endpoint(monkeypatch):
 
 def anthropic_client(text=None, error=None):
     client = MagicMock()
+
     if error is not None:
         client.messages.create = AsyncMock(side_effect=error)
     else:
@@ -131,6 +133,7 @@ def anthropic_client(text=None, error=None):
         response = MagicMock()
         response.content = [block]
         client.messages.create = AsyncMock(return_value=response)
+
     return client
 
 
@@ -157,20 +160,123 @@ async def test_anthropic_passes_system_prompt_separately():
 
 
 @pytest.mark.asyncio
-async def test_anthropic_errors_become_backend_errors():
+async def test_anthropic_unexpected_error_is_permanent():
     backend = AnthropicBackend(api_key="sk-ant")
-    backend._client = anthropic_client(error=RuntimeError("429"))
+    backend._client = anthropic_client(error=RuntimeError("unexpected"))
 
-    with pytest.raises(BackendError, match="Anthropic request failed"):
+    with pytest.raises(BackendPermanentError, match="Anthropic request failed"):
         await backend.complete(REQUEST)
 
 
 @pytest.mark.asyncio
-async def test_anthropic_empty_response_is_an_error():
+async def test_anthropic_connection_error_is_transient(monkeypatch):
+    import anthropic
+
+    class FakeConnectionError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        anthropic,
+        "APIConnectionError",
+        FakeConnectionError,
+    )
+
+    backend = AnthropicBackend(api_key="sk-ant")
+    backend._client = anthropic_client(error=FakeConnectionError("connection lost"))
+
+    with pytest.raises(BackendTransientError, match="transient"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_timeout_error_is_transient(monkeypatch):
+    import anthropic
+
+    class FakeTimeoutError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        anthropic,
+        "APITimeoutError",
+        FakeTimeoutError,
+    )
+
+    backend = AnthropicBackend(api_key="sk-ant")
+    backend._client = anthropic_client(error=FakeTimeoutError("timed out"))
+
+    with pytest.raises(BackendTransientError, match="transient"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_rate_limit_is_transient(monkeypatch):
+    import anthropic
+
+    class FakeStatusError(Exception):
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    monkeypatch.setattr(
+        anthropic,
+        "APIStatusError",
+        FakeStatusError,
+    )
+
+    backend = AnthropicBackend(api_key="sk-ant")
+    backend._client = anthropic_client(error=FakeStatusError(429))
+
+    with pytest.raises(BackendTransientError, match="429"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_server_error_is_transient(monkeypatch):
+    import anthropic
+
+    class FakeStatusError(Exception):
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    monkeypatch.setattr(
+        anthropic,
+        "APIStatusError",
+        FakeStatusError,
+    )
+
+    backend = AnthropicBackend(api_key="sk-ant")
+    backend._client = anthropic_client(error=FakeStatusError(503))
+
+    with pytest.raises(BackendTransientError, match="503"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_error_is_permanent(monkeypatch):
+    import anthropic
+
+    class FakeStatusError(Exception):
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    monkeypatch.setattr(
+        anthropic,
+        "APIStatusError",
+        FakeStatusError,
+    )
+
+    backend = AnthropicBackend(api_key="sk-ant")
+    backend._client = anthropic_client(error=FakeStatusError(401))
+
+    with pytest.raises(BackendPermanentError, match="401"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_empty_response_is_a_permanent_error():
     backend = AnthropicBackend(api_key="sk-ant")
     backend._client = anthropic_client(text="")
 
-    with pytest.raises(BackendError, match="empty"):
+    with pytest.raises(BackendPermanentError, match="empty"):
         await backend.complete(REQUEST)
 
 
@@ -180,11 +286,47 @@ async def test_anthropic_without_a_key_is_unavailable():
         await AnthropicBackend(api_key=None).complete(REQUEST)
 
 
+def test_anthropic_client_is_created_with_timeout_and_no_sdk_retries(monkeypatch):
+    import anthropic
+
+    created = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", FakeClient)
+
+    backend = AnthropicBackend(api_key="sk-ant")
+    backend._get_client(timeout_seconds=37)
+
+    assert created["api_key"] == "sk-ant"
+    assert created["timeout"] == 37.0
+    assert created["max_retries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_close_closes_owned_client():
+    backend = AnthropicBackend(api_key="sk-ant")
+    client = MagicMock()
+    client.close = AsyncMock()
+    backend._client = client
+
+    await backend.close()
+
+    client.close.assert_awaited_once()
+    assert backend._client is None
+
+
 # ── OpenAI-compatible backend ─────────────────────────────────
 
 
 def openai_client(content=None, error=None, choices=None):
     client = MagicMock()
+
     if error is not None:
         client.chat.completions.create = AsyncMock(side_effect=error)
         return client
@@ -224,20 +366,132 @@ async def test_openai_sends_system_as_a_message():
 
 
 @pytest.mark.asyncio
-async def test_openai_errors_become_backend_errors():
+async def test_openai_unexpected_error_is_permanent():
     backend = OpenAICompatibleBackend(api_key="sk-x")
-    backend._client = openai_client(error=RuntimeError("timeout"))
+    backend._client = openai_client(error=RuntimeError("unexpected"))
 
-    with pytest.raises(BackendError):
+    with pytest.raises(BackendPermanentError, match="request failed"):
         await backend.complete(REQUEST)
 
 
 @pytest.mark.asyncio
-async def test_openai_no_choices_is_an_error():
+async def test_openai_connection_error_is_transient(monkeypatch):
+    import openai
+
+    class FakeConnectionError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        openai,
+        "APIConnectionError",
+        FakeConnectionError,
+    )
+
+    backend = OpenAICompatibleBackend(api_key="sk-x")
+    backend._client = openai_client(error=FakeConnectionError("connection lost"))
+
+    with pytest.raises(BackendTransientError, match="transient"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_openai_timeout_error_is_transient(monkeypatch):
+    import openai
+
+    class FakeTimeoutError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        openai,
+        "APITimeoutError",
+        FakeTimeoutError,
+    )
+
+    backend = OpenAICompatibleBackend(api_key="sk-x")
+    backend._client = openai_client(error=FakeTimeoutError("timed out"))
+
+    with pytest.raises(BackendTransientError, match="transient"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_openai_rate_limit_is_transient(monkeypatch):
+    import openai
+
+    class FakeStatusError(Exception):
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    monkeypatch.setattr(
+        openai,
+        "APIStatusError",
+        FakeStatusError,
+    )
+
+    backend = OpenAICompatibleBackend(api_key="sk-x")
+    backend._client = openai_client(error=FakeStatusError(429))
+
+    with pytest.raises(BackendTransientError, match="429"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_openai_server_error_is_transient(monkeypatch):
+    import openai
+
+    class FakeStatusError(Exception):
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    monkeypatch.setattr(
+        openai,
+        "APIStatusError",
+        FakeStatusError,
+    )
+
+    backend = OpenAICompatibleBackend(api_key="sk-x")
+    backend._client = openai_client(error=FakeStatusError(503))
+
+    with pytest.raises(BackendTransientError, match="503"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_openai_client_error_is_permanent(monkeypatch):
+    import openai
+
+    class FakeStatusError(Exception):
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    monkeypatch.setattr(
+        openai,
+        "APIStatusError",
+        FakeStatusError,
+    )
+
+    backend = OpenAICompatibleBackend(api_key="sk-x")
+    backend._client = openai_client(error=FakeStatusError(401))
+
+    with pytest.raises(BackendPermanentError, match="401"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_openai_no_choices_is_a_permanent_error():
     backend = OpenAICompatibleBackend(api_key="sk-x")
     backend._client = openai_client(choices=[])
 
-    with pytest.raises(BackendError, match="no choices"):
+    with pytest.raises(BackendPermanentError, match="no choices"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_openai_empty_content_is_a_permanent_error():
+    backend = OpenAICompatibleBackend(api_key="sk-x")
+    backend._client = openai_client(content="")
+
+    with pytest.raises(BackendPermanentError, match="empty content"):
         await backend.complete(REQUEST)
 
 
@@ -247,12 +501,49 @@ async def test_openai_unconfigured_is_unavailable():
         await OpenAICompatibleBackend(api_key=None, base_url=None).complete(REQUEST)
 
 
+def test_openai_client_supports_base_url_without_api_key(monkeypatch):
+    import openai
+
+    created = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+
+    backend = OpenAICompatibleBackend(
+        api_key=None,
+        base_url="http://localhost:8000/v1",
+    )
+    backend._get_client(timeout_seconds=45)
+
+    assert created["api_key"] == "not-needed"
+    assert created["base_url"] == "http://localhost:8000/v1"
+    assert created["timeout"] == 45.0
+    assert created["max_retries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_close_closes_owned_client():
+    backend = OpenAICompatibleBackend(api_key="sk-x")
+    client = MagicMock()
+    client.close = AsyncMock()
+    backend._client = client
+
+    await backend.close()
+
+    client.close.assert_awaited_once()
+    assert backend._client is None
+
+
 # ── Ollama backend ────────────────────────────────────────────
 
 
 def ollama_backend(handler):
     client = httpx.AsyncClient(
-        base_url="http://localhost:11434", transport=httpx.MockTransport(handler)
+        base_url="http://localhost:11434",
+        transport=httpx.MockTransport(handler),
     )
     return OllamaBackend(base_url="http://localhost:11434", client=client)
 
@@ -287,46 +578,90 @@ async def test_ollama_requests_a_non_streaming_chat():
 
 
 @pytest.mark.asyncio
-async def test_ollama_missing_model_says_to_pull_it():
+async def test_ollama_missing_model_404_is_permanent():
     backend = ollama_backend(lambda request: httpx.Response(404))
 
-    with pytest.raises(BackendError, match="pull it first"):
+    with pytest.raises(BackendPermanentError, match="404"):
         await backend.complete(REQUEST)
 
 
 @pytest.mark.asyncio
-async def test_ollama_server_error_is_reported():
+async def test_ollama_client_error_is_permanent():
+    backend = ollama_backend(lambda request: httpx.Response(400, text="bad request"))
+
+    with pytest.raises(BackendPermanentError, match="400"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_ollama_unauthorized_is_permanent():
+    backend = ollama_backend(lambda request: httpx.Response(401, text="unauthorized"))
+
+    with pytest.raises(BackendPermanentError, match="401"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_ollama_rate_limit_is_transient():
+    backend = ollama_backend(lambda request: httpx.Response(429, text="busy"))
+
+    with pytest.raises(BackendTransientError, match="429"):
+        await backend.complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_ollama_server_error_is_transient():
     backend = ollama_backend(lambda request: httpx.Response(500, text="oom"))
 
-    with pytest.raises(BackendError, match="500"):
+    with pytest.raises(BackendTransientError, match="500"):
         await backend.complete(REQUEST)
 
 
 @pytest.mark.asyncio
-async def test_ollama_empty_message_is_an_error():
+async def test_ollama_request_timeout_is_transient():
+    def handler(request):
+        raise httpx.ReadTimeout("timed out")
+
+    with pytest.raises(BackendTransientError, match="timed out"):
+        await ollama_backend(handler).complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_ollama_transport_failure_is_transient():
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(BackendTransientError, match="transport"):
+        await ollama_backend(handler).complete(REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_ollama_empty_message_is_a_permanent_error():
     backend = ollama_backend(
         lambda request: httpx.Response(200, json={"message": {"content": ""}})
     )
 
-    with pytest.raises(BackendError, match="empty"):
+    with pytest.raises(BackendPermanentError, match="empty"):
         await backend.complete(REQUEST)
 
 
 @pytest.mark.asyncio
-async def test_ollama_non_json_body_is_an_error():
+async def test_ollama_non_json_body_is_a_permanent_error():
     backend = ollama_backend(lambda request: httpx.Response(200, text="not json"))
 
-    with pytest.raises(BackendError, match="non-JSON"):
+    with pytest.raises(BackendPermanentError, match="non-JSON"):
         await backend.complete(REQUEST)
 
 
 @pytest.mark.asyncio
-async def test_ollama_transport_failure_is_an_error():
-    def handler(request):
-        raise httpx.ConnectError("connection refused")
+async def test_ollama_timeout_is_configured_for_owned_client():
+    backend = OllamaBackend(base_url="http://localhost:11434")
 
-    with pytest.raises(BackendError, match="Ollama request failed"):
-        await ollama_backend(handler).complete(REQUEST)
+    client = backend._get_client(37)
+
+    assert client.timeout.read == 37.0
+
+    await backend.close()
 
 
 @pytest.mark.asyncio

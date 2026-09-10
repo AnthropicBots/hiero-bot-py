@@ -16,9 +16,9 @@ BACKENDS: dict[str, type[ReviewBackend]] = {
     OllamaBackend.name: OllamaBackend,
 }
 
-# Order used when `provider: auto`. OpenAI-compatible comes first to preserve
-# the precedence the reviewer already had (OPENAI_API_KEY overrode Anthropic),
-# and Ollama is last because it is the fallback that needs no credentials.
+# Order used when `provider: auto`. The first backend whose `available()`
+# check succeeds is selected. Keep this order explicit so adding a backend
+# does not silently change which provider auto-selection prefers.
 AUTO_ORDER = (
     OpenAICompatibleBackend.name,
     AnthropicBackend.name,
