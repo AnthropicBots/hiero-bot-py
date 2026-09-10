@@ -395,7 +395,7 @@ def test_bounded_lock_registry_refreshes_lru_order():
     registry = BoundedLockRegistry(max_capacity=2)
 
     first = registry.get(("hiero", "sdk-js", 1))
-    second = registry.get(("hiero", "sdk-js", 2))
+    registry.get(("hiero", "sdk-js", 2))
 
     assert registry.get(("hiero", "sdk-js", 1)) is first
 
