@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from app.auth.session import purge_expired_sessions
 from app.config.loader import ConfigLoader
 from app.db.database import AsyncSessionLocal
 from app.github.client import GitHubClient
@@ -68,6 +69,16 @@ class BotScheduler:
             CronTrigger(hour="*/6"),
             id="config_cache_flush",
             name="Config cache flush",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        # Session GC — runs daily at 03:00 UTC
+        self._scheduler.add_job(
+            self.run_session_gc,
+            CronTrigger(hour=3, minute=0),
+            id="session_gc",
+            name="Daily expired session garbage collection",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -160,3 +171,9 @@ class BotScheduler:
     async def _flush_config_cache(self) -> None:
         self._config_loader.clear()
         log.debug("Config cache flushed")
+
+    async def run_session_gc(self) -> int:
+        async with AsyncSessionLocal() as db:
+            purged = await purge_expired_sessions(db)
+            log.info("Session GC completed: purged %d expired session(s)", purged)
+            return purged
