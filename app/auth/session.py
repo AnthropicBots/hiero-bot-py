@@ -90,3 +90,16 @@ async def delete_db_session(db: AsyncSession, raw_session_id: str) -> None:
     await db.execute(stmt)
     await db.commit()
 
+
+async def purge_expired_sessions(db: AsyncSession) -> int:
+    """Delete all sessions whose expiration timestamp is in the past.
+
+    Returns:
+        int: Number of deleted expired session rows.
+    """
+    now = datetime.now(timezone.utc)
+    stmt = delete(Session).where(Session.expires_at <= now)
+    result = await db.execute(stmt)
+    await db.commit()
+    return result.rowcount or 0
+
