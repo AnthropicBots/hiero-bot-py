@@ -76,7 +76,7 @@ class BotScheduler:
         # Session GC — runs daily at 03:00 UTC
         self._scheduler.add_job(
             self.run_session_gc,
-            CronTrigger(hour=3, minute=0),
+            CronTrigger(hour=3, minute=0, timezone="UTC"),
             id="session_gc",
             name="Daily expired session garbage collection",
             replace_existing=True,

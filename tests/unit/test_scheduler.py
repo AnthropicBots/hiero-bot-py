@@ -195,3 +195,12 @@ def test_start_registers_scheduler_jobs():
     assert session_gc_job["id"] == "session_gc"
     assert session_gc_job["coalesce"] is True
     assert session_gc_job["max_instances"] == 1
+
+    session_gc_call = mock_add_job.call_args_list[2]
+    assert session_gc_call.args[0] == scheduler.run_session_gc
+
+    trigger = session_gc_call.args[1]
+    fields = {field.name: field for field in trigger.fields}
+    assert fields["hour"].expressions[0].first == 3
+    assert fields["minute"].expressions[0].first == 0
+    assert str(trigger.timezone) == "UTC"

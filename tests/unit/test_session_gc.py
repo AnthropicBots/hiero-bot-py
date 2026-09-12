@@ -37,6 +37,21 @@ async def test_purge_deletes_only_expired_sessions(db):
 
 
 @pytest.mark.asyncio
+async def test_purge_deletes_sessions_at_expiration_boundary(db):
+    boundary = datetime.now(timezone.utc)
+    db.add(
+        Session(
+            id="expired-at-boundary",
+            user_id=1,
+            expires_at=boundary,
+        )
+    )
+    await db.commit()
+
+    assert await purge_expired_sessions(db) == 1
+
+
+@pytest.mark.asyncio
 async def test_purge_returns_zero_when_nothing_expired(db):
     db.add(make_session("active-1", 1, timedelta(days=7)))
     await db.commit()
