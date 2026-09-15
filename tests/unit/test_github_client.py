@@ -2,6 +2,7 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
 
 from app.github.client import GitHubClient
@@ -719,5 +720,45 @@ async def test_list_commits_uses_path_and_per_page():
             "per_page": 30,
         },
     )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_label_deletes_the_issue_label():
+    """Issue #64 — GitHubClient had no way to remove a label at all."""
+    client = GitHubClient()
+
+    with patch.object(
+        client, "delete", new=AsyncMock(return_value={})
+    ) as mock_delete:
+        await client.remove_label(
+            "hiero", "sdk-js", 7, "health: 🔧 needs work", 123
+        )
+
+    mock_delete.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/issues/7/labels/health: 🔧 needs work",
+        123,
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_label_tolerates_label_already_absent():
+    """A label that isn't currently applied (404 from GitHub) must not raise."""
+    client = GitHubClient()
+
+    with patch.object(
+        client,
+        "delete",
+        new=AsyncMock(side_effect=httpx.HTTPStatusError(
+            "Not found", request=Mock(), response=Mock(status_code=404)
+        )),
+    ) as mock_delete:
+        # Should not raise
+        await client.remove_label("hiero", "sdk-js", 7, "quality: ✅ passed", 123)
+
+    mock_delete.assert_awaited_once()
 
     await client.close()
