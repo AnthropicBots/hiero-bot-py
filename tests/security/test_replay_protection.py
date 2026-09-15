@@ -1,16 +1,15 @@
-# tests/security/test_replay_protection.py — delivery replay guard (#20)
-
+import asyncio
 import hashlib
 import hmac
-import time
 from unittest.mock import AsyncMock
 
 import pytest
-from cachetools import TTLCache
 from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
-from app.github import replay_guard
+from app.db.database import Base
+from app.db.models import WebhookDelivery
 from app.github.replay_guard import is_replay
 from app.github.webhooks import WebhookRouter
 from app.utils.settings import settings
@@ -19,89 +18,83 @@ SECRET = "s3cret-webhook-key"
 BODY = b'{"action":"opened","number":1}'
 
 
-def fresh_cache(monkeypatch, maxsize=10_000, ttl=600):
-    monkeypatch.setattr(
-        replay_guard,
-        "_seen_deliveries",
-        TTLCache(maxsize=maxsize, ttl=ttl),
-    )
+@pytest.mark.asyncio
+async def test_first_delivery_is_not_a_replay(db):
+    assert await is_replay(db, "delivery-1") is False
 
 
-def test_first_delivery_is_not_a_replay(monkeypatch):
-    fresh_cache(monkeypatch)
-
-    assert is_replay("delivery-1") is False
-
-
-def test_same_delivery_id_twice_is_a_replay(monkeypatch):
-    fresh_cache(monkeypatch)
-
-    assert is_replay("delivery-1") is False
-    assert is_replay("delivery-1") is True
+@pytest.mark.asyncio
+async def test_same_delivery_id_twice_is_a_replay(db):
+    assert await is_replay(db, "delivery-1") is False
+    assert await is_replay(db, "delivery-1") is True
 
 
-def test_replay_is_detected_many_times(monkeypatch):
-    fresh_cache(monkeypatch)
-    is_replay("delivery-1")
+@pytest.mark.asyncio
+async def test_replay_is_detected_many_times(db):
+    await is_replay(db, "delivery-1")
 
-    assert all(is_replay("delivery-1") for _ in range(10))
-
-
-def test_distinct_deliveries_are_independent(monkeypatch):
-    fresh_cache(monkeypatch)
-
-    assert is_replay("a") is False
-    assert is_replay("b") is False
-    assert is_replay("a") is True
+    for _ in range(10):
+        assert await is_replay(db, "delivery-1") is True
 
 
-def test_missing_delivery_id_is_not_treated_as_a_replay(monkeypatch):
-    """GitHub always sends one; absence must not wedge the endpoint shut."""
-    fresh_cache(monkeypatch)
-
-    assert is_replay("") is False
-    assert is_replay("") is False
-
-
-def test_ids_expire_after_the_ttl(monkeypatch):
-    fresh_cache(monkeypatch, ttl=0.05)
-    is_replay("delivery-1")
-
-    time.sleep(0.1)
-
-    assert is_replay("delivery-1") is False
+@pytest.mark.asyncio
+async def test_distinct_deliveries_are_independent(db):
+    assert await is_replay(db, "a") is False
+    assert await is_replay(db, "b") is False
+    assert await is_replay(db, "a") is True
 
 
-def test_cache_is_bounded(monkeypatch):
-    """An attacker replaying unique IDs must not grow memory without limit."""
-    fresh_cache(monkeypatch, maxsize=100)
-
-    for i in range(1000):
-        is_replay(f"delivery-{i}")
-
-    assert len(replay_guard._seen_deliveries) <= 100
+@pytest.mark.asyncio
+async def test_missing_delivery_id_is_not_treated_as_a_replay(db):
+    assert await is_replay(db, "") is False
+    assert await is_replay(db, "") is False
 
 
-def test_old_delivery_is_evicted_when_cache_is_full(monkeypatch):
-    fresh_cache(monkeypatch, maxsize=10)
+@pytest.mark.asyncio
+async def test_claimed_delivery_is_persisted_to_the_database(db):
+    await is_replay(db, "delivery-persisted")
+    await db.commit()
 
-    for i in range(10):
-        assert is_replay(f"delivery-{i}") is False
-
-    assert is_replay("delivery-0") is True
-
-    assert is_replay("delivery-10") is False
-
-    assert is_replay("delivery-0") is False
-    assert is_replay("delivery-10") is True
+    row = await db.get(WebhookDelivery, "delivery-persisted")
+    assert row is not None
 
 
-def test_default_guard_has_a_bounded_size_and_ttl():
-    assert replay_guard._seen_deliveries.maxsize == 10_000
-    assert replay_guard._DELIVERY_TTL_SECONDS == 600
+@pytest.mark.asyncio
+async def test_dedup_state_is_shared_across_sessions():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with factory() as worker_a_session:
+        assert await is_replay(worker_a_session, "shared-delivery") is False
+        await worker_a_session.commit()
+
+    async with factory() as worker_b_session:
+        assert await is_replay(worker_b_session, "shared-delivery") is True
+
+    await engine.dispose()
 
 
-# ── Webhook handler integration ──────────────────────────────
+@pytest.mark.asyncio
+async def test_concurrent_claims_of_the_same_delivery_are_serialized(tmp_path):
+    db_path = tmp_path / "replay_race.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def claim():
+        async with factory() as session:
+            result = await is_replay(session, "race-delivery")
+            await session.commit()
+            return result
+
+    results = await asyncio.gather(claim(), claim())
+
+    assert sorted(results) == [False, True]
+
+    await engine.dispose()
 
 
 def make_router():
@@ -151,9 +144,7 @@ def webhook_secret(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_webhook_handler_rejects_replayed_delivery(monkeypatch):
-    fresh_cache(monkeypatch)
-
+async def test_webhook_handler_rejects_replayed_delivery(db):
     router, _, config_loader = make_router()
     config_loader.load.return_value = None
 
@@ -169,9 +160,8 @@ async def test_webhook_handler_rejects_replayed_delivery(monkeypatch):
         signature,
     )
 
-    db = AsyncMock()
-
     first_result = await router.handle(first_request, db)
+    await db.commit()
 
     assert first_result == {
         "ok": True,
@@ -186,19 +176,17 @@ async def test_webhook_handler_rejects_replayed_delivery(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_different_delivery_ids_are_both_accepted(monkeypatch):
-    fresh_cache(monkeypatch)
-
+async def test_different_delivery_ids_are_both_accepted(db):
     router, _, config_loader = make_router()
     config_loader.load.return_value = None
 
     signature = sign(SECRET, BODY)
-    db = AsyncMock()
 
     first_result = await router.handle(
         request_with("delivery-independent-1", signature),
         db,
     )
+    await db.commit()
 
     second_result = await router.handle(
         request_with("delivery-independent-2", signature),

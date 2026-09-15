@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -81,10 +82,25 @@ app.add_middleware(
 # Security Headers Middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
+    nonce = secrets.token_urlsafe(16)
+    request.state.csp_nonce = nonce
+
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; "
+        f"style-src 'self' 'nonce-{nonce}' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' https://avatars.githubusercontent.com data:; "
+        "connect-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    )
     if settings.is_production:
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
@@ -136,12 +152,15 @@ async def dashboard(
     request: Request,
     user: User | None = Depends(get_current_user_optional),
 ):
+    csp_nonce = getattr(request.state, "csp_nonce", "")
     if not user:
-        return templates.TemplateResponse(request, "login.html")
+        return templates.TemplateResponse(
+            request, "login.html", {"csp_nonce": csp_nonce}
+        )
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"user": user},
+        {"user": user, "csp_nonce": csp_nonce},
     )
 
 

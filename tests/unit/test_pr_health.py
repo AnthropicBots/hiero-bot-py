@@ -226,3 +226,106 @@ def test_compute_score_all_failing():
     from app.config.schema import PRHealthConfig
     score = PRHealthWorkflow._compute_score(signals, PRHealthConfig().score_weights)
     assert score == 0.0
+
+
+
+
+@pytest.mark.asyncio
+async def test_rescoring_same_pr_updates_the_existing_row_instead_of_inserting(
+    mock_gh, ctx
+):
+    from sqlalchemy import select
+
+    from app.db.models import PRHealthScore
+
+    mock_gh.list_pr_files = AsyncMock(return_value=[
+        {"filename": "src/foo.ts", "patch": "+const x = 1;"},
+    ])
+    mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
+    wf = PRHealthWorkflow(mock_gh)
+
+    await wf.score_pr(ctx, make_payload(make_pr(number=42, body="")))
+
+    mock_gh.list_pr_files = AsyncMock(return_value=[
+        {"filename": "src/foo.ts", "patch": "+const x = 1;"},
+        {"filename": "tests/foo.test.ts", "patch": "+it('works', () => {});"},
+    ])
+    for _ in range(5):
+        await wf.score_pr(ctx, make_payload(make_pr(number=42, body="Closes #1")))
+
+    result = await ctx["db"].execute(
+        select(PRHealthScore).where(PRHealthScore.pr_number == 42)
+    )
+    rows = result.scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].has_tests is True
+    assert rows[0].has_linked_issue is True
+
+
+@pytest.mark.asyncio
+async def test_different_prs_each_get_their_own_row(mock_gh, ctx):
+    from sqlalchemy import select
+
+    from app.db.models import PRHealthScore
+
+    mock_gh.list_pr_files = AsyncMock(return_value=[])
+    mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
+    wf = PRHealthWorkflow(mock_gh)
+
+    await wf.score_pr(ctx, make_payload(make_pr(number=1)))
+    await wf.score_pr(ctx, make_payload(make_pr(number=2)))
+    await wf.score_pr(ctx, make_payload(make_pr(number=1)))
+
+    result = await ctx["db"].execute(select(PRHealthScore))
+    rows = result.scalars().all()
+
+    assert sorted(r.pr_number for r in rows) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_upsert_helper_updates_fields_in_place(db):
+    from app.workflows.prhealth import PRHealthWorkflow
+
+    await PRHealthWorkflow._upsert_score(
+        db, "hiero", "sdk-js", 7,
+        {
+            "pr_author": "alice", "score": 10.0, "has_tests": False,
+            "has_linked_issue": False, "has_description": False,
+            "dco_signed": False, "review_count": 0, "files_changed": 1,
+            "label_applied": "health: 🔧 needs work",
+        },
+    )
+    await db.commit()
+
+    await PRHealthWorkflow._upsert_score(
+        db, "hiero", "sdk-js", 7,
+        {
+            "pr_author": "alice", "score": 90.0, "has_tests": True,
+            "has_linked_issue": True, "has_description": True,
+            "dco_signed": True, "review_count": 2, "files_changed": 3,
+            "label_applied": "health: 💚 healthy",
+        },
+    )
+    await db.commit()
+
+    from sqlalchemy import select
+
+    from app.db.models import PRHealthScore
+
+    result = await db.execute(
+        select(PRHealthScore).where(
+            PRHealthScore.owner == "hiero",
+            PRHealthScore.repo == "sdk-js",
+            PRHealthScore.pr_number == 7,
+        )
+    )
+    rows = result.scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].score == 90.0
+    assert rows[0].has_tests is True

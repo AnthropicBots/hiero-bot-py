@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import PRHealthScore
@@ -44,22 +46,19 @@ class PRHealthWorkflow:
 
         label = LABEL_HEALTHY if score >= cfg.label_healthy_above else LABEL_NEEDS_WORK
 
-        # Persist to DB
-        record = PRHealthScore(
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            pr_author=author,
-            score=round(score, 1),
-            has_tests=signals["has_tests"],
-            has_linked_issue=signals["has_linked_issue"],
-            has_description=signals["has_description"],
-            dco_signed=signals["dco_signed"],
-            review_count=signals["review_count"],
-            files_changed=len(files),
-            label_applied=label,
-        )
-        db.add(record)
+        fields = {
+            "pr_author": author,
+            "score": round(score, 1),
+            "has_tests": signals["has_tests"],
+            "has_linked_issue": signals["has_linked_issue"],
+            "has_description": signals["has_description"],
+            "dco_signed": signals["dco_signed"],
+            "review_count": signals["review_count"],
+            "files_changed": len(files),
+            "label_applied": label,
+            "created_at": datetime.now(timezone.utc),
+        }
+        await self._upsert_score(db, owner, repo, pr_number, fields)
 
         # Label the PR
         await self._gh.add_label(owner, repo, pr_number, label, inst)
@@ -80,6 +79,33 @@ class PRHealthWorkflow:
         )
         await db.commit()
         log.info("PR #%d health score: %.0f/100 (%s)", pr_number, score, label)
+
+    @staticmethod
+    async def _upsert_score(
+        db: AsyncSession, owner: str, repo: str, pr_number: int, fields: dict
+    ) -> None:
+        try:
+            async with db.begin_nested():
+                db.add(PRHealthScore(owner=owner, repo=repo, pr_number=pr_number, **fields))
+                await db.flush()
+            return
+        except IntegrityError:
+            pass
+
+        result = await db.execute(
+            select(PRHealthScore).where(
+                PRHealthScore.owner == owner,
+                PRHealthScore.repo == repo,
+                PRHealthScore.pr_number == pr_number,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            db.add(PRHealthScore(owner=owner, repo=repo, pr_number=pr_number, **fields))
+            return
+
+        for key, value in fields.items():
+            setattr(existing, key, value)
 
     # ── Signal extraction ─────────────────────────────────────
 
