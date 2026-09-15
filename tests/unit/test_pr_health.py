@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.workflows.prhealth import LABEL_NEEDS_WORK, PRHealthWorkflow
+from app.workflows.prhealth import LABEL_HEALTHY, LABEL_NEEDS_WORK, PRHealthWorkflow
 
 
 def make_pr(number=1, author="alice", additions=100, deletions=50, body="Closes #1"):
@@ -329,3 +329,90 @@ async def test_upsert_helper_updates_fields_in_place(db):
     assert len(rows) == 1
     assert rows[0].score == 90.0
     assert rows[0].has_tests is True
+
+
+# ── Issue #64: stale opposite label must be removed on every swap ──────────
+
+@pytest.mark.asyncio
+async def test_needs_work_to_healthy_removes_stale_needs_work_label(mock_gh, ctx):
+    """A PR that flips from needs-work to healthy must end up with exactly
+    one health label — the stale LABEL_NEEDS_WORK must be removed."""
+    low_signal_files = [{"filename": "src/foo.ts", "patch": "+x"}]
+    mock_gh.list_pr_files = AsyncMock(return_value=low_signal_files)
+    mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
+    wf = PRHealthWorkflow(mock_gh)
+    pr = make_pr(number=99, body="fix stuff")
+    await wf.score_pr(ctx, make_payload(pr))
+
+    # First pass should have scored low and applied LABEL_NEEDS_WORK
+    assert mock_gh.add_label.call_args[0][3] == LABEL_NEEDS_WORK
+    mock_gh.remove_label.assert_awaited_with(
+        "hiero", "sdk-js", 99, LABEL_HEALTHY, 42
+    )
+
+    mock_gh.add_label.reset_mock()
+    mock_gh.remove_label.reset_mock()
+
+    # Second pass: author adds tests, links an issue, gets DCO + approvals —
+    # score should now cross the healthy threshold.
+    high_signal_files = [
+        {"filename": "src/foo.ts", "patch": "+x"},
+        {"filename": "tests/foo.test.ts", "patch": "+it('works', () => {})"},
+    ]
+    mock_gh.list_pr_files = AsyncMock(return_value=high_signal_files)
+    mock_gh.get_combined_status = AsyncMock(return_value={
+        "statuses": [{"context": "DCO", "state": "success"}]
+    })
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[
+        {"state": "APPROVED"}, {"state": "APPROVED"}
+    ])
+
+    pr2 = make_pr(number=99, body="Closes #10 " + "x" * 50)
+    await wf.score_pr(ctx, make_payload(pr2))
+
+    assert mock_gh.add_label.call_args[0][3] == LABEL_HEALTHY
+    # The stale "needs work" label from the first pass must be removed.
+    mock_gh.remove_label.assert_awaited_once_with(
+        "hiero", "sdk-js", 99, LABEL_NEEDS_WORK, 42
+    )
+
+
+@pytest.mark.asyncio
+async def test_healthy_to_needs_work_removes_stale_healthy_label(mock_gh, ctx):
+    """The reverse direction: a regression from healthy to needs-work must
+    also clear the stale LABEL_HEALTHY."""
+    mock_gh.list_pr_files = AsyncMock(return_value=[
+        {"filename": "src/foo.ts", "patch": "+x"},
+        {"filename": "tests/foo.test.ts", "patch": "+it()"},
+    ])
+    mock_gh.get_combined_status = AsyncMock(return_value={
+        "statuses": [{"context": "DCO", "state": "success"}]
+    })
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[
+        {"state": "APPROVED"}, {"state": "APPROVED"}
+    ])
+
+    wf = PRHealthWorkflow(mock_gh)
+    pr = make_pr(number=100, body="Closes #10 " + "x" * 50)
+    await wf.score_pr(ctx, make_payload(pr))
+    assert mock_gh.add_label.call_args[0][3] == LABEL_HEALTHY
+
+    mock_gh.add_label.reset_mock()
+    mock_gh.remove_label.reset_mock()
+
+    # A later push regresses: tests removed, reviews reset.
+    mock_gh.list_pr_files = AsyncMock(return_value=[
+        {"filename": "src/foo.ts", "patch": "+x"}
+    ])
+    mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
+    pr2 = make_pr(number=100, body="fix stuff")
+    await wf.score_pr(ctx, make_payload(pr2))
+
+    assert mock_gh.add_label.call_args[0][3] == LABEL_NEEDS_WORK
+    mock_gh.remove_label.assert_awaited_once_with(
+        "hiero", "sdk-js", 100, LABEL_HEALTHY, 42
+    )

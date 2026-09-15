@@ -105,6 +105,44 @@ async def test_check_and_report_posts_table(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
+async def test_check_and_report_records_role_suggested_when_eligible(mock_gh, ctx):
+    """Issue #92 — /check-eligibility must only log contributor.role_suggested
+    when the contributor is actually eligible for a role."""
+    from sqlalchemy import select
+
+    from app.db.models import AuditLog
+
+    stats = {"merged_prs": 10, "reviews_given": 5, "months_active": 4, "login": "alice"}
+    wf = ProgressionWorkflow(mock_gh)
+    payload = {"issue": {"number": 3}, "comment": {"user": {"login": "alice"}}}
+    with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+        await wf.check_and_report(ctx, payload)
+
+    result = await ctx["db"].execute(select(AuditLog))
+    entry = result.scalars().one()
+    assert entry.action == "contributor.role_suggested"
+
+
+@pytest.mark.asyncio
+async def test_check_and_report_records_workflow_skipped_when_not_eligible(mock_gh, ctx):
+    """A contributor nowhere near eligible must not be logged as
+    contributor.role_suggested — that was the bug in issue #92."""
+    from sqlalchemy import select
+
+    from app.db.models import AuditLog
+
+    stats = {"merged_prs": 0, "reviews_given": 0, "months_active": 0, "login": "bob"}
+    wf = ProgressionWorkflow(mock_gh)
+    payload = {"issue": {"number": 4}, "comment": {"user": {"login": "bob"}}}
+    with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+        await wf.check_and_report(ctx, payload)
+
+    result = await ctx["db"].execute(select(AuditLog))
+    entry = result.scalars().one()
+    assert entry.action == "workflow.skipped"
+
+
+@pytest.mark.asyncio
 async def test_eligible_role_announced_after_merge(mock_gh, ctx):
     stats = {"merged_prs": 5, "reviews_given": 3, "months_active": 3, "login": "alice"}
     mock_gh.list_issues = AsyncMock(return_value=[])

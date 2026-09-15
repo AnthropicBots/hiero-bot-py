@@ -60,7 +60,10 @@ class PRHealthWorkflow:
         }
         await self._upsert_score(db, owner, repo, pr_number, fields)
 
-        # Label the PR
+        # Label the PR — clear the opposite status label first so a PR never
+        # carries both "healthy" and "needs work" at once (issue #64).
+        stale_label = LABEL_NEEDS_WORK if label == LABEL_HEALTHY else LABEL_HEALTHY
+        await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
         await self._gh.add_label(owner, repo, pr_number, label, inst)
 
         # Comment when below threshold or when the PR is labeled needs work

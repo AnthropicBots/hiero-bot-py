@@ -88,11 +88,13 @@ class PullRequestWorkflow:
                     inst,
                 )
 
-        # Label
+        # Label — clear the opposite status label first so a PR never carries
+        # both "passed" and "needs work" at once (issue #64).
         if cfg.auto_label:
-            await self._gh.add_label(
-                owner, repo, pr_number, LABEL_PASS if all_passed else LABEL_FAIL, inst
-            )
+            label = LABEL_PASS if all_passed else LABEL_FAIL
+            stale_label = LABEL_FAIL if label == LABEL_PASS else LABEL_PASS
+            await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
+            await self._gh.add_label(owner, repo, pr_number, label, inst)
 
         await audit.record(
             db,

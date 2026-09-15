@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.workflows.pullrequest import PullRequestWorkflow
+from app.workflows.pullrequest import LABEL_FAIL, LABEL_PASS, PullRequestWorkflow
 
 
 def make_pr():
@@ -235,3 +235,94 @@ async def test_require_changelog_detects_entry_from_second_page(mock_gh, ctx):
 
     assert changelog_check.passed is True
     assert changelog_check.detail == "CHANGELOG entry included ✅"
+
+
+# ── Issue #64: stale opposite quality-gate label must be removed ───────────
+
+@pytest.mark.asyncio
+async def test_fail_to_pass_removes_stale_fail_label(mock_gh, ctx):
+    """A PR that fails quality gates on open and then passes on a later push
+    must end up with exactly the LABEL_PASS label — the stale LABEL_FAIL
+    must be removed."""
+    wf = PullRequestWorkflow(mock_gh)
+
+    # First pass: no tests, no DCO status -> gates fail -> LABEL_FAIL
+    mock_gh.list_pr_files = AsyncMock(return_value=[
+        {"filename": "src/example.py", "patch": "+x"}
+    ])
+    mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    assert mock_gh.add_label.call_args[0][3] == LABEL_FAIL
+    mock_gh.remove_label.assert_awaited_with(
+        "hiero", "sdk-js", 1, LABEL_PASS, 42
+    )
+
+    mock_gh.add_label.reset_mock()
+    mock_gh.remove_label.reset_mock()
+
+    # Second pass: author adds tests and signs off -> gates pass -> LABEL_PASS
+    mock_gh.list_pr_files = AsyncMock(return_value=[
+        {"filename": "src/example.py", "patch": "+x"},
+        {"filename": "tests/test_example.py", "patch": "+def test_x(): pass"},
+    ])
+    mock_gh.get_combined_status = AsyncMock(return_value={
+        "statuses": [{"context": "DCO", "state": "success"}]
+    })
+
+    await wf.handle_pr_opened(ctx, make_payload(), "synchronize")
+
+    assert mock_gh.add_label.call_args[0][3] == LABEL_PASS
+    mock_gh.remove_label.assert_awaited_once_with(
+        "hiero", "sdk-js", 1, LABEL_FAIL, 42
+    )
+
+
+@pytest.mark.asyncio
+async def test_pass_to_fail_removes_stale_pass_label(mock_gh, ctx):
+    """The reverse direction: a regression from passing to failing gates must
+    also clear the stale LABEL_PASS."""
+    wf = PullRequestWorkflow(mock_gh)
+
+    mock_gh.list_pr_files = AsyncMock(return_value=[
+        {"filename": "src/example.py", "patch": "+x"},
+        {"filename": "tests/test_example.py", "patch": "+def test_x(): pass"},
+    ])
+    mock_gh.get_combined_status = AsyncMock(return_value={
+        "statuses": [{"context": "DCO", "state": "success"}]
+    })
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+    assert mock_gh.add_label.call_args[0][3] == LABEL_PASS
+
+    mock_gh.add_label.reset_mock()
+    mock_gh.remove_label.reset_mock()
+
+    # A later push removes the test file and drops the DCO status.
+    mock_gh.list_pr_files = AsyncMock(return_value=[
+        {"filename": "src/example.py", "patch": "+x"}
+    ])
+    mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
+
+    await wf.handle_pr_opened(ctx, make_payload(), "synchronize")
+
+    assert mock_gh.add_label.call_args[0][3] == LABEL_FAIL
+    mock_gh.remove_label.assert_awaited_once_with(
+        "hiero", "sdk-js", 1, LABEL_PASS, 42
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_label_removal_when_auto_label_disabled(mock_gh, ctx):
+    """When auto_label is off, neither add_label nor remove_label should fire."""
+    ctx["config"].workflows.pull_request.auto_label = False
+    wf = PullRequestWorkflow(mock_gh)
+
+    mock_gh.list_pr_files = AsyncMock(return_value=[])
+    mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    mock_gh.add_label.assert_not_awaited()
+    mock_gh.remove_label.assert_not_awaited()

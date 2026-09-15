@@ -119,8 +119,11 @@ class ProgressionWorkflow:
         report = self._build_full_report(login, stats, cfg)
         await self._gh.post_comment(owner, repo, issue_number, report, inst)
 
+        eligible_for = self._check_eligibility(stats, cfg)
+
         await audit.record(
-            ctx["db"], action="contributor.role_suggested",
+            ctx["db"],
+            action="contributor.role_suggested" if eligible_for else "workflow.skipped",
             owner=owner, repo=repo, target_login=login, target_number=issue_number,
             reason="User invoked /check-eligibility",
             metadata=stats,

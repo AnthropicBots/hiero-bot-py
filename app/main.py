@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
     _config_loader = ConfigLoader(_gh)
     _scheduler = BotScheduler(_gh, _config_loader)
 
-    if settings.is_production:
+    if settings.enable_scheduler:
         _scheduler.start()
 
     log.info("Bot ready on port %d", settings.port)
