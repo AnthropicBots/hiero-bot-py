@@ -50,9 +50,8 @@ class WebhookRouter:
         if settings.github_webhook_secret or settings.github_webhook_secret_old or settings.is_production:
             self._verify_signature(request, await request.body())
 
-        # #4 — replay protection: reject deliveries we've already processed
         delivery_id = request.headers.get("X-GitHub-Delivery", "")
-        if delivery_id and is_replay(delivery_id):
+        if delivery_id and await is_replay(db, delivery_id):
             log.warning("Rejected replayed delivery %s", delivery_id)
             raise HTTPException(status_code=409, detail="Duplicate delivery")
 
@@ -264,18 +263,13 @@ class WebhookRouter:
 
         inst = ctx["installation_id"]
 
-        issue_author = (issue.get("user") or {}).get("login")
-
-        if commenter == issue_author:
-            allowed = True
-        else:
-            permission = await self._gh.get_collaborator_permission(
-                ctx["owner"],
-                ctx["repo"],
-                commenter,
-                inst,
-            )
-            allowed = permission in {"admin", "maintain", "write"}
+        permission = await self._gh.get_collaborator_permission(
+            ctx["owner"],
+            ctx["repo"],
+            commenter,
+            inst,
+        )
+        allowed = permission in {"admin", "maintain", "write"}
 
         if not allowed:
             await self._gh.post_comment(

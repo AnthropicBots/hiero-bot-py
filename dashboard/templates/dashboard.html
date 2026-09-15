@@ -7,8 +7,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"
+        integrity="sha384-FcQlsUOd0TJjROrBxhJdUhXTUgNJQxTMcxZe6nHbaEfFL1zjQ+bq/uRoBQxb0KMo"
+        crossorigin="anonymous"></script>
+<style nonce="{{ csp_nonce }}">
   :root {
     --bg: #09090b;
     --panel: #121215;
@@ -654,17 +656,17 @@
     <div class="filter-selects">
       <div class="select-wrapper">
         <svg class="select-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-        <select id="ownerInput" onchange="onOwnerChange()"></select>
+        <select id="ownerInput"></select>
       </div>
 
       <div class="select-wrapper">
         <svg class="select-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-        <select id="repoInput" onchange="loadAll()"></select>
+        <select id="repoInput"></select>
       </div>
 
       <div class="search-box">
         <svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-        <input type="text" id="filterInput" class="search-input" placeholder="Search tables..." onkeyup="filterTables()" />
+        <input type="text" id="filterInput" class="search-input" placeholder="Search tables..." />
       </div>
     </div>
 
@@ -672,7 +674,7 @@
       <span id="lastUpdated" style="font-size:12px; color:var(--text-muted);">Updated just now</span>
       
       <div class="select-wrapper">
-        <select id="refreshInterval" onchange="updateRefreshTimer()" style="padding-left:12px;">
+        <select id="refreshInterval" style="padding-left:12px;">
           <option value="15000">15s sync</option>
           <option value="30000" selected>30s sync</option>
           <option value="60000">60s sync</option>
@@ -680,7 +682,7 @@
         </select>
       </div>
 
-      <button class="btn btn-icon-spin" onclick="loadAll(true)">
+      <button id="refreshBtn" class="btn btn-icon-spin">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
         Refresh
       </button>
@@ -693,7 +695,7 @@
       <span style="background:#3b82f6; color:#fff; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; font-family:var(--font-mono);">FREE TIER</span>
       <span style="font-size:13px; color:var(--text-secondary);">Unlock AI code reviews, automated reviewer rotas, and priority telemetry insights with Premium.</span>
     </div>
-    <button class="btn btn-primary" style="padding:5px 12px; font-size:11px;" onclick="openUpgradeModal()">Upgrade Plan →</button>
+    <button id="openUpgradeModalBtn" class="btn btn-primary" style="padding:5px 12px; font-size:11px;">Upgrade Plan →</button>
   </div>
 
   <!-- KPI Metric Overview Cards -->
@@ -749,11 +751,11 @@
 
   <!-- Navigation Tabs -->
   <div class="tab-bar">
-    <button class="tab-btn active" onclick="switchTab('overview')">📊 Overview</button>
-    <button class="tab-btn" onclick="switchTab('pr-health')">💚 PR Health Evaluations</button>
-    <button class="tab-btn" onclick="switchTab('audit')">🛡️ Automation Audit Log</button>
-    <button class="tab-btn" onclick="switchTab('progression')">🚀 Contributor Progression</button>
-    <button class="tab-btn" onclick="switchTab('stale')">⏳ Stale Queue</button>
+    <button class="tab-btn active" data-tab="overview">📊 Overview</button>
+    <button class="tab-btn" data-tab="pr-health">💚 PR Health Evaluations</button>
+    <button class="tab-btn" data-tab="audit">🛡️ Automation Audit Log</button>
+    <button class="tab-btn" data-tab="progression">🚀 Contributor Progression</button>
+    <button class="tab-btn" data-tab="stale">⏳ Stale Queue</button>
   </div>
 
   <!-- Overview Tab -->
@@ -904,8 +906,8 @@
 </div>
 
 <!-- Upgrade Modal -->
-<div id="upgradeModal" class="modal-backdrop" onclick="closeUpgradeModal(event)">
-  <div class="modal-card" onclick="event.stopPropagation()">
+<div id="upgradeModal" class="modal-backdrop">
+  <div class="modal-card">
     <div style="width:48px; height:48px; background:var(--blue-bg); color:var(--blue); border-radius:12px; display:inline-flex; align-items:center; justify-content:center; font-size:20px; margin-bottom:16px;">★</div>
     <h2 style="font-size:18px; margin-bottom:8px;">Upgrade to Hiero Premium</h2>
     <p style="font-size:13px; color:var(--text-secondary); margin-bottom:24px;">Unlock advanced AI code reviews, intelligent reviewer assignments, and deep team analytics across all organization repositories.</p>
@@ -915,13 +917,13 @@
       <div>✓ <strong>Continuous Governance</strong> & SLA enforcement</div>
     </div>
     <div style="display:flex; gap:12px;">
-      <button class="btn" style="flex:1; justify-content:center;" onclick="closeUpgradeModal()">Cancel</button>
-      <button class="btn btn-primary" style="flex:2; justify-content:center;" onclick="showToast('Redirecting to Stripe checkout...', '💳'); closeUpgradeModal();">Continue to Checkout ($29/mo)</button>
+      <button id="cancelUpgradeBtn" class="btn" style="flex:1; justify-content:center;">Cancel</button>
+      <button id="checkoutBtn" class="btn btn-primary" style="flex:2; justify-content:center;">Continue to Checkout ($29/mo)</button>
     </div>
   </div>
 </div>
 
-<script>
+<script nonce="{{ csp_nonce }}">
 const API = '/api/v1';
 let scoreDistChart, signalsChart;
 let refreshTimer = null;
@@ -967,9 +969,9 @@ function closeUpgradeModal(e) {
 }
 
 // Tab Switching
-function switchTab(tabId) {
+function switchTab(tabId, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
+  if (btn) btn.classList.add('active');
 
   const allTabs = ['overview', 'pr-health', 'audit', 'progression', 'stale'];
   allTabs.forEach(t => {
@@ -1041,7 +1043,7 @@ async function loadPRHealth() {
   const tbody = document.getElementById('prHealthTable');
   tbody.innerHTML = rows.map(r => `
     <tr>
-      <td class="mono"><span class="copyable" onclick="copyText('#${r.pr_number}')" style="font-weight:700; color:#60a5fa;">#${r.pr_number}</span></td>
+      <td class="mono"><span class="copyable" data-copy="#${r.pr_number}" style="font-weight:700; color:#60a5fa;">#${r.pr_number}</span></td>
       <td style="font-weight:600; color:var(--text-primary);">@${r.pr_author}</td>
       <td class="mono" style="font-weight:700; color:${r.score >= 80 ? 'var(--emerald)' : r.score >= 60 ? 'var(--amber)' : 'var(--rose)'}">${r.score.toFixed(0)}</td>
       <td>${r.has_tests ? '<span class="pill pill-emerald"><span class="dot-status dot-emerald"></span>Pass</span>' : '<span class="pill pill-rose"><span class="dot-status dot-rose"></span>Missing</span>'}</td>
@@ -1186,7 +1188,7 @@ async function loadStale() {
       <td class="mono" style="color:var(--text-muted)">${relativeTime(r.occurred_at)}</td>
       <td>${actionPill(r.action)}</td>
       <td style="font-weight:500">${r.repo}</td>
-      <td class="mono"><span class="copyable" onclick="copyText('#${r.issue_number}')">#${r.issue_number}</span></td>
+      <td class="mono"><span class="copyable" data-copy="#${r.issue_number}">#${r.issue_number}</span></td>
       <td class="mono">${r.days_inactive} days</td>
     </tr>
   `).join('');
@@ -1287,7 +1289,38 @@ function updateRefreshTimer() {
   }
 }
 
+function initEventListeners() {
+  document.getElementById('ownerInput').addEventListener('change', onOwnerChange);
+  document.getElementById('repoInput').addEventListener('change', () => loadAll());
+  document.getElementById('filterInput').addEventListener('keyup', filterTables);
+  document.getElementById('refreshInterval').addEventListener('change', updateRefreshTimer);
+  document.getElementById('refreshBtn').addEventListener('click', () => loadAll(true));
+  document.getElementById('openUpgradeModalBtn').addEventListener('click', openUpgradeModal);
+
+  document.querySelector('.tab-bar').addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab-btn');
+    if (btn) switchTab(btn.dataset.tab, btn);
+  });
+
+  const modal = document.getElementById('upgradeModal');
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeUpgradeModal();
+  });
+  modal.querySelector('.modal-card').addEventListener('click', (e) => e.stopPropagation());
+  document.getElementById('cancelUpgradeBtn').addEventListener('click', () => closeUpgradeModal());
+  document.getElementById('checkoutBtn').addEventListener('click', () => {
+    showToast('Redirecting to Stripe checkout...', '💳');
+    closeUpgradeModal();
+  });
+
+  document.body.addEventListener('click', (e) => {
+    const copyable = e.target.closest('[data-copy]');
+    if (copyable) copyText(copyable.dataset.copy);
+  });
+}
+
 (async () => {
+  initEventListeners();
   await populateRepoDropdowns();
   await loadAll();
   updateRefreshTimer();

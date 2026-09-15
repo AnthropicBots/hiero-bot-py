@@ -209,7 +209,7 @@ async def test_webhook_handler_rejects_invalid_signature():
 
 
 @pytest.mark.asyncio
-async def test_webhook_handler_accepts_valid_signature(monkeypatch):
+async def test_webhook_handler_accepts_valid_signature(monkeypatch, db):
     router, _, config_loader = make_router()
 
     config_loader.load.return_value = None
@@ -223,8 +223,6 @@ async def test_webhook_handler_accepts_valid_signature(monkeypatch):
         },
         BODY,
     )
-
-    db = AsyncMock()
 
     result = await router.handle(request, db)
 

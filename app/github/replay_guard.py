@@ -1,15 +1,26 @@
 from __future__ import annotations
 
-from cachetools import TTLCache
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-_DELIVERY_TTL_SECONDS = 600  # 10 minutes
-_seen_deliveries: TTLCache = TTLCache(maxsize=10_000, ttl=_DELIVERY_TTL_SECONDS)
+from app.db.models import WebhookDelivery
 
 
-def is_replay(delivery_id: str) -> bool:
+async def is_replay(db: AsyncSession, delivery_id: str) -> bool:
     if not delivery_id:
         return False
-    if delivery_id in _seen_deliveries:
-        return True
-    _seen_deliveries[delivery_id] = True
+
+    try:
+        async with db.begin_nested():
+            db.add(WebhookDelivery(id=delivery_id))
+            await db.flush()
+    except IntegrityError:
+        existing = await db.scalar(
+            select(WebhookDelivery.id).where(WebhookDelivery.id == delivery_id)
+        )
+        if existing:
+            return True
+        raise
+
     return False

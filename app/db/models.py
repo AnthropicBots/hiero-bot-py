@@ -68,6 +68,9 @@ class PRHealthScore(Base):
 
     __table_args__ = (
         Index("ix_pr_health_owner_repo", "owner", "repo"),
+        UniqueConstraint(
+            "owner", "repo", "pr_number", name="uq_pr_health_owner_repo_pr_number"
+        ),
     )
 
 
@@ -122,6 +125,17 @@ class StripeEvent(Base):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(128), index=True)
     processed_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+
+class WebhookDelivery(Base):
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    received_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=lambda: datetime.now(timezone.utc),
         index=True,
