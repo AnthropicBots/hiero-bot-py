@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     # can forge it can hand itself an unlimited number of buckets.
     trusted_proxy_hops: int = 0
 
+    # Whether the APScheduler-backed stale scanner / config-cache flusher
+    # should run in this process. Decoupled from `is_production` so staging
+    # and dev deployments serving real webhook traffic still get scheduled
+    # work; set to False in unit tests / short-lived local runs that don't
+    # want a background scheduler.
+    enable_scheduler: bool = True
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
