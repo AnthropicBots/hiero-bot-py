@@ -15,6 +15,10 @@ workflows:
       require_tests: false
     ai_review:
       enabled: true
+      # This deployment's model backend is an OpenAI-compatible gateway (NVIDIA).
+      # The default model name is not available there, so name one that is.
+      provider: openai
+      model: "google/gemma-4-31b-it"
     auto_label: true
 
   reviewer_assignment:
