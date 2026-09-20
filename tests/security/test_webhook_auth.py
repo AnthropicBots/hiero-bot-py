@@ -228,3 +228,9 @@ async def test_webhook_handler_accepts_valid_signature(monkeypatch, db):
 
     assert result == {"ok": True, "skipped": "no repo/installation"}
     config_loader.load.assert_not_awaited()
+
+
+def test_non_ascii_signature_header_is_rejected_not_a_server_error():
+    # hmac.compare_digest() raises TypeError for non-ASCII str input, which
+    # surfaced as a 500 instead of a 401 for a malformed signature header.
+    assert_rejected("sha256=" + chr(233))

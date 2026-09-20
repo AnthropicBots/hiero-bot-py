@@ -304,7 +304,9 @@ class WebhookRouter:
                     hashlib.sha256,
                 ).hexdigest()
             )
-            if hmac.compare_digest(sig_header, expected):
+            if hmac.compare_digest(
+                sig_header.encode("utf-8"), expected.encode("utf-8")
+            ):
                 return
 
         raise HTTPException(status_code=401, detail="Invalid signature")

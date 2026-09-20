@@ -23,4 +23,8 @@ async def is_replay(db: AsyncSession, delivery_id: str) -> bool:
             return True
         raise
 
+    # Persist the claim immediately. Without this, events that write nothing
+    # else (ping, skipped/no-config, unknown commands) roll back at request end
+    # on PostgreSQL and the delivery id is never recorded, so replays pass.
+    await db.commit()
     return False
