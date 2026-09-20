@@ -10,11 +10,15 @@ workflows:
   pull_request:
     enabled: true
     quality_gates:
-      require_dco: true
+      require_dco: false
       require_linked_issue: false
       require_tests: false
     ai_review:
       enabled: true
+      # This deployment's model backend is an OpenAI-compatible gateway (NVIDIA).
+      # The default model name is not available there, so name one that is.
+      provider: openai
+      model: "google/gemma-4-31b-it"
     auto_label: true
 
   reviewer_assignment:
@@ -28,6 +32,14 @@ workflows:
 
   pr_health:
     enabled: true
+    # This project does not use DCO sign-off, so it carries no weight here.
+    # The other five signals share its 0.20, so a PR can still reach 100.
+    score_weights:
+      has_tests: 0.3125
+      has_linked_issue: 0.1875
+      has_description: 0.1875
+      review_count: 0.1875
+      small_diff: 0.125
 
   progression:
     enabled: true
