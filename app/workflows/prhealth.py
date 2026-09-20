@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,12 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import PRHealthScore
 from app.github.client import GitHubClient
 from app.utils import audit
+from app.utils.comments import find_bot_comment
 from app.utils.logger import get_logger
 
 log = get_logger("workflow.prhealth")
 
 LABEL_HEALTHY = "health: 💚 healthy"
 LABEL_NEEDS_WORK = "health: 🔧 needs work"
+HEALTH_MARKER = "<!-- hiero-bot:pr-health -->"
 
 
 class PRHealthWorkflow:
@@ -66,13 +69,12 @@ class PRHealthWorkflow:
         await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
         await self._gh.add_label(owner, repo, pr_number, label, inst)
 
-        # Comment when below threshold or when the PR is labeled needs work
-        if score < cfg.comment_threshold or label == LABEL_NEEDS_WORK:
-            await self._gh.post_comment(
-                owner, repo, pr_number,
-                self._build_health_comment(score, signals, cfg.label_healthy_above),
-                inst,
-            )
+        # Comment when below threshold or when the PR is labeled needs work. One
+        # comment per PR: later pushes edit it rather than stacking a new one each time.
+        await self._sync_health_comment(
+            ctx, pr_number, score, signals, cfg,
+            due=score < cfg.comment_threshold or label == LABEL_NEEDS_WORK,
+        )
 
         await audit.record(
             db, action="pr.health_scored", owner=owner, repo=repo,
@@ -82,6 +84,39 @@ class PRHealthWorkflow:
         )
         await db.commit()
         log.info("PR #%d health score: %.0f/100 (%s)", pr_number, score, label)
+
+    async def _sync_health_comment(
+        self, ctx: dict, pr_number: int, score: float, signals: dict, cfg, *, due: bool
+    ) -> None:
+        owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
+
+        comments = await self._gh.list_issue_comments(owner, repo, pr_number, inst)
+        existing = find_bot_comment(comments, marker=HEALTH_MARKER)
+
+        if due:
+            body = f"{HEALTH_MARKER}\n" + self._build_health_comment(
+                score, signals, cfg.label_healthy_above
+            )
+        elif existing:
+            # The PR improved: replace the stale "below threshold" text.
+            body = (
+                f"{HEALTH_MARKER}\n## 💚 PR Health Score: {score:.0f}/100\n\n"
+                f"This PR is now above the **{cfg.label_healthy_above}/100** healthy "
+                "threshold. Thanks for the improvements!"
+            )
+        else:
+            return
+
+        if existing:
+            try:
+                await self._gh.update_comment(owner, repo, existing["id"], body, inst)
+                return
+            except httpx.HTTPStatusError as exc:
+                log.warning(
+                    "Could not edit health comment on PR #%d (%s); posting a new one",
+                    pr_number, exc.response.status_code,
+                )
+        await self._gh.post_comment(owner, repo, pr_number, body, inst)
 
     @staticmethod
     async def _upsert_score(
