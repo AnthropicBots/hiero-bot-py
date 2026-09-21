@@ -189,3 +189,30 @@ async def test_malformed_issue_is_counted_and_skipped(mock_gh, ctx, db):
 
     assert counts["errors"] == 1
     assert counts["stale_marked"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", ["Security", "SECURITY", "Pinned"])
+async def test_exempt_labels_ignore_case(mock_gh, ctx, label):
+    mock_gh.list_issues = AsyncMock(return_value=[
+        make_issue(updated_days_ago=90, labels=[label])
+    ])
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+
+    assert counts["stale_marked"] == 0
+    mock_gh.add_label.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_existing_stale_label_is_recognised_regardless_of_case(mock_gh, ctx):
+    # Created earlier as "Stale"; the config says "stale". It must not be
+    # marked stale a second time.
+    mock_gh.list_issues = AsyncMock(return_value=[
+        make_issue(updated_days_ago=65, labels=["Stale"])
+    ])
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+
+    assert counts["stale_marked"] == 0
+    mock_gh.add_label.assert_not_awaited()
