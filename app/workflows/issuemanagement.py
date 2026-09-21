@@ -21,17 +21,23 @@ class IssueManagementWorkflow:
 
     # ── Scheduled stale scan ──────────────────────────────────
 
-    async def run_stale_scan(self, ctx: dict) -> dict[str, int]:
+    async def run_stale_scan(
+        self, ctx: dict, now: datetime | None = None
+    ) -> dict[str, int]:
         cfg = ctx["config"].workflows.issue_management
         if not cfg.enabled:
             return {}
 
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db: AsyncSession = ctx["db"]
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
 
         stale_cutoff = now - timedelta(days=cfg.stale_issue_days)
-        close_cutoff = now - timedelta(days=cfg.stale_issue_days + cfg.close_stale_after_days)
+        # Marking an issue stale (label + comment) bumps its `updated_at`, so
+        # the close clock runs from the last activity. Adding the stale period
+        # a second time made issues close stale_issue_days + close_stale_after_days
+        # after they were marked (68 days with the defaults, not 7).
+        close_cutoff = now - timedelta(days=cfg.close_stale_after_days)
         unassign_cutoff = now - timedelta(days=cfg.auto_unassign_inactive_days)
 
         issues = await self._gh.list_issues(
@@ -96,7 +102,7 @@ class IssueManagementWorkflow:
             counts["unassigned"] += len(assignees)
 
         # Close stale
-        if is_stale and updated < close_cutoff:
+        if is_stale and updated <= close_cutoff:
             await self._close_stale(ctx, issue, days_inactive)
             counts["closed"] += 1
             return

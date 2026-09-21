@@ -36,7 +36,7 @@ async def test_marks_stale_after_cutoff(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
-async def test_closes_after_stale_plus_close_period(mock_gh, ctx):
+async def test_closes_a_stale_issue_after_the_close_period(mock_gh, ctx):
     mock_gh.list_issues = AsyncMock(return_value=[
         make_issue(updated_days_ago=68, labels=["stale"])
     ])
@@ -216,3 +216,108 @@ async def test_existing_stale_label_is_recognised_regardless_of_case(mock_gh, ct
 
     assert counts["stale_marked"] == 0
     mock_gh.add_label.assert_not_awaited()
+
+
+class _FakeGitHubIssue:
+    """One issue behaving like GitHub: the bot's own label and comment bump
+    ``updated_at``, exactly as they do on the real API."""
+
+    def __init__(self, clock, idle_days: int):
+        self.clock = clock
+        self.updated = clock["now"] - timedelta(days=idle_days)
+        self.labels: list[str] = []
+        self.state = "open"
+
+    def touch(self):
+        self.updated = self.clock["now"]
+
+    def as_dict(self):
+        return {
+            "number": 1,
+            "updated_at": self.updated.isoformat(),
+            "labels": [{"name": name} for name in self.labels],
+            "assignees": [],
+        }
+
+
+def _wire(mock_gh, issue: _FakeGitHubIssue):
+    async def list_issues(*args, **kwargs):
+        return [issue.as_dict()] if issue.state == "open" else []
+
+    async def add_label(owner, repo, number, label, inst):
+        issue.labels.append(label)
+        issue.touch()
+
+    async def post_comment(owner, repo, number, body, inst):
+        issue.touch()
+
+    async def close_issue(owner, repo, number, inst):
+        issue.state = "closed"
+
+    mock_gh.list_issues = AsyncMock(side_effect=list_issues)
+    mock_gh.add_label = AsyncMock(side_effect=add_label)
+    mock_gh.post_comment = AsyncMock(side_effect=post_comment)
+    mock_gh.close_issue = AsyncMock(side_effect=close_issue)
+
+
+async def _run_daily(wf, ctx, clock, issue, days, on_day=None):
+    """Run the scan once a day; return the day each event first happened."""
+    start = clock["now"]
+    marked = closed = None
+    for day in range(days):
+        clock["now"] = start + timedelta(days=day)
+        if on_day:
+            on_day(day)
+        await wf.run_stale_scan(ctx, now=clock["now"])
+        if marked is None and "stale" in issue.labels:
+            marked = day
+        if closed is None and issue.state == "closed":
+            closed = day
+            break
+    return marked, closed
+
+
+@pytest.mark.asyncio
+async def test_issue_closes_close_stale_after_days_after_being_marked(mock_gh, ctx):
+    clock = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+    issue = _FakeGitHubIssue(clock, idle_days=61)
+    _wire(mock_gh, issue)
+
+    marked, closed = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=120
+    )
+
+    assert marked == 0
+    assert closed == 7  # close_stale_after_days, not stale_issue_days + 7
+
+
+@pytest.mark.asyncio
+async def test_human_activity_after_marking_delays_the_close(mock_gh, ctx):
+    clock = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+    issue = _FakeGitHubIssue(clock, idle_days=61)
+    _wire(mock_gh, issue)
+    start = clock["now"]
+
+    def human_comments_on_day_3(day):
+        if day == 3:
+            issue.updated = start + timedelta(days=3)
+
+    marked, closed = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=120,
+        on_day=human_comments_on_day_3,
+    )
+
+    assert marked == 0
+    assert closed == 10  # 7 days after the comment on day 3, not day 7
+
+
+@pytest.mark.asyncio
+async def test_recently_marked_stale_issue_is_not_closed_yet(mock_gh, ctx):
+    mock_gh.list_issues = AsyncMock(return_value=[
+        make_issue(updated_days_ago=3, labels=["stale"])
+    ])
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+
+    assert counts["closed"] == 0
+    mock_gh.close_issue.assert_not_awaited()
