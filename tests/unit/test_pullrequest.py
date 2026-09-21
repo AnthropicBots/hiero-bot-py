@@ -117,6 +117,7 @@ async def test_opened_then_synchronize_updates_existing_quality_report(
     mock_gh.list_issue_comments.return_value = [
         {
             "id": 12345,
+            "user": {"type": "Bot"},
             "body": "## 🔍 Quality Gate Report\n\nPrevious report",
         }
     ]

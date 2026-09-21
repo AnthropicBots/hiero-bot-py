@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import re
 
+import httpx
 from sqlalchemy import select
 
 from app.ai.reviewer import AIReviewer
 from app.db.models import ReviewerRecommendation
 from app.github.client import GitHubClient
 from app.utils import audit
+from app.utils.comments import find_bot_comment
 from app.utils.logger import get_logger
 
 log = get_logger("workflow.pullrequest")
@@ -62,24 +64,30 @@ class PullRequestWorkflow:
                 owner, repo, pr_number, inst
             )
 
-            existing_comment = next(
-                (
-                    comment
-                    for comment in comments
-                    if comment.get("body", "").startswith("## 🔍 Quality Gate Report")
-                ),
-                None,
+            # Only ever edit a comment the bot itself wrote (see utils.comments).
+            existing_comment = find_bot_comment(
+                comments, prefix="## 🔍 Quality Gate Report"
             )
 
+            updated = False
             if existing_comment:
-                await self._gh.update_comment(
-                    owner,
-                    repo,
-                    existing_comment["id"],
-                    report,
-                    inst,
-                )
-            else:
+                try:
+                    await self._gh.update_comment(
+                        owner,
+                        repo,
+                        existing_comment["id"],
+                        report,
+                        inst,
+                    )
+                    updated = True
+                except httpx.HTTPStatusError as exc:
+                    # Deleted or otherwise uneditable: post a fresh report instead.
+                    log.warning(
+                        "Could not edit quality report on PR #%d (%s); posting a new one",
+                        pr_number,
+                        exc.response.status_code,
+                    )
+            if not updated:
                 await self._gh.post_comment(
                     owner,
                     repo,

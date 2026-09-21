@@ -187,15 +187,33 @@ class WebhookRouter:
             return
 
         if action in ("opened", "synchronize", "reopened"):
-            await wf_pr.handle_pr_opened(ctx, payload, action)
+            # Each step is isolated: one failing (e.g. GitHub rejecting a reviewer
+            # request with 422) must not silently skip the steps after it.
+            await self._run_step(
+                "quality gates", wf_pr.handle_pr_opened(ctx, payload, action), ctx
+            )
 
             if action == "opened":
-                await wf_reviewer.handle_pr_opened(ctx, payload)
+                await self._run_step(
+                    "reviewer assignment", wf_reviewer.handle_pr_opened(ctx, payload), ctx
+                )
 
-            await wf_health.score_pr(ctx, payload)
+            await self._run_step("health scoring", wf_health.score_pr(ctx, payload), ctx)
 
         elif action == "closed" and pr.get("merged"):
             await wf_prog.handle_merged_pr(ctx, payload)
+
+    @staticmethod
+    async def _run_step(name: str, step, ctx: dict) -> None:
+        try:
+            await step
+        except Exception:
+            log.exception(
+                "PR step '%s' failed for %s/%s; continuing with remaining steps",
+                name,
+                ctx.get("owner"),
+                ctx.get("repo"),
+            )
 
     #  Slash commands
 
