@@ -133,7 +133,9 @@ class LabelEscalationRule(BaseModel):
 
 
 class IssueManagementConfig(BaseModel):
-    enabled: bool = True
+    # Opt-in: this workflow closes issues and unassigns people, so a config file
+    # that never mentions it must not switch it on.
+    enabled: bool = False
     stale_issue_days: int = Field(default=60, gt=0)
     close_stale_after_days: int = Field(default=7, gt=0)
     stale_label: str = "stale"

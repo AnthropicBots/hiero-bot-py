@@ -169,7 +169,7 @@ workflows:
 
   # Issue Management 
   issue_management:
-    enabled: true
+    enabled: true    # off by default: this workflow closes issues and unassigns people
     stale_issue_days: 60         # days without activity before an issue is marked stale
     close_stale_after_days: 7    # days without activity after that before it is closed
     stale_label: "stale"

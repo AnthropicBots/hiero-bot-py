@@ -304,3 +304,17 @@ def test_full_valid_config():
     cfg = RepoConfig.model_validate(data)
     assert cfg.workflows.pull_request.ai_review.max_comments == 8
     assert len(cfg.workflows.issue_management.label_escalation_rules) == 1
+
+
+def test_issue_management_is_opt_in():
+    cfg = RepoConfig.model_validate(MINIMAL)
+
+    assert cfg.workflows.issue_management.enabled is False
+
+
+def test_issue_management_can_be_enabled():
+    cfg = RepoConfig.model_validate(
+        {"repo": "hiero/sdk-js", "workflows": {"issue_management": {"enabled": True}}}
+    )
+
+    assert cfg.workflows.issue_management.enabled is True
