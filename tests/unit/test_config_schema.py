@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.config.schema import RepoConfig
+from app.config.schema import RepoConfig, find_unknown_keys
 
 MINIMAL = {"repo": "hiero/sdk-js", "workflows": {}}
 
@@ -318,3 +318,99 @@ def test_issue_management_can_be_enabled():
     )
 
     assert cfg.workflows.issue_management.enabled is True
+
+
+def _health_weights(weights):
+    return RepoConfig.model_validate(
+        {"repo": "hiero/sdk-js", "workflows": {"pr_health": {"score_weights": weights}}}
+    ).workflows.pr_health.score_weights
+
+
+PERFECT_PR = {
+    "has_tests": True,
+    "has_linked_issue": True,
+    "has_description": True,
+    "dco_signed": True,
+    "review_count": 5,
+    "small_diff": True,
+}
+
+
+def test_partial_score_weights_are_scaled_so_a_perfect_pr_scores_100():
+    from app.workflows.prhealth import PRHealthWorkflow
+
+    weights = _health_weights({"has_tests": 0.5})
+
+    assert PRHealthWorkflow._compute_score(PERFECT_PR, weights) == pytest.approx(100)
+
+
+def test_unknown_score_weight_keys_are_dropped():
+    weights = _health_weights({"has_tests": 0.5, "has_test": 9.0})
+
+    assert weights == {"has_tests": 1.0}
+
+
+def test_default_score_weights_are_unchanged():
+    cfg = RepoConfig.model_validate(MINIMAL)
+
+    assert sum(cfg.workflows.pr_health.score_weights.values()) == pytest.approx(1.0)
+    assert cfg.workflows.pr_health.score_weights["has_tests"] == 0.25
+
+
+@pytest.mark.parametrize("weights", [{"has_tests": -1.0}, {"has_test": 1.0}, {}])
+def test_unusable_score_weights_are_rejected(weights):
+    with pytest.raises(ValidationError):
+        _health_weights(weights)
+
+
+@pytest.mark.parametrize("pattern", ["[", "a" * 201])
+def test_unusable_branch_pattern_is_rejected(pattern):
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate({
+            "repo": "hiero/sdk-js",
+            "workflows": {"pull_request": {"quality_gates": {"allowed_branch_pattern": pattern}}},
+        })
+
+
+def test_valid_branch_pattern_is_accepted():
+    cfg = RepoConfig.model_validate({
+        "repo": "hiero/sdk-js",
+        "workflows": {"pull_request": {"quality_gates": {"allowed_branch_pattern": "^(feat|fix)/"}}},
+    })
+
+    assert cfg.workflows.pull_request.quality_gates.allowed_branch_pattern == "^(feat|fix)/"
+
+
+def test_find_unknown_keys_reports_typos_at_every_level():
+    data = {
+        "repo": "hiero/sdk-js",
+        "workflow": {},
+        "workflows": {
+            "pull_request": {"quality_gate": {"require_dco": False}},
+            "issue_management": {
+                "label_escalation_rules": [{"label": "x", "notify_team": "t", "oops": 1}]
+            },
+        },
+    }
+
+    assert sorted(find_unknown_keys(data, RepoConfig)) == [
+        "workflow",
+        "workflows.issue_management.label_escalation_rules[0].oops",
+        "workflows.pull_request.quality_gate",
+    ]
+
+
+def test_find_unknown_keys_is_empty_for_a_valid_config():
+    assert find_unknown_keys(MINIMAL, RepoConfig) == []
+
+
+@pytest.mark.parametrize("path", ["templates/hiero-bot.yml", ".github/hiero-bot.yml"])
+def test_shipped_configs_use_only_known_keys(path):
+    import pathlib
+
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    data = yaml.safe_load((root / path).read_text(encoding="utf-8"))
+
+    assert find_unknown_keys(data, RepoConfig) == []

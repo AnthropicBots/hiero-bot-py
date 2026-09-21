@@ -82,7 +82,7 @@ workflows:
       # max_files_changed: 50
       require_changelog_entry: false
       require_linked_issue: false
-      # allowed_branch_pattern: "^(feat|fix|chore|docs)/"
+      # allowed_branch_pattern: "^(feat|fix|chore|docs)/"   # max 200 characters
 
     auto_label: true
     stale_pr_days: 30
@@ -132,6 +132,8 @@ workflows:
   #  PR Health Scoring
   pr_health:
     enabled: true
+    # Relative weights: signals you leave out count for nothing, and the rest
+    # are scaled so that they add up to 1 (a perfect PR always scores 100).
     score_weights:
       has_tests: 0.25
       has_linked_issue: 0.15

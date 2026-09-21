@@ -257,3 +257,25 @@ async def test_stats_separate_configured_from_silent_repos():
     assert stats["entries"] == 2
     assert stats["configured"] == 1
     assert stats["misses"] == 2
+
+
+TYPO_YAML = """
+repo: "hiero/sdk-js"
+workflows:
+  pull_request:
+    quality_gate:
+      require_dco: false
+"""
+
+
+@pytest.mark.asyncio
+async def test_unknown_keys_are_reported_but_do_not_invalidate_the_config(monkeypatch):
+    log = Mock()
+    monkeypatch.setattr(loader_module, "log", log)
+
+    loader, _ = make_loader(encode(TYPO_YAML))
+    config = await loader.load("hiero", "sdk-js", 1)
+
+    assert config is not None
+    warned = " ".join(str(arg) for call in log.warning.call_args_list for arg in call.args)
+    assert "workflows.pull_request.quality_gate" in warned

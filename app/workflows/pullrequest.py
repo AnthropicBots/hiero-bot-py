@@ -14,6 +14,7 @@ from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.comments import find_bot_comment
 from app.utils.logger import get_logger
+from app.utils.safe_regex import bounded_match
 
 log = get_logger("workflow.pullrequest")
 
@@ -248,7 +249,7 @@ class PullRequestWorkflow:
         # Branch pattern
         if gates.allowed_branch_pattern:
             branch = pr.get("head", {}).get("ref", "")
-            ok = bool(re.match(gates.allowed_branch_pattern, branch))
+            ok = bounded_match(gates.allowed_branch_pattern, branch)
             checks.append(
                 QualityCheck(
                     "Branch Name",
