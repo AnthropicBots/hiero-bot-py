@@ -3,8 +3,11 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from sqlalchemy import select
 
+from app.db.models import StaleActionLog
 from app.workflows.issuemanagement import IssueManagementWorkflow
 
 
@@ -121,3 +124,68 @@ async def test_label_escalation_no_matching_rule(mock_gh, ctx):
     wf = IssueManagementWorkflow(mock_gh)
     await wf.handle_label_escalation(ctx, payload)
     mock_gh.post_comment.assert_not_awaited()
+
+
+def _http_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://api.github.com/x")
+    return httpx.HTTPStatusError(
+        str(status), request=request, response=httpx.Response(status, request=request)
+    )
+
+
+async def _logged_issue_numbers(db) -> list[int]:
+    rows = await db.execute(select(StaleActionLog.issue_number))
+    return sorted(rows.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_failing_issue_does_not_abort_the_scan(mock_gh, ctx, db):
+    async def post_comment(owner, repo, number, body, inst):
+        if number == 1:
+            raise _http_error(403)
+
+    mock_gh.list_issues = AsyncMock(return_value=[
+        make_issue(number=1, updated_days_ago=400),
+        make_issue(number=2, updated_days_ago=300),
+        make_issue(number=3, updated_days_ago=250),
+    ])
+    mock_gh.post_comment = AsyncMock(side_effect=post_comment)
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+
+    assert counts["errors"] == 1
+    assert counts["stale_marked"] == 2
+    assert await _logged_issue_numbers(db) == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_earlier_audit_rows_survive_a_later_failure(mock_gh, ctx, db):
+    async def post_comment(owner, repo, number, body, inst):
+        if number == 3:
+            raise _http_error(403)
+
+    mock_gh.list_issues = AsyncMock(return_value=[
+        make_issue(number=1, updated_days_ago=400),
+        make_issue(number=2, updated_days_ago=300),
+        make_issue(number=3, updated_days_ago=250),
+    ])
+    mock_gh.post_comment = AsyncMock(side_effect=post_comment)
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+
+    assert counts["errors"] == 1
+    assert await _logged_issue_numbers(db) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_malformed_issue_is_counted_and_skipped(mock_gh, ctx, db):
+    broken = {"number": 9, "labels": [], "assignees": []}  # no updated_at
+    mock_gh.list_issues = AsyncMock(return_value=[
+        broken,
+        make_issue(number=2, updated_days_ago=300),
+    ])
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+
+    assert counts["errors"] == 1
+    assert counts["stale_marked"] == 1

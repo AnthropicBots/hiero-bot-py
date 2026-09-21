@@ -204,3 +204,14 @@ def test_start_registers_scheduler_jobs():
     assert fields["hour"].expressions[0].first == 3
     assert fields["minute"].expressions[0].first == 0
     assert str(trigger.timezone) == "UTC"
+
+
+def test_summary_reports_errors():
+    summary = ScanSummary()
+
+    assert summary.as_dict()["errors"] == 0
+
+    summary.add({"stale_marked": 1, "errors": 2})
+    summary.add({"errors": 1})
+
+    assert summary.as_dict()["errors"] == 3

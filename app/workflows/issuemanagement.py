@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.schema import IssueManagementConfig
 from app.db.models import StaleActionLog
 from app.github.client import GitHubClient
 from app.utils import audit
@@ -37,46 +38,73 @@ class IssueManagementWorkflow:
             owner, repo, inst, state="open", sort="updated", direction="asc"
         )
 
-        counts = {"stale_marked": 0, "closed": 0, "unassigned": 0}
+        counts = {"stale_marked": 0, "closed": 0, "unassigned": 0, "errors": 0}
+        cutoffs = (stale_cutoff, close_cutoff, unassign_cutoff)
 
         for issue in issues:
-            if issue.get("pull_request"):
-                continue  # Skip PRs
+            # One failing issue (a 403 secondary rate limit, a deleted issue, a
+            # network error) must not abort the scan or discard the audit rows
+            # of actions already taken, so each issue is isolated and committed
+            # on its own.
+            try:
+                await self._scan_issue(ctx, cfg, issue, now, cutoffs, counts)
+                await db.commit()
+            except Exception as exc:
+                counts["errors"] += 1
+                number = issue.get("number") if isinstance(issue, dict) else None
+                log.warning(
+                    "Stale scan %s/%s: skipping issue #%s after error: %s",
+                    owner, repo, number, exc,
+                )
+                await db.rollback()
 
-            labels = [
-                (lb["name"] if isinstance(lb, dict) else lb)
-                for lb in issue.get("labels", [])
-            ]
-            if any(el in labels for el in cfg.exempt_labels):
-                continue
-
-            updated = datetime.fromisoformat(
-                issue["updated_at"].replace("Z", "+00:00")
-            )
-            is_stale = cfg.stale_label in labels
-
-            days_inactive = (now - updated).days
-
-            # Auto-unassign
-            assignees = [a["login"] for a in (issue.get("assignees") or []) if a]
-            if assignees and updated < unassign_cutoff:
-                await self._unassign_inactive(ctx, issue, assignees, days_inactive)
-                counts["unassigned"] += len(assignees)
-
-            # Close stale
-            if is_stale and updated < close_cutoff:
-                await self._close_stale(ctx, issue, days_inactive)
-                counts["closed"] += 1
-                continue
-
-            # Mark stale
-            if not is_stale and updated < stale_cutoff:
-                await self._mark_stale(ctx, issue, cfg.stale_label, days_inactive)
-                counts["stale_marked"] += 1
-
-        await db.commit()
         log.info("Stale scan %s/%s: %s", owner, repo, counts)
         return counts
+
+    async def _scan_issue(
+        self,
+        ctx: dict,
+        cfg: IssueManagementConfig,
+        issue: dict,
+        now: datetime,
+        cutoffs: tuple[datetime, datetime, datetime],
+        counts: dict[str, int],
+    ) -> None:
+        """Apply the stale rules to one issue, updating ``counts`` in place."""
+        stale_cutoff, close_cutoff, unassign_cutoff = cutoffs
+
+        if issue.get("pull_request"):
+            return  # Skip PRs
+
+        # GitHub label names are case-insensitive, so compare them casefolded.
+        labels = {
+            (lb["name"] if isinstance(lb, dict) else lb).casefold()
+            for lb in issue.get("labels", [])
+        }
+        if labels & {name.casefold() for name in cfg.exempt_labels}:
+            return
+
+        updated = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
+        is_stale = cfg.stale_label.casefold() in labels
+
+        days_inactive = (now - updated).days
+
+        # Auto-unassign
+        assignees = [a["login"] for a in (issue.get("assignees") or []) if a]
+        if assignees and updated < unassign_cutoff:
+            await self._unassign_inactive(ctx, issue, assignees, days_inactive)
+            counts["unassigned"] += len(assignees)
+
+        # Close stale
+        if is_stale and updated < close_cutoff:
+            await self._close_stale(ctx, issue, days_inactive)
+            counts["closed"] += 1
+            return
+
+        # Mark stale
+        if not is_stale and updated < stale_cutoff:
+            await self._mark_stale(ctx, issue, cfg.stale_label, days_inactive)
+            counts["stale_marked"] += 1
 
     # ── Label escalation ─────────────────────────────────────
 
