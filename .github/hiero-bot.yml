@@ -3,6 +3,8 @@ repo: "AnthropicBots/hiero-bot-py"
 workflows:
   onboarding:
     enabled: true
+    welcome_first_time_only: true
+    max_concurrent_assignments: 3 
     welcome_message: |
       Welcome to Hiero! 🎉 Thanks for contributing.
       Please read CONTRIBUTING.md before getting started.
@@ -11,7 +13,10 @@ workflows:
     enabled: true
     quality_gates:
       require_dco: false
-      require_linked_issue: false
+      # Until #123 is fixed, an empty gate set makes the bot always post
+      # "quality: ✅ passed" with no report. This repo's own PRs already use
+      # "Fixes #NNN", so require it here to keep the label meaningful.
+      require_linked_issue: true
       require_tests: false
     ai_review:
       enabled: true
@@ -49,5 +54,5 @@ workflows:
   issue_management:
     enabled: true
     stale_issue_days: 30
-    close_stale_after_days: 7
+    close_stale_after_days: 7   # now correctly means "7 days after being marked stale" (#120)
     auto_unassign_inactive_days: 14
