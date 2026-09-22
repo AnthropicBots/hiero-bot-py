@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import difflib
 import hashlib
 import hmac
 import time  # #5
@@ -38,6 +40,32 @@ HELP_TEXT = """## 🤖 Hiero Bot Help
 | `/help` | Show this message |
 
 _Powered by [hiero-maintainer-bot](https://github.com/AnthropicBots)_"""
+
+
+def _parse_label_names(raw: str) -> list[str]:
+    """
+    Parse label names from a /label command string.
+    Commas separate multiple labels.
+    Quotes are optional around label names.
+    """
+    if not raw or not raw.strip():
+        return []
+    try:
+        reader = csv.reader([raw], skipinitialspace=True)
+        items = next(reader, [])
+    except Exception:
+        items = raw.split(",")
+
+    labels = []
+    for item in items:
+        cleaned = item.strip()
+        if (cleaned.startswith('"') and cleaned.endswith('"')) or (
+            cleaned.startswith("'") and cleaned.endswith("'")
+        ):
+            cleaned = cleaned[1:-1].strip()
+        if cleaned:
+            labels.append(cleaned)
+    return labels
 
 
 class WebhookRouter:
@@ -220,7 +248,6 @@ class WebhookRouter:
     async def _handle_slash_command(self, body: str, payload: dict, ctx: dict) -> None:
         parts = body.strip().split()
         command = parts[0].lower()
-        args = parts[1:]
         issue_number = (payload.get("issue") or {}).get("number")
         commenter = (payload.get("comment") or {}).get("user", {}).get("login")
 
@@ -263,14 +290,16 @@ class WebhookRouter:
                     ctx["installation_id"],
                 )
 
-        elif command == "/label" and args:
-            await self._handle_label_command(args[0], payload, ctx)
+        elif command == "/label":
+            raw_args = body.strip()[len(parts[0]):].strip()
+            if raw_args:
+                await self._handle_label_command(raw_args, payload, ctx)
 
         else:
             log.debug("Unknown slash command: %s", command)
 
     async def _handle_label_command(
-        self, label_name: str, payload: dict, ctx: dict
+        self, raw_labels: str, payload: dict, ctx: dict
     ) -> None:
         issue = payload.get("issue") or {}
         issue_number = issue.get("number")
@@ -299,9 +328,67 @@ class WebhookRouter:
             )
             return
 
-        await self._gh.add_label(
-            ctx["owner"], ctx["repo"], issue_number, label_name, inst
-        )
+        requested_labels = _parse_label_names(raw_labels)
+        if not requested_labels:
+            return
+
+        repo_labels = await self._gh.list_labels(ctx["owner"], ctx["repo"], inst)
+        existing_names = [
+            lbl["name"] if isinstance(lbl, dict) else str(lbl)
+            for lbl in (repo_labels or [])
+        ]
+        canonical_map = {name.lower(): name for name in existing_names}
+
+        valid_labels: list[str] = []
+        unknown_labels: list[str] = []
+
+        for req in requested_labels:
+            lower_req = req.lower()
+            if lower_req in canonical_map:
+                canonical_name = canonical_map[lower_req]
+                if canonical_name not in valid_labels:
+                    valid_labels.append(canonical_name)
+            else:
+                if req not in unknown_labels:
+                    unknown_labels.append(req)
+
+        for label in valid_labels:
+            await self._gh.add_label(
+                ctx["owner"],
+                ctx["repo"],
+                issue_number,
+                label,
+                inst,
+                create_if_missing=False,
+            )
+
+        if unknown_labels:
+            if len(unknown_labels) == 1:
+                unk = unknown_labels[0]
+                matches = difflib.get_close_matches(unk, existing_names, n=3, cutoff=0.6)
+                if matches:
+                    suggestions = ", ".join(f"`{m}`" for m in matches)
+                    msg = f"⚠️ Label `{unk}` does not exist in this repository. Did you mean: {suggestions}?"
+                else:
+                    msg = f"⚠️ Label `{unk}` does not exist in this repository."
+            else:
+                lines = ["⚠️ The following label(s) do not exist in this repository:"]
+                for unk in unknown_labels:
+                    matches = difflib.get_close_matches(unk, existing_names, n=3, cutoff=0.6)
+                    if matches:
+                        suggestions = ", ".join(f"`{m}`" for m in matches)
+                        lines.append(f"- `{unk}` (did you mean: {suggestions}?)")
+                    else:
+                        lines.append(f"- `{unk}`")
+                msg = "\n".join(lines)
+
+            await self._gh.post_comment(
+                ctx["owner"],
+                ctx["repo"],
+                issue_number,
+                msg,
+                inst,
+            )
 
     #  Signature verification
 
