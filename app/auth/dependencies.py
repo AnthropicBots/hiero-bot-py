@@ -21,11 +21,6 @@ async def get_current_user_optional(
 ) -> User | None:
     cookie_val = request.cookies.get(SESSION_COOKIE_NAME)
     if not cookie_val:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            cookie_val = auth_header.split(" ", 1)[1]
-
-    if not cookie_val:
         return None
 
     raw_session_id = unsign_session_id(cookie_val)

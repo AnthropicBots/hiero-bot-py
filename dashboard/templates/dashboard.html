@@ -932,6 +932,16 @@ let userAccounts = [];
 function owner() { return document.getElementById('ownerInput').value; }
 function repo() { return document.getElementById('repoInput').value; }
 
+function esc(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 async function api(path) {
   try {
     const r = await fetch(API + path);
@@ -1043,8 +1053,8 @@ async function loadPRHealth() {
   const tbody = document.getElementById('prHealthTable');
   tbody.innerHTML = rows.map(r => `
     <tr>
-      <td class="mono"><span class="copyable" data-copy="#${r.pr_number}" style="font-weight:700; color:#60a5fa;">#${r.pr_number}</span></td>
-      <td style="font-weight:600; color:var(--text-primary);">@${r.pr_author}</td>
+      <td class="mono"><span class="copyable" data-copy="#${esc(r.pr_number)}" style="font-weight:700; color:#60a5fa;">#${esc(r.pr_number)}</span></td>
+      <td style="font-weight:600; color:var(--text-primary);">@${esc(r.pr_author)}</td>
       <td class="mono" style="font-weight:700; color:${r.score >= 80 ? 'var(--emerald)' : r.score >= 60 ? 'var(--amber)' : 'var(--rose)'}">${r.score.toFixed(0)}</td>
       <td>${r.has_tests ? '<span class="pill pill-emerald"><span class="dot-status dot-emerald"></span>Pass</span>' : '<span class="pill pill-rose"><span class="dot-status dot-rose"></span>Missing</span>'}</td>
       <td>${r.has_linked_issue ? '<span class="pill pill-neutral">Linked</span>' : '<span class="pill pill-neutral" style="opacity:0.6;">None</span>'}</td>
@@ -1153,9 +1163,9 @@ async function loadAudit() {
     <tr>
       <td class="mono" style="color:var(--text-muted)">${relativeTime(r.timestamp)}</td>
       <td>${actionPill(r.action)}</td>
-      <td style="font-weight:500">${r.owner}/${r.repo}</td>
-      <td class="mono">${r.target_login ? `@${r.target_login}` : ''}${r.target_number ? ` #${r.target_number}` : ''}</td>
-      <td style="color:var(--text-secondary)">${r.reason}</td>
+      <td style="font-weight:500">${esc(r.owner)}/${esc(r.repo)}</td>
+      <td class="mono">${r.target_login ? `@${esc(r.target_login)}` : ''}${r.target_number ? ` #${esc(r.target_number)}` : ''}</td>
+      <td style="color:var(--text-secondary)">${esc(r.reason)}</td>
     </tr>
   `).join('');
 }
@@ -1167,12 +1177,12 @@ async function loadProgression() {
   const tbody = document.getElementById('progressTable');
   tbody.innerHTML = rows.map(r => `
     <tr>
-      <td style="font-weight:600; color:var(--text-primary);">@${r.login}</td>
-      <td style="color:var(--text-muted)">${r.repo}</td>
+      <td style="font-weight:600; color:var(--text-primary);">@${esc(r.login)}</td>
+      <td style="color:var(--text-muted)">${esc(r.repo)}</td>
       <td class="mono" style="font-weight:600;">${r.merged_prs}</td>
       <td class="mono">${r.reviews_given}</td>
       <td>${r.months_active} mo</td>
-      <td><span class="pill pill-indigo">${r.eligible_for}</span></td>
+      <td><span class="pill pill-indigo">${esc(r.eligible_for)}</span></td>
       <td style="color:var(--text-muted)">${relativeTime(r.recorded_at)}</td>
     </tr>
   `).join('');
@@ -1187,8 +1197,8 @@ async function loadStale() {
     <tr>
       <td class="mono" style="color:var(--text-muted)">${relativeTime(r.occurred_at)}</td>
       <td>${actionPill(r.action)}</td>
-      <td style="font-weight:500">${r.repo}</td>
-      <td class="mono"><span class="copyable" data-copy="#${r.issue_number}">#${r.issue_number}</span></td>
+      <td style="font-weight:500">${esc(r.repo)}</td>
+      <td class="mono"><span class="copyable" data-copy="#${esc(r.issue_number)}">#${esc(r.issue_number)}</span></td>
       <td class="mono">${r.days_inactive} days</td>
     </tr>
   `).join('');
@@ -1224,11 +1234,11 @@ function statusPill(label, score) {
 
 function actionPill(action) {
   if (!action) return '<span class="pill pill-neutral">unknown</span>';
-  if (action.includes('health') || action.includes('scored')) return `<span class="pill pill-indigo">${action}</span>`;
-  if (action.includes('welcomed') || action.includes('assigned')) return `<span class="pill pill-emerald">${action}</span>`;
-  if (action.includes('stale') || action.includes('unassigned')) return `<span class="pill pill-amber">${action}</span>`;
-  if (action.includes('closed')) return `<span class="pill pill-rose">${action}</span>`;
-  return `<span class="pill pill-neutral">${action}</span>`;
+  if (action.includes('health') || action.includes('scored')) return `<span class="pill pill-indigo">${esc(action)}</span>`;
+  if (action.includes('welcomed') || action.includes('assigned')) return `<span class="pill pill-emerald">${esc(action)}</span>`;
+  if (action.includes('stale') || action.includes('unassigned')) return `<span class="pill pill-amber">${esc(action)}</span>`;
+  if (action.includes('closed')) return `<span class="pill pill-rose">${esc(action)}</span>`;
+  return `<span class="pill pill-neutral">${esc(action)}</span>`;
 }
 
 async function populateRepoDropdowns() {
@@ -1241,7 +1251,7 @@ async function populateRepoDropdowns() {
   if (accounts && accounts.length) {
     userAccounts = accounts;
     accounts.forEach((acc) => {
-      oSel.innerHTML += `<option value="${acc.org_login}">${acc.org_login}</option>`;
+      oSel.innerHTML += `<option value="${esc(acc.org_login)}">${esc(acc.org_login)}</option>`;
     });
     onOwnerChange();
   } else {
@@ -1258,7 +1268,7 @@ function onOwnerChange() {
   const account = userAccounts.find(a => a.org_login === selectedOrg);
   if (account && account.repos && account.repos.length) {
     account.repos.forEach(repoName => {
-      rSel.innerHTML += `<option value="${repoName}">${repoName}</option>`;
+      rSel.innerHTML += `<option value="${esc(repoName)}">${esc(repoName)}</option>`;
     });
   } else {
     rSel.innerHTML = `<option value="">All Repositories</option>`;
