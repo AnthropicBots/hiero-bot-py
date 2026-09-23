@@ -128,7 +128,7 @@ class ReviewerAssignmentWorkflow:
             available_reviewers = [
                 reviewer
                 for reviewer in available_reviewers
-                if reviewer.login != author
+                if reviewer.login.lower() != author.lower()
             ]
 
         if (
@@ -141,7 +141,7 @@ class ReviewerAssignmentWorkflow:
                 available_reviewers = [
                     reviewer
                     for reviewer in available_reviewers
-                    if reviewer.login != author
+                    if reviewer.login.lower() != author.lower()
                 ]
 
         if not available_reviewers:
