@@ -26,7 +26,12 @@ class ScanSummary:
     repos_skipped: int = 0
     repos_failed: int = 0
     totals: dict[str, int] = field(
-        default_factory=lambda: {"stale_marked": 0, "closed": 0, "unassigned": 0}
+        default_factory=lambda: {
+            "stale_marked": 0,
+            "closed": 0,
+            "unassigned": 0,
+            "errors": 0,
+        }
     )
 
     def add(self, counts: dict[str, int]) -> None:

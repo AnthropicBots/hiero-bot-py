@@ -13,7 +13,7 @@ import httpx
 import yaml
 from pydantic import ValidationError
 
-from app.config.schema import RepoConfig
+from app.config.schema import RepoConfig, find_unknown_keys
 from app.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -151,7 +151,7 @@ class ConfigLoader:
             )
 
         try:
-            return RepoConfig.model_validate(data)
+            config = RepoConfig.model_validate(data)
         except ValidationError as exc:
             detail = "; ".join(
                 f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
@@ -159,6 +159,17 @@ class ConfigLoader:
             )
             log.error("Invalid config for %s: %s", slug, detail)
             raise ConfigInvalid(slug, detail) from exc
+
+        # Unknown keys are ignored, not fatal (existing configs keep working),
+        # but a typo silently leaves the defaults in force, so say so.
+        unknown = find_unknown_keys(data, RepoConfig)
+        if unknown:
+            log.warning(
+                "Ignoring unknown keys in the config for %s: %s",
+                slug,
+                ", ".join(unknown),
+            )
+        return config
 
     # ── Cache management ──────────────────────────────────────
 

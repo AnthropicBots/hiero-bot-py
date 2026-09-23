@@ -327,3 +327,42 @@ async def test_no_label_removal_when_auto_label_disabled(mock_gh, ctx):
 
     mock_gh.add_label.assert_not_awaited()
     mock_gh.remove_label.assert_not_awaited()
+
+
+def _only_the_branch_gate(cfg, pattern):
+    cfg.require_linked_issue = False
+    cfg.require_tests = False
+    cfg.require_dco = False
+    cfg.require_gpg_signature = False
+    cfg.max_files_changed = None
+    cfg.require_changelog_entry = False
+    cfg.allowed_branch_pattern = pattern
+
+
+@pytest.mark.asyncio
+async def test_branch_pattern_gate_passes_and_fails_as_expected(mock_gh, ctx):
+    _only_the_branch_gate(ctx["config"].workflows.pull_request.quality_gates, "^(feat|fix)/")
+    wf = PullRequestWorkflow(mock_gh)
+
+    good = await wf._run_quality_checks(ctx, make_pr())  # branch is "fix/..."
+    bad_pr = make_pr()
+    bad_pr["head"]["ref"] = "docs/readme"
+    bad = await wf._run_quality_checks(ctx, bad_pr)
+
+    assert good[0].name == "Branch Name" and good[0].passed is True
+    assert bad[0].name == "Branch Name" and bad[0].passed is False
+
+
+@pytest.mark.asyncio
+async def test_catastrophic_branch_pattern_cannot_stall_the_gate(mock_gh, ctx):
+    from time import perf_counter
+
+    _only_the_branch_gate(ctx["config"].workflows.pull_request.quality_gates, r"(a|aa)+$")
+    pr = make_pr()
+    pr["head"]["ref"] = "a" * 45 + "!"
+
+    started = perf_counter()
+    checks = await PullRequestWorkflow(mock_gh)._run_quality_checks(ctx, pr)
+
+    assert perf_counter() - started < 1.0
+    assert checks[0].name == "Branch Name" and checks[0].passed is False

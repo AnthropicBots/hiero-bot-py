@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.utils.logger import get_logger
+from app.utils.safe_regex import validate_pattern
+
+log = get_logger("config.schema")
 
 RoleLevel = Literal["contributor", "junior-committer", "committer", "maintainer"]
 FocusArea = Literal["security", "performance", "style", "logic", "tests"]
@@ -86,6 +91,13 @@ class QualityGatesConfig(BaseModel):
     require_linked_issue: bool = False
     allowed_branch_pattern: str | None = None
 
+    @field_validator("allowed_branch_pattern")
+    @classmethod
+    def _branch_pattern_must_be_usable(cls, pattern: str | None) -> str | None:
+        # Matched against branch names chosen by PR authors on the event loop
+        # shared by every repository, so reject what cannot be matched safely.
+        return None if pattern is None else validate_pattern(pattern)
+
 
 class PullRequestConfig(BaseModel):
     enabled: bool = True
@@ -133,7 +145,9 @@ class LabelEscalationRule(BaseModel):
 
 
 class IssueManagementConfig(BaseModel):
-    enabled: bool = True
+    # Opt-in: this workflow closes issues and unassigns people, so a config file
+    # that never mentions it must not switch it on.
+    enabled: bool = False
     stale_issue_days: int = Field(default=60, gt=0)
     close_stale_after_days: int = Field(default=7, gt=0)
     stale_label: str = "stale"
@@ -144,6 +158,17 @@ class IssueManagementConfig(BaseModel):
 
 
 #  PR Health 
+
+# The signals the health score is computed from (see prhealth._compute_signals).
+HEALTH_SIGNALS = frozenset({
+    "has_tests",
+    "has_linked_issue",
+    "has_description",
+    "dco_signed",
+    "review_count",
+    "small_diff",
+})
+
 
 class PRHealthConfig(BaseModel):          # NEW workflow
     enabled: bool = True
@@ -157,6 +182,29 @@ class PRHealthConfig(BaseModel):          # NEW workflow
     }
     comment_threshold: int = Field(default=60, ge=0, le=100)   # only comment if score < threshold
     label_healthy_above: int = Field(default=75, ge=0, le=100)
+
+    @field_validator("score_weights")
+    @classmethod
+    def _normalise_score_weights(cls, weights: dict[str, float]) -> dict[str, float]:
+        """Keep known signals only and scale the weights so they sum to 1.
+
+        Without this, overriding a single weight capped the best possible score
+        (``{has_tests: 0.5}`` topped out at 50) and a typo'd key scored nothing.
+        """
+        unknown = sorted(set(weights) - HEALTH_SIGNALS)
+        if unknown:
+            log.warning(
+                "Ignoring unknown pr_health.score_weights keys: %s", ", ".join(unknown)
+            )
+        known = {name: w for name, w in weights.items() if name in HEALTH_SIGNALS}
+        if any(w < 0 for w in known.values()):
+            raise ValueError("score_weights must not be negative")
+        total = sum(known.values())
+        if total <= 0:
+            raise ValueError(
+                "score_weights needs at least one known signal with a positive weight"
+            )
+        return {name: w / total for name, w in known.items()}
 
 class ReviewerAssignmentConfig(BaseModel):
     enabled: bool = False
@@ -213,3 +261,43 @@ class RepoConfig(BaseModel):
         if im.close_stale_after_days >= im.stale_issue_days:
             raise ValueError("close_stale_after_days must be less than stale_issue_days")
         return self
+
+
+#  Unknown-key detection
+
+def _model_types(annotation: object) -> list[type[BaseModel]]:
+    """Every pydantic model mentioned in a type annotation (Optional, list, ...)."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return [annotation]
+    found: list[type[BaseModel]] = []
+    for arg in get_args(annotation):
+        found.extend(_model_types(arg))
+    return found
+
+
+def find_unknown_keys(
+    data: object, model: type[BaseModel], prefix: str = ""
+) -> list[str]:
+    """Paths of keys in ``data`` that ``model`` (and its nested models) don't define.
+
+    Pydantic ignores unknown keys, so a typo such as ``quality_gate:`` silently
+    leaves the defaults in force. Callers report these so the owner can fix them.
+    """
+    unknown: list[str] = []
+    if not isinstance(data, dict):
+        return unknown
+    for key, value in data.items():
+        path = f"{prefix}{key}"
+        field = model.model_fields.get(key)
+        if field is None:
+            unknown.append(path)
+            continue
+        nested = _model_types(field.annotation)
+        if not nested:
+            continue
+        if isinstance(value, dict):
+            unknown.extend(find_unknown_keys(value, nested[0], f"{path}."))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                unknown.extend(find_unknown_keys(item, nested[0], f"{path}[{index}]."))
+    return unknown

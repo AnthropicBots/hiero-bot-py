@@ -193,6 +193,8 @@ During the rotation window, both the current and previous secrets are accepted.
 
 Add `.github/hiero-bot.yml` to any repo where the app is installed. Full reference: [`templates/hiero-bot.yml`](templates/hiero-bot.yml). The bot is completely silent if no config file exists — nothing runs by accident.
 
+**Defaults.** Once a config file exists, onboarding, PR quality gates, PR health scoring and contributor progression are on unless you set `enabled: false`. **Issue management (stale scan, auto-close, auto-unassign) and reviewer assignment are off** and must be enabled explicitly, for example `workflows.issue_management.enabled: true`.
+
 ### Environment variables
 
 | Variable | Required | Description |
