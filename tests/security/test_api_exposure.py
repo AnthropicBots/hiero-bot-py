@@ -359,6 +359,7 @@ async def test_openapi_available_in_non_production(unauthenticated_client):
 async def test_openapi_disabled_in_production():
     from cryptography.fernet import Fernet
     from fastapi import FastAPI
+
     from app.utils.settings import Settings
 
     prod_settings = Settings(

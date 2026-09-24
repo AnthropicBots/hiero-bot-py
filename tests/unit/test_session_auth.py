@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
+
 from app.auth.dependencies import get_current_user_optional
 from app.auth.session import (
     SESSION_COOKIE_NAME,
@@ -12,9 +16,6 @@ from app.auth.session import (
     unsign_session_id,
 )
 from app.db.models import User
-import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.requests import Request
 
 
 def test_token_encryption_roundtrip():
