@@ -92,7 +92,7 @@ async def test_excludes_pr_author(mock_gh, ctx):
     mock_gh.get_file_content = AsyncMock(
         return_value=reviewers_file(
             [
-                {"login": "alice", "available": True},
+                {"login": "Alice", "available": True},
                 {"login": "bob", "available": True},
             ]
         )
