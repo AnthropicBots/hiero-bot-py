@@ -176,6 +176,33 @@ async def test_dispatch_pull_request_draft_is_skipped(ctx):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_pull_request_ready_for_review_calls_pr_reviewer_and_health(ctx):
+    router, _gh, _ = make_router()
+
+    with (
+        patch("app.github.webhooks.PullRequestWorkflow") as mock_pr,
+        patch("app.github.webhooks.ReviewerAssignmentWorkflow") as mock_reviewer,
+        patch("app.github.webhooks.PRHealthWorkflow") as mock_health,
+    ):
+        mock_pr.return_value.handle_pr_opened = AsyncMock()
+        mock_reviewer.return_value.handle_pr_opened = AsyncMock()
+        mock_health.return_value.score_pr = AsyncMock()
+
+        await router._dispatch(
+            "pull_request",
+            {
+                "action": "ready_for_review",
+                "pull_request": {"draft": False},
+            },
+            ctx,
+        )
+
+        mock_pr.return_value.handle_pr_opened.assert_awaited_once()
+        mock_reviewer.return_value.handle_pr_opened.assert_awaited_once()
+        mock_health.return_value.score_pr.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_pull_request_opened_calls_pr_reviewer_and_health(ctx):
     router, _gh, _ = make_router()
 

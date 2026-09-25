@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
-from app.workflows.reviewerassignment import ReviewerAssignmentWorkflow
+from app.workflows.reviewerassignment import Reviewer, ReviewerAssignmentWorkflow
 
 
 def make_pr(number=1, author="alice"):
@@ -105,3 +105,107 @@ async def test_excludes_pr_author(mock_gh, ctx):
     reviewers = mock_gh.request_reviewers.call_args.args[3]
 
     assert reviewers == ["bob"]
+
+
+def test_round_robin_prefers_reviewer_with_fewer_assignments():
+    reviewers = [
+        Reviewer(login="alice"),
+        Reviewer(login="bob"),
+    ]
+
+    result = ReviewerAssignmentWorkflow._select_reviewers(
+        reviewers,
+        reviewers_count=1,
+        strategy="round-robin",
+        assignment_counts={"alice": 3, "bob": 1},
+    )
+
+    assert result == ["bob"]
+
+
+def test_round_robin_rotates_by_assignment_count():
+    reviewers = [
+        Reviewer(login="alice"),
+        Reviewer(login="bob"),
+    ]
+
+    assignment_counts = {}
+
+    first = ReviewerAssignmentWorkflow._select_reviewers(
+        reviewers,
+        reviewers_count=1,
+        strategy="round-robin",
+        assignment_counts=assignment_counts,
+    )
+    assignment_counts[first[0]] = assignment_counts.get(first[0], 0) + 1
+
+    second = ReviewerAssignmentWorkflow._select_reviewers(
+        reviewers,
+        reviewers_count=1,
+        strategy="round-robin",
+        assignment_counts=assignment_counts,
+    )
+    assignment_counts[second[0]] = assignment_counts.get(second[0], 0) + 1
+
+    third = ReviewerAssignmentWorkflow._select_reviewers(
+        reviewers,
+        reviewers_count=1,
+        strategy="round-robin",
+        assignment_counts=assignment_counts,
+    )
+
+    assert first == ["alice"]
+    assert second == ["bob"]
+    assert third == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_get_assignment_counts_reads_reviewer_assignment_audits(db):
+    from app.db.models import AuditLog
+
+    db.add_all(
+        [
+            AuditLog(
+                action="pr.reviewer_assigned",
+                owner="hiero",
+                repo="sdk-js",
+                reason="Automatically assigned reviewers",
+                metadata_json={"reviewers": ["alice", "bob"]},
+            ),
+            AuditLog(
+                action="pr.reviewer_assigned",
+                owner="hiero",
+                repo="sdk-js",
+                reason="Automatically assigned reviewers",
+                metadata_json={"reviewers": ["Alice"]},
+            ),
+            AuditLog(
+                action="pr.reviewer_assigned",
+                owner="other-owner",
+                repo="sdk-js",
+                reason="Automatically assigned reviewers",
+                metadata_json={"reviewers": ["charlie"]},
+            ),
+            AuditLog(
+                action="pr.reviewed",
+                owner="hiero",
+                repo="sdk-js",
+                reason="Review completed",
+                metadata_json={"reviewers": ["charlie"]},
+            ),
+        ]
+    )
+    await db.commit()
+
+    wf = ReviewerAssignmentWorkflow(AsyncMock())
+
+    counts = await wf._get_assignment_counts(
+        db,
+        owner="hiero",
+        repo="sdk-js",
+    )
+
+    assert counts == {
+        "alice": 2,
+        "bob": 1,
+    }

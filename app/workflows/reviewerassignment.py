@@ -5,8 +5,10 @@ import random
 
 import yaml
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import select
 
 from app.config.schema import ReviewerAssignmentStrategy
+from app.db.models import AuditLog
 from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
@@ -65,9 +67,9 @@ class ReviewerAssignmentWorkflow:
     def _select_reviewers(
         reviewers: list[Reviewer],
         *,
-        pr_number: int,
         reviewers_count: int,
         strategy: ReviewerAssignmentStrategy,
+        assignment_counts: dict[str, int] | None = None,
     ) -> list[str]:
         """Select reviewers using the configured strategy."""
         if not reviewers:
@@ -81,14 +83,47 @@ class ReviewerAssignmentWorkflow:
                 for reviewer in random.sample(reviewers, reviewers_count)
             ]
 
-        start = pr_number % len(reviewers)
-
-        ordered = reviewers[start:] + reviewers[:start]
+        counts = assignment_counts or {}
+        ordered = sorted(
+            reviewers,
+            key=lambda reviewer: (
+                counts.get(reviewer.login.lower(), 0),
+                reviewer.login.lower(),
+            ),
+        )
 
         return [
             reviewer.login
             for reviewer in ordered[:reviewers_count]
         ]
+
+    async def _get_assignment_counts(
+        self,
+        db,
+        *,
+        owner: str,
+        repo: str,
+    ) -> dict[str, int]:
+        """Return reviewer assignment counts for this repository."""
+        result = await db.execute(
+            select(AuditLog.metadata_json).where(
+                AuditLog.action == "pr.reviewer_assigned",
+                AuditLog.owner == owner,
+                AuditLog.repo == repo,
+            )
+        )
+
+        counts: dict[str, int] = {}
+
+        for metadata in result.scalars():
+            if not metadata:
+                continue
+
+            for reviewer in metadata.get("reviewers", []):
+                key = reviewer.lower()
+                counts[key] = counts.get(key, 0) + 1
+
+        return counts
 
     async def handle_pr_opened(self, ctx: dict, payload: dict) -> None:
         cfg = ctx["config"].workflows.reviewer_assignment
@@ -151,11 +186,17 @@ class ReviewerAssignmentWorkflow:
             )
             return
 
+        assignment_counts = await self._get_assignment_counts(
+            db,
+            owner=owner,
+            repo=repo,
+        )
+
         selected_reviewers = self._select_reviewers(
             available_reviewers,
-            pr_number=pr_number,
             reviewers_count=cfg.reviewers_count,
             strategy=cfg.strategy,
+            assignment_counts=assignment_counts,
         )
 
         if not selected_reviewers:

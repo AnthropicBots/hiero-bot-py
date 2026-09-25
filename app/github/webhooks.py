@@ -183,17 +183,20 @@ class WebhookRouter:
         wf_prog = ProgressionWorkflow(self._gh)
 
         pr = payload.get("pull_request", {})
-        if pr.get("draft"):
+        if not pr:
             return
 
-        if action in ("opened", "synchronize", "reopened"):
+        if action == "opened" and pr.get("draft"):
+            return
+
+        if action in ("opened", "ready_for_review", "synchronize", "reopened"):
             # Each step is isolated: one failing (e.g. GitHub rejecting a reviewer
             # request with 422) must not silently skip the steps after it.
             await self._run_step(
                 "quality gates", wf_pr.handle_pr_opened(ctx, payload, action), ctx
             )
 
-            if action == "opened":
+            if action in ("opened", "ready_for_review"):
                 await self._run_step(
                     "reviewer assignment", wf_reviewer.handle_pr_opened(ctx, payload), ctx
                 )
