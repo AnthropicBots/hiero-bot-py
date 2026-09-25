@@ -450,9 +450,8 @@ async def test_oauth_callback_handles_token_exchange_failure(
         )
 
     assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == (
-        "GitHub OAuth error: token exchange failed"
-    )
+    assert exc_info.value.detail == "GitHub OAuth error"
+    assert "token exchange failed" not in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -877,5 +876,26 @@ async def test_oauth_logout_supports_post_route(
             and "Max-Age=0" in cookie
             for cookie in response.headers.get_list("set-cookie")
         )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.mark.asyncio
+async def test_oauth_logout_rejects_get_route(
+    db: AsyncSession,
+):
+    app.dependency_overrides[get_db] = lambda: db
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/auth/logout",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 405
     finally:
         app.dependency_overrides.pop(get_db, None)

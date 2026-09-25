@@ -66,6 +66,7 @@ app = FastAPI(
     description="Automated maintainer workflows for Hiero repositories",
     version="2.0.0",
     lifespan=lifespan,
+    openapi_url=None if settings.is_production else "/openapi.json",
     docs_url=None if settings.is_production else "/docs",
     redoc_url=None if settings.is_production else "/redoc",
 )
@@ -183,6 +184,5 @@ async def healthz(db: AsyncSession = Depends(get_db)):
             "status": "ok" if db_status == "ok" else "degraded",
             "database": db_status,
             "version": "2.0.0",
-            "environment": settings.environment,
         },
     )

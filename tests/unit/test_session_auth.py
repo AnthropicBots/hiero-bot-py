@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
+
+from app.auth.dependencies import get_current_user_optional
 from app.auth.session import (
+    SESSION_COOKIE_NAME,
+    create_db_session,
     decrypt_token,
     encrypt_token,
     sign_session_id,
     unsign_session_id,
 )
+from app.db.models import User
 
 
 def test_token_encryption_roundtrip():
@@ -33,4 +41,47 @@ def test_signed_session_token_lifecycle():
 def test_invalid_signed_session_token():
     assert unsign_session_id("invalid.session.token") is None
     assert unsign_session_id("") is None
+
+
+@pytest.mark.asyncio
+async def test_signed_session_cookie_not_accepted_as_bearer(db: AsyncSession):
+    user = User(
+        github_user_id=123456,
+        github_login="session-bearer-user",
+        github_email="session-bearer@example.com",
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    _, cookie_val = await create_db_session(db, user.id)
+
+    # 1. Supply as Bearer token without cookie — must return None
+    bearer_req = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [
+                (b"authorization", f"Bearer {cookie_val}".encode("latin-1")),
+            ],
+        }
+    )
+    result_from_bearer = await get_current_user_optional(bearer_req, db)
+    assert result_from_bearer is None
+
+    # 2. Supply as session cookie — must authenticate successfully
+    cookie_req = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [
+                (b"cookie", f"{SESSION_COOKIE_NAME}={cookie_val}".encode("latin-1")),
+            ],
+        }
+    )
+    result_from_cookie = await get_current_user_optional(cookie_req, db)
+    assert result_from_cookie is not None
+    assert result_from_cookie.id == user.id
 

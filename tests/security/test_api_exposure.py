@@ -136,6 +136,20 @@ async def test_api_rejects_invalid_bearer_token(unauthenticated_client):
 
 
 @pytest.mark.asyncio
+async def test_api_rejects_signed_session_cookie_as_bearer_token(
+    api_db, api_user, unauthenticated_client
+):
+    _, cookie_value = await create_db_session(api_db, api_user.id)
+    response = await unauthenticated_client.get(
+        "/api/v1/audit",
+        headers={"Authorization": f"Bearer {cookie_value}"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authentication required"
+
+
+@pytest.mark.asyncio
 async def test_api_accepts_valid_session(client):
     response = await client.get("/api/v1/audit")
 
@@ -332,3 +346,43 @@ async def test_health_endpoint_exposes_no_configuration(client):
     ).json()
 
     assert set(payload) == {"status", "service"}
+
+
+@pytest.mark.asyncio
+async def test_openapi_available_in_non_production(unauthenticated_client):
+    response = await unauthenticated_client.get("/openapi.json")
+    assert response.status_code == 200
+    assert "openapi" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_openapi_disabled_in_production():
+    from cryptography.fernet import Fernet
+    from fastapi import FastAPI
+
+    from app.utils.settings import Settings
+
+    prod_settings = Settings(
+        _env_file=None,
+        environment="production",
+        github_app_id="123456",
+        github_private_key="test-private-key",
+        session_secret_key="session-secret-key-that-is-long-enough",
+        token_encryption_key=Fernet.generate_key().decode(),
+        github_webhook_secret="sec",
+    )
+    assert prod_settings.is_production is True
+
+    prod_app = FastAPI(
+        openapi_url=None if prod_settings.is_production else "/openapi.json",
+        docs_url=None if prod_settings.is_production else "/docs",
+        redoc_url=None if prod_settings.is_production else "/redoc",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=prod_app),
+        base_url="http://test",
+    ) as c:
+        assert (await c.get("/openapi.json")).status_code == 404
+        assert (await c.get("/docs")).status_code == 404
+        assert (await c.get("/redoc")).status_code == 404

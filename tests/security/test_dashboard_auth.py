@@ -110,3 +110,27 @@ async def test_real_dashboard_rejects_invalid_bearer_session(
 
     assert response.status_code == 200
     assert "login" in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_real_dashboard_rejects_valid_signed_session_as_bearer(
+    dashboard_db, unauthenticated_dashboard_client
+):
+    user = User(
+        github_user_id=987654321,
+        github_login="bearer-test-maintainer",
+        github_email="maintainer@example.com",
+    )
+    dashboard_db.add(user)
+    await dashboard_db.commit()
+    await dashboard_db.refresh(user)
+
+    _, cookie_value = await create_db_session(dashboard_db, user.id)
+
+    response = await unauthenticated_dashboard_client.get(
+        "/",
+        headers={"Authorization": f"Bearer {cookie_value}"},
+    )
+
+    assert response.status_code == 200
+    assert "login" in response.text.lower()

@@ -151,7 +151,7 @@ async def github_oauth_callback(
         log.error("Failed to exchange OAuth code: %s", e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"GitHub OAuth error: {e}",
+            detail="GitHub OAuth error",
         )
 
     access_token = token_data.get("access_token")
@@ -238,7 +238,6 @@ async def github_oauth_callback(
     return response
 
 
-@router.get("/logout")
 @router.post("/logout")
 async def github_oauth_logout(
     request: Request,
