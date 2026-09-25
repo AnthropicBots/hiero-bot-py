@@ -38,6 +38,7 @@ def mock_gh():
     gh.remove_assignees = AsyncMock()
     gh.close_issue = AsyncMock()
     gh.list_issues = AsyncMock(return_value=[])
+    gh.list_labels = AsyncMock(return_value=[])
     gh.list_pr_files = AsyncMock(return_value=[])
     gh.list_pr_commits = AsyncMock(return_value=[])
     gh.list_pr_reviews = AsyncMock(return_value=[])
