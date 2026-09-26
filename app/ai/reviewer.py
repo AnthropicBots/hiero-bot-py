@@ -26,6 +26,7 @@ def _unavailable() -> dict[str, Any]:
         "verdict": "comment",
         "score": 50,
         "comments": [],
+        "failed": True,
     }
 
 
@@ -214,8 +215,20 @@ Respond with JSON only:
             match = re.search(r"\{.*\}", clean, re.DOTALL)
             clean = match.group(0) if match else clean
             parsed = json.loads(clean)
+            if (
+                not isinstance(parsed, dict)
+                or not isinstance(parsed.get("summary"), str)
+                or not parsed["summary"].strip()
+                or parsed.get("verdict") not in ("approve", "request_changes", "comment")
+                or isinstance(parsed.get("score"), bool)
+                or not isinstance(parsed.get("score"), int)
+                or not isinstance(parsed.get("comments"), list)
+                or not all(isinstance(c, dict) for c in parsed["comments"])
+            ):
+                raise ValueError("Incomplete AI review response")
             return {
                 "summary": str(parsed.get("summary", "")),
+                "failed": False,
                 "verdict": (
                     parsed.get("verdict", "comment")
                     if parsed.get("verdict")
@@ -246,6 +259,7 @@ Respond with JSON only:
                 "verdict": "comment",
                 "score": 50,
                 "comments": [],
+                "failed": True,
             }
 
     async def close(self) -> None:

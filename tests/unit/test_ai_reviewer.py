@@ -345,3 +345,52 @@ def test_parse_filters_empty_comments():
     )
     assert len(result["comments"]) == 1
     assert result["comments"][0]["body"] == "valid comment"
+
+# ── Failure marking (issue #124) ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_backend_failure_marks_result_as_failed():
+    backend = StubBackend(BackendError("network"))
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_unparseable_response_marks_result_as_failed():
+    backend = StubBackend("this is not json at all")
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_successful_review_is_not_marked_failed():
+    result = await AIReviewer(StubBackend(review_json())).review(
+        CFG, "PR", "", DIFFS
+    )
+
+    assert result["failed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"summary": "ok", "verdict": "approve", "comments": []},
+        {"summary": "ok", "verdict": "approve", "score": "50", "comments": []},
+        {"summary": "ok", "verdict": "approve", "score": 80},
+    ],
+)
+async def test_incomplete_review_is_marked_failed(response):
+    result = await AIReviewer(StubBackend(json.dumps(response))).review(
+        CFG, "PR", "", DIFFS
+    )
+
+    assert result["failed"] is True
+    assert result["comments"] == []
+    assert result["verdict"] == "comment"

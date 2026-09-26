@@ -19,6 +19,7 @@ VALID_ACTIONS = {
     "issue.labeled",
     "issue.stale_marked",
     "pr.reviewed",
+    "pr.review_failed",
     "pr.health_scored",
     "pr.labeled",
     "pr.closed_stale",

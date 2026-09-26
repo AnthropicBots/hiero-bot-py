@@ -366,3 +366,154 @@ async def test_catastrophic_branch_pattern_cannot_stall_the_gate(mock_gh, ctx):
 
     assert perf_counter() - started < 1.0
     assert checks[0].name == "Branch Name" and checks[0].passed is False
+
+
+# ── AI review failure handling (issue #124) ───────────────────
+
+import httpx
+from sqlalchemy import select
+
+from app.db.models import AuditLog
+
+
+def _http_status_error(code):
+    req = httpx.Request("POST", "https://api.github.com/x")
+    resp = httpx.Response(code, request=req)
+    return httpx.HTTPStatusError("error", request=req, response=resp)
+
+
+@pytest.mark.asyncio
+async def test_failed_ai_review_posts_notice_without_score_and_audits_failure(
+    mock_gh,
+    ctx,
+):
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=[{"filename": "app/example.py", "patch": "+x = 1"}]
+    )
+    mock_gh.create_pr_review_comment = AsyncMock()
+
+    wf = PullRequestWorkflow(mock_gh)
+    wf._ai.review = AsyncMock(
+        return_value={
+            "summary": "_AI review unavailable at this time._",
+            "verdict": "comment",
+            "score": 50,
+            "comments": [],
+            "failed": True,
+        }
+    )
+
+    await wf._run_ai_review(ctx, make_pr())
+
+    body = mock_gh.post_comment.await_args.args[3]
+    assert "Score:" not in body
+    assert "50/100" not in body
+    assert "_AI review unavailable at this time._" in body
+    mock_gh.create_pr_review_comment.assert_not_awaited()
+
+    rows = (await ctx["db"].execute(select(AuditLog))).scalars().all()
+    assert [r.action for r in rows] == ["pr.review_failed"]
+
+
+@pytest.mark.asyncio
+async def test_one_bad_inline_comment_does_not_abort_rest_or_audit(
+    mock_gh,
+    ctx,
+):
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=[{"filename": "app/example.py", "patch": "+x = 1"}]
+    )
+    mock_gh.create_pr_review_comment = AsyncMock(
+        side_effect=[_http_status_error(422), None]
+    )
+
+    wf = PullRequestWorkflow(mock_gh)
+    wf._ai.review = AsyncMock(
+        return_value={
+            "summary": "Looks fine overall.",
+            "verdict": "comment",
+            "score": 70,
+            "comments": [
+                {
+                    "path": "app/example.py",
+                    "line": 9999,
+                    "body": "Line outside the diff.",
+                    "severity": "info",
+                },
+                {
+                    "path": "app/example.py",
+                    "line": 1,
+                    "body": "Valid comment.",
+                    "severity": "warning",
+                },
+            ],
+            "failed": False,
+        }
+    )
+
+    await wf._run_ai_review(ctx, make_pr())
+
+    assert mock_gh.create_pr_review_comment.await_count == 2
+
+    rows = (await ctx["db"].execute(select(AuditLog))).scalars().all()
+    assert [r.action for r in rows] == ["pr.reviewed"]
+    assert rows[0].metadata_json["score"] == 70
+
+
+@pytest.mark.asyncio
+async def test_inline_comment_422_does_not_skip_recommendations_or_commit(
+    mock_gh, ctx
+):
+    cfg = ctx["config"].workflows.pull_request
+    cfg.ai_review.enabled = True
+    cfg.reviewer_recommendation = True
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=[{"filename": "app/example.py", "patch": "+x = 1"}]
+    )
+    mock_gh.create_pr_review_comment = AsyncMock(
+        side_effect=[_http_status_error(422), None]
+    )
+
+    wf = PullRequestWorkflow(mock_gh)
+    wf._ai.review = AsyncMock(
+        return_value={
+            "summary": "Found two issues.",
+            "verdict": "comment",
+            "score": 70,
+            "comments": [
+                {"path": "app/example.py", "line": 9999, "body": "Bad line.", "severity": "info"},
+                {"path": "app/example.py", "line": 1, "body": "Valid line.", "severity": "warning"},
+            ],
+            "failed": False,
+        }
+    )
+    wf._recommend_reviewers = AsyncMock()
+    ctx["db"].commit = AsyncMock(wraps=ctx["db"].commit)
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    assert mock_gh.create_pr_review_comment.await_count == 2
+    wf._recommend_reviewers.assert_awaited_once_with(ctx, make_pr())
+    ctx["db"].commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_ai_response_posts_no_score(mock_gh, ctx):
+    from app.ai.reviewer import AIReviewer
+
+    ctx["config"].workflows.pull_request.ai_review.enabled = True
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=[{"filename": "app/example.py", "patch": "+x = 1"}]
+    )
+    backend = AsyncMock()
+    backend.complete.return_value = "{}"
+    wf = PullRequestWorkflow(mock_gh)
+    wf._ai = AIReviewer(backend)
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    bodies = [call.args[3] for call in mock_gh.post_comment.await_args_list]
+    assert all("Score:" not in body and "50/100" not in body for body in bodies)
+    rows = (await ctx["db"].execute(select(AuditLog))).scalars().all()
+    assert "pr.review_failed" in [row.action for row in rows]
+    assert "pr.reviewed" not in [row.action for row in rows]
