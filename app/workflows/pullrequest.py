@@ -360,6 +360,34 @@ class PullRequestWorkflow:
             cfg, pr.get("title", ""), pr.get("body") or "", diffs, file_contents
         )
 
+        if result.get("failed"):
+            # A review that never happened must not surface as an invented
+            # score. Post a plain notice and audit it as a failure instead of
+            # `pr.reviewed`, so dashboards don't count it (issue #124).
+            body = (
+                f"## 🤖 AI Code Review\n\n"
+                f"{result['summary']}\n\n"
+                f"---\n_Automated AI review — a human maintainer will also review._"
+            )
+            await self._gh.post_comment(
+                owner,
+                repo,
+                pr_number,
+                body,
+                inst,
+            )
+            await audit.record(
+                ctx["db"],
+                action="pr.review_failed",
+                owner=owner,
+                repo=repo,
+                target_number=pr_number,
+                target_login=pr["user"]["login"],
+                reason="AI review failed",
+                metadata={"summary": result["summary"][:200]},
+            )
+            return
+
         emoji = (
             "🟢" if result["score"] >= 80 else "🟡" if result["score"] >= 60 else "🔴"
         )
@@ -377,28 +405,48 @@ class PullRequestWorkflow:
             inst,
         )
 
-        for comment in result.get("comments", [])[: cfg.max_comments]:
-            await self._gh.create_pr_review_comment(
-                owner,
-                repo,
-                pr_number,
-                f"{_sev_emoji(comment['severity'])} {comment['body']}",
-                comment["path"],
-                comment["line"],
-                sha,
-                inst,
+        # One bad inline comment (GitHub answers 422 when the line is not part
+        # of the diff) must not abort the remaining comments or skip the audit
+        # record, so each post is guarded and the audit lives in a finally
+        # (issue #124).
+        try:
+            for comment in result.get("comments", [])[: cfg.max_comments]:
+                try:
+                    await self._gh.create_pr_review_comment(
+                        owner,
+                        repo,
+                        pr_number,
+                        f"{_sev_emoji(comment['severity'])} {comment['body']}",
+                        comment["path"],
+                        comment["line"],
+                        sha,
+                        inst,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code if exc.response else exc
+                    log.warning(
+                        "Skipping inline comment on %s:%s after GitHub error %s",
+                        comment["path"],
+                        comment["line"],
+                        status,
+                    )
+                except Exception:
+                    log.exception(
+                        "Skipping inline comment on %s:%s",
+                        comment["path"],
+                        comment["line"],
+                    )
+        finally:
+            await audit.record(
+                ctx["db"],
+                action="pr.reviewed",
+                owner=owner,
+                repo=repo,
+                target_number=pr_number,
+                target_login=pr["user"]["login"],
+                reason=f"AI review score={result['score']}",
+                metadata={"score": result["score"], "verdict": result["verdict"]},
             )
-
-        await audit.record(
-            ctx["db"],
-            action="pr.reviewed",
-            owner=owner,
-            repo=repo,
-            target_number=pr_number,
-            target_login=pr["user"]["login"],
-            reason=f"AI review score={result['score']}",
-            metadata={"score": result["score"], "verdict": result["verdict"]},
-        )
 
     # ── Reviewer recommendation ───────────────────────────────
 

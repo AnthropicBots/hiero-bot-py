@@ -345,3 +345,32 @@ def test_parse_filters_empty_comments():
     )
     assert len(result["comments"]) == 1
     assert result["comments"][0]["body"] == "valid comment"
+
+# ── Failure marking (issue #124) ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_backend_failure_marks_result_as_failed():
+    backend = StubBackend(BackendError("network"))
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_unparseable_response_marks_result_as_failed():
+    backend = StubBackend("this is not json at all")
+
+    result = await AIReviewer(backend).review(CFG, "PR", "", DIFFS)
+
+    assert result["failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_successful_review_is_not_marked_failed():
+    result = await AIReviewer(StubBackend(review_json())).review(
+        CFG, "PR", "", DIFFS
+    )
+
+    assert result["failed"] is False

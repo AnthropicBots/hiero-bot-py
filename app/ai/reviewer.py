@@ -26,6 +26,7 @@ def _unavailable() -> dict[str, Any]:
         "verdict": "comment",
         "score": 50,
         "comments": [],
+        "failed": True,
     }
 
 
@@ -216,6 +217,7 @@ Respond with JSON only:
             parsed = json.loads(clean)
             return {
                 "summary": str(parsed.get("summary", "")),
+                "failed": False,
                 "verdict": (
                     parsed.get("verdict", "comment")
                     if parsed.get("verdict")
@@ -246,6 +248,7 @@ Respond with JSON only:
                 "verdict": "comment",
                 "score": 50,
                 "comments": [],
+                "failed": True,
             }
 
     async def close(self) -> None:
