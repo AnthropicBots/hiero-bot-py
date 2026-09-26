@@ -14,7 +14,7 @@ from app.db.models import AuditLog, ContributorSnapshot
 from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
-from app.workflows.onboarding import looks_like_bot
+from app.workflows.onboarding import BoundedLockRegistry, looks_like_bot
 
 log = get_logger("workflow.progression")
 
@@ -25,6 +25,7 @@ DAYS_PER_MONTH = 30
 # caps the stats are reported as a lower bound (`partial`) instead of crawling.
 MAX_REVIEWED_PRS_INSPECTED = 50
 MAX_REST_PR_PAGES = 10
+MAX_REVIEW_PAGES_PER_PR = 2
 REVIEW_FETCH_CONCURRENCY = 5
 
 # Repeated /check-eligibility calls reuse recent stats instead of recomputing.
@@ -41,6 +42,10 @@ PERMISSION_ROLES = {
     "maintain": "maintainer",
     "write": "committer",
 }
+
+
+# Serialises the eligibility-notice check per (owner, repo, login).
+_suggestion_locks = BoundedLockRegistry(max_capacity=2048)
 
 
 def clear_stats_cache() -> None:
@@ -119,39 +124,43 @@ class ProgressionWorkflow:
         if eligible_for and ROLE_ORDER.index(eligible_for) <= ROLE_ORDER.index(current_role):
             eligible_for = None
 
-        announced = False
-        if eligible_for and not await self._already_suggested(
-            db, owner, repo, login, eligible_for
-        ):
-            await self._gh.post_comment(
-                owner, repo, pr_number,
-                self._build_eligibility_notice(login, eligible_for), inst,
+        # Two merges for the same contributor can be handled concurrently. Hold
+        # the lock from the audit-log check until the audit row is committed so
+        # the second one sees the first's notice instead of posting its own.
+        async with _suggestion_locks.get((owner, repo, login.lower())).acquire():
+            announced = False
+            if eligible_for and not await self._already_suggested(
+                db, owner, repo, login, eligible_for
+            ):
+                await self._gh.post_comment(
+                    owner, repo, pr_number,
+                    self._build_eligibility_notice(login, eligible_for), inst,
+                )
+                announced = True
+
+            # Persist contributor snapshot
+            snapshot = ContributorSnapshot(
+                owner=owner,
+                repo=repo,
+                login=login,
+                merged_prs=stats["merged_prs"],
+                reviews_given=stats["reviews_given"],
+                months_active=stats["months_active"],
+                current_role=current_role,
+                eligible_for=eligible_for,
             )
-            announced = True
+            db.add(snapshot)
 
-        # Persist contributor snapshot
-        snapshot = ContributorSnapshot(
-            owner=owner,
-            repo=repo,
-            login=login,
-            merged_prs=stats["merged_prs"],
-            reviews_given=stats["reviews_given"],
-            months_active=stats["months_active"],
-            current_role=current_role,
-            eligible_for=eligible_for,
-        )
-        db.add(snapshot)
-
-        reason = f"Post-merge check: eligible_for={eligible_for}"
-        if eligible_for and not announced:
-            reason += " (already suggested)"
-        await audit.record(
-            db, action="contributor.role_suggested" if announced else "workflow.skipped",
-            owner=owner, repo=repo, target_login=login, target_number=pr_number,
-            reason=reason,
-            metadata={**stats, "current_role": current_role, "eligible_for": eligible_for},
-        )
-        await db.commit()
+            reason = f"Post-merge check: eligible_for={eligible_for}"
+            if eligible_for and not announced:
+                reason += " (already suggested)"
+            await audit.record(
+                db, action="contributor.role_suggested" if announced else "workflow.skipped",
+                owner=owner, repo=repo, target_login=login, target_number=pr_number,
+                reason=reason,
+                metadata={**stats, "current_role": current_role, "eligible_for": eligible_for},
+            )
+            await db.commit()
 
     async def check_and_report(self, ctx: dict, payload: dict) -> None:
         cfg = ctx["config"].workflows.progression
@@ -279,13 +288,15 @@ class ProgressionWorkflow:
         total = max(int(result.get("total_count") or 0), len(items))
 
         pr_numbers = [item["number"] for item in items if item.get("number")]
-        counts = await self._fetch_review_counts(owner, repo, pr_numbers, login, inst)
+        counts, incomplete = await self._fetch_review_counts(
+            owner, repo, pr_numbers, login, inst
+        )
 
         # Search says the contributor reviewed each of these PRs, so a PR whose
         # reviews could not be read still counts once.
         reviews_given = sum(1 if count is None else count for count in counts)
         uninspected = total - len(pr_numbers)
-        return reviews_given + uninspected, uninspected > 0
+        return reviews_given + uninspected, incomplete or uninspected > 0
 
     async def _collect_stats_via_rest(
         self, owner: str, repo: str, login: str, inst: int
@@ -360,29 +371,37 @@ class ProgressionWorkflow:
         pr_numbers = [
             pr["number"] for pr in prs[:MAX_REVIEWED_PRS_INSPECTED] if pr.get("number")
         ]
-        counts = await self._fetch_review_counts(owner, repo, pr_numbers, login, inst)
+        counts, incomplete = await self._fetch_review_counts(
+            owner, repo, pr_numbers, login, inst
+        )
 
         return (
             sum(count or 0 for count in counts),
-            len(prs) >= MAX_REVIEWED_PRS_INSPECTED,
+            incomplete or len(prs) >= MAX_REVIEWED_PRS_INSPECTED,
         )
 
     async def _fetch_review_counts(
         self, owner: str, repo: str, pr_numbers: list[int], login: str, inst: int
-    ) -> list[int | None]:
+    ) -> tuple[list[int | None], bool]:
         """
         Count the contributor's submitted reviews on each PR, a few at a time.
 
         A PR whose reviews could not be read yields None so the caller decides
-        how to count it.
+        how to count it. Each PR's reviews are read up to
+        MAX_REVIEW_PAGES_PER_PR pages. The flag is True when any count is
+        incomplete — a failed read or a PR with more reviews than the cap.
         """
         semaphore = asyncio.Semaphore(REVIEW_FETCH_CONCURRENCY)
+        review_cap = MAX_REVIEW_PAGES_PER_PR * 100
+        incomplete = False
 
         async def count(pr_number: int) -> int | None:
+            nonlocal incomplete
             async with semaphore:
                 try:
                     reviews = await self._gh.list_pr_reviews(
-                        owner, repo, pr_number, inst
+                        owner, repo, pr_number, inst,
+                        max_pages=MAX_REVIEW_PAGES_PER_PR,
                     )
                 except Exception as exc:
                     log.warning(
@@ -391,15 +410,19 @@ class ProgressionWorkflow:
                         login,
                         exc,
                     )
+                    incomplete = True
                     return None
 
+            if len(reviews) >= review_cap:
+                incomplete = True
             return sum(
                 1
                 for review in reviews
                 if (review.get("user") or {}).get("login") == login
             )
 
-        return list(await asyncio.gather(*(count(n) for n in pr_numbers)))
+        counts = list(await asyncio.gather(*(count(n) for n in pr_numbers)))
+        return counts, incomplete
 
     async def _current_role(
         self, owner: str, repo: str, login: str, inst: int

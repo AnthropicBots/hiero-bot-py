@@ -615,11 +615,18 @@ class GitHubClient:
         )
 
     async def list_pr_reviews(
-        self, owner: str, repo: str, pr_number: int, installation_id: int
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        installation_id: int,
+        *,
+        max_pages: int = MAX_PAGES,
     ) -> list[dict]:
         return await self.paginate(
             f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
             installation_id,
+            max_pages=max_pages,
         )
 
     async def get_combined_status(

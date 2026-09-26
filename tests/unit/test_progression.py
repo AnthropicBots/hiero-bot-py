@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.workflows.progression import (
+    MAX_REVIEW_PAGES_PER_PR,
     MAX_REVIEWED_PRS_INSPECTED,
     ProgressionWorkflow,
     _months_since,
@@ -524,6 +525,8 @@ async def test_search_path_counts_unreadable_reviewed_pr_once(mock_gh):
 
     assert stats["source"] == "search"
     assert stats["reviews_given"] == 4
+    # One PR's count is a guess, so the total is flagged as a lower bound.
+    assert stats["partial"] is True
 
 
 @pytest.mark.asyncio
@@ -703,5 +706,123 @@ async def test_permission_lookup_failure_treats_author_as_contributor(mock_gh, c
     wf = ProgressionWorkflow(mock_gh)
     with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
         await wf.handle_merged_pr(ctx, merged_pr_payload())
+
+    assert len(eligibility_notices(mock_gh)) == 1
+
+
+# ── Review feedback on #122 ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_review_pages_per_pr_are_capped(mock_gh):
+    """Each PR's review listing is bounded, not just the number of PRs."""
+    mock_gh.search_issues = AsyncMock(
+        side_effect=[
+            search_result(1, iso_days_ago(40)),
+            {"total_count": 1, "items": [{"number": 1}]},
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
+    wf = ProgressionWorkflow(mock_gh)
+    await wf._collect_stats("hiero", "sdk-js", "alice", 42)
+
+    assert mock_gh.list_pr_reviews.await_args.kwargs["max_pages"] == MAX_REVIEW_PAGES_PER_PR
+
+
+@pytest.mark.asyncio
+async def test_pr_with_reviews_past_the_page_cap_marks_stats_partial(mock_gh):
+    mock_gh.search_issues = AsyncMock(
+        side_effect=[
+            search_result(1, iso_days_ago(40)),
+            {"total_count": 1, "items": [{"number": 1}]},
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(
+        return_value=[{"user": {"login": "bob"}}] * (MAX_REVIEW_PAGES_PER_PR * 100)
+    )
+
+    wf = ProgressionWorkflow(mock_gh)
+    stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
+
+    assert stats["partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_rest_fallback_marks_partial_when_a_review_fetch_fails(mock_gh):
+    mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("no search"))
+    mock_gh.paginate = AsyncMock(side_effect=[[], [{"number": 1}, {"number": 2}]])
+    mock_gh.list_pr_reviews = AsyncMock(
+        side_effect=[
+            [{"user": {"login": "alice"}, "state": "APPROVED"}],
+            RuntimeError("boom"),
+        ]
+    )
+
+    wf = ProgressionWorkflow(mock_gh)
+    stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
+
+    assert stats["reviews_given"] == 1
+    assert stats["partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_stats_cache_never_grows_past_its_limit(mock_gh, monkeypatch):
+    from app.workflows import progression
+
+    monkeypatch.setattr(progression, "_MAX_STATS_CACHE_ENTRIES", 3)
+    mock_gh.search_issues = AsyncMock(return_value=search_result(0))
+
+    wf = ProgressionWorkflow(mock_gh)
+    for login in ["alice", "bob", "carol", "dave", "erin"]:
+        await wf._collect_stats("hiero", "sdk-js", login, 42)
+
+    # Only the three most recent logins are kept; the oldest were evicted.
+    assert [key[2] for key in progression._stats_cache] == ["carol", "dave", "erin"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_merges_post_a_single_eligibility_notice(
+    mock_gh, base_config, tmp_path
+):
+    """Two merge webhooks for one contributor run at once, each with its own
+    DB session, as they would in production."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    from app.db.database import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'bot.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def slow_comment(*args, **kwargs):
+        # Give the other webhook a chance to interleave between the audit-log
+        # check and the audit-row commit.
+        await asyncio.sleep(0.05)
+
+    mock_gh.post_comment = AsyncMock(side_effect=slow_comment)
+    stats = {"merged_prs": 5, "reviews_given": 3, "months_active": 3, "login": "alice"}
+
+    async def merge(pr_number):
+        async with factory() as session:
+            ctx = {
+                "owner": "hiero", "repo": "sdk-js", "installation_id": 42,
+                "config": base_config, "db": session,
+            }
+            wf = ProgressionWorkflow(mock_gh)
+            with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+                await wf.handle_merged_pr(ctx, merged_pr_payload(pr_number=pr_number))
+
+    try:
+        await asyncio.gather(merge(5), merge(6))
+    finally:
+        await engine.dispose()
 
     assert len(eligibility_notices(mock_gh)) == 1
