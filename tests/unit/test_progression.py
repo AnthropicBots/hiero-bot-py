@@ -6,10 +6,23 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.workflows.progression import (
+    MAX_REVIEWED_PRS_INSPECTED,
     ProgressionWorkflow,
     _months_since,
     _parse_ts,
+    clear_stats_cache,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_progression(mock_gh):
+    # Stats are cached per (repo, login) at module level; start each test cold.
+    clear_stats_cache()
+    # The shared fixture grants write access, which now means "already a
+    # committer". Progression tests default to an ordinary contributor.
+    mock_gh.get_collaborator_permission = AsyncMock(return_value="read")
+    yield
+    clear_stats_cache()
 
 
 def merged_pr_payload(login="alice", pr_number=5):
@@ -213,12 +226,7 @@ async def test_search_stats_use_search_for_candidates(mock_gh):
     mock_gh.search_issues = AsyncMock(
         side_effect=[
             search_result(137, iso_days_ago(400)),
-        ]
-    )
-    mock_gh.paginate_search = AsyncMock(
-        return_value=[
-            {"number": 101},
-            {"number": 102},
+            {"total_count": 2, "items": [{"number": 101}, {"number": 102}]},
         ]
     )
     mock_gh.list_pr_reviews = AsyncMock(
@@ -241,11 +249,7 @@ async def test_search_stats_use_search_for_candidates(mock_gh):
     assert stats["reviews_given"] == 3
     assert stats["months_active"] == 13
     assert stats["source"] == "search"
-    mock_gh.paginate_search.assert_awaited_once_with(
-        "repo:hiero/sdk-js type:pr reviewed-by:alice",
-        42,
-        per_page=100,
-    )
+    assert stats["partial"] is False
     assert mock_gh.list_pr_reviews.await_count == 2
 
 
@@ -254,23 +258,21 @@ async def test_search_stats_query_shape(mock_gh):
     mock_gh.search_issues = AsyncMock(
         return_value=search_result(0)
     )
-    mock_gh.paginate_search = AsyncMock(return_value=[])
     mock_gh.list_pr_reviews = AsyncMock(return_value=[])
 
     wf = ProgressionWorkflow(mock_gh)
 
     await wf._collect_stats("hiero", "sdk-js", "alice", 42)
 
-    merged_queries = [
+    queries = [
         call.args[0] for call in mock_gh.search_issues.await_args_list
     ]
-    assert "repo:hiero/sdk-js type:pr author:alice is:merged" in merged_queries
-
-    mock_gh.paginate_search.assert_awaited_once_with(
+    assert queries == [
+        "repo:hiero/sdk-js type:pr author:alice is:merged",
         "repo:hiero/sdk-js type:pr reviewed-by:alice",
-        42,
-        per_page=100,
-    )
+    ]
+    reviewed_call = mock_gh.search_issues.await_args_list[1]
+    assert reviewed_call.kwargs["per_page"] == MAX_REVIEWED_PRS_INSPECTED
 
 
 @pytest.mark.asyncio
@@ -473,3 +475,233 @@ def test_months_since_of_none_is_zero():
 def test_months_since_assumes_utc_for_naive_datetimes():
     naive = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=60)
     assert _months_since(naive) == 2
+
+
+# ── Bounded GitHub calls (#122) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_search_path_bounds_calls_for_a_large_review_history(mock_gh):
+    """A reviewer of ~300 PRs used to cost ~300 review fetches."""
+    reviewed = [{"number": n} for n in range(1, MAX_REVIEWED_PRS_INSPECTED + 1)]
+    mock_gh.search_issues = AsyncMock(
+        side_effect=[
+            search_result(40, iso_days_ago(400)),
+            {"total_count": 300, "items": reviewed},
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(
+        return_value=[{"user": {"login": "alice"}, "state": "APPROVED"}] * 2
+    )
+
+    wf = ProgressionWorkflow(mock_gh)
+    stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
+
+    assert mock_gh.search_issues.await_count == 2
+    assert mock_gh.list_pr_reviews.await_count == MAX_REVIEWED_PRS_INSPECTED
+    # Inspected PRs are counted exactly; the other 250 count once each.
+    assert stats["reviews_given"] == MAX_REVIEWED_PRS_INSPECTED * 2 + 250
+    assert stats["partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_path_counts_unreadable_reviewed_pr_once(mock_gh):
+    mock_gh.search_issues = AsyncMock(
+        side_effect=[
+            search_result(1, iso_days_ago(40)),
+            {"total_count": 2, "items": [{"number": 1}, {"number": 2}]},
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(
+        side_effect=[
+            [{"user": {"login": "alice"}, "state": "APPROVED"}] * 3,
+            RuntimeError("boom"),
+        ]
+    )
+
+    wf = ProgressionWorkflow(mock_gh)
+    stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
+
+    assert stats["source"] == "search"
+    assert stats["reviews_given"] == 4
+
+
+@pytest.mark.asyncio
+async def test_rest_fallback_is_bounded_on_a_large_history(mock_gh):
+    """The REST fallback on a 2,000-PR repo used to cost ~2,000 calls."""
+    from app.workflows.progression import MAX_REST_PR_PAGES
+
+    mock_gh.search_issues = AsyncMock(side_effect=RuntimeError("rate limited"))
+    history = [
+        {"number": n, "user": {"login": "bob"}, "merged_at": iso_days_ago(10)}
+        for n in range(1, 2001)
+    ]
+
+    async def paginate(path, inst, *, params=None, per_page=100, max_pages=50, **_):
+        return history[: per_page * max_pages]
+
+    mock_gh.paginate = AsyncMock(side_effect=paginate)
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[])
+
+    wf = ProgressionWorkflow(mock_gh)
+    stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
+
+    for call in mock_gh.paginate.await_args_list:
+        assert call.kwargs["max_pages"] <= MAX_REST_PR_PAGES
+    assert mock_gh.list_pr_reviews.await_count <= MAX_REVIEWED_PRS_INSPECTED
+    assert stats["source"] == "rest"
+    assert stats["partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_repeated_check_eligibility_uses_cached_stats(mock_gh, ctx):
+    mock_gh.search_issues = AsyncMock(
+        side_effect=[
+            search_result(3, iso_days_ago(60)),
+            {"total_count": 1, "items": [{"number": 7}]},
+        ]
+    )
+    mock_gh.list_pr_reviews = AsyncMock(
+        return_value=[{"user": {"login": "alice"}, "state": "APPROVED"}]
+    )
+    payload = {"issue": {"number": 3}, "comment": {"user": {"login": "alice"}}}
+
+    wf = ProgressionWorkflow(mock_gh)
+    await wf.check_and_report(ctx, payload)
+    await ProgressionWorkflow(mock_gh).check_and_report(ctx, payload)
+
+    assert mock_gh.search_issues.await_count == 2
+    assert mock_gh.list_pr_reviews.await_count == 1
+    assert mock_gh.post_comment.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_merge_does_not_reuse_cached_stats(mock_gh, ctx):
+    """Cached counts would repeat or miss milestones on back-to-back merges."""
+    wf = ProgressionWorkflow(mock_gh)
+    collect = AsyncMock(return_value={
+        "merged_prs": 2, "reviews_given": 0, "months_active": 0, "login": "alice",
+    })
+    with patch.object(wf, "_collect_stats", collect):
+        await wf.handle_merged_pr(ctx, merged_pr_payload())
+    assert collect.await_args.kwargs["use_cache"] is False
+
+
+def test_partial_stats_are_flagged_in_report():
+    from app.config.schema import ProgressionConfig
+
+    stats = {"merged_prs": 1, "reviews_given": 400, "months_active": 2, "partial": True}
+    report = ProgressionWorkflow._build_full_report("alice", stats, ProgressionConfig())
+    assert "lower bound" in report
+
+
+# ── Bot authors and repeated notices (#122) ───────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user", [
+    {"login": "dependabot[bot]", "type": "Bot"},
+    {"login": "dependabot[bot]"},
+    {"login": "some-app", "type": "Bot"},
+])
+async def test_bot_authored_merge_gets_no_comment_or_snapshot(mock_gh, ctx, user):
+    from sqlalchemy import select
+
+    from app.db.models import AuditLog, ContributorSnapshot
+
+    payload = merged_pr_payload()
+    payload["pull_request"]["user"] = user
+    wf = ProgressionWorkflow(mock_gh)
+    collect = AsyncMock()
+    with patch.object(wf, "_collect_stats", collect):
+        await wf.handle_merged_pr(ctx, payload)
+
+    collect.assert_not_awaited()
+    mock_gh.post_comment.assert_not_awaited()
+    db = ctx["db"]
+    assert (await db.execute(select(ContributorSnapshot))).scalars().all() == []
+    assert (await db.execute(select(AuditLog))).scalars().all() == []
+
+
+def eligibility_notices(mock_gh):
+    return [c for c in all_comments(mock_gh) if "may now be eligible" in c]
+
+
+@pytest.mark.asyncio
+async def test_second_qualifying_merge_does_not_repeat_notice(mock_gh, ctx):
+    stats = {"merged_prs": 5, "reviews_given": 3, "months_active": 3, "login": "alice"}
+    wf = ProgressionWorkflow(mock_gh)
+    with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+        await wf.handle_merged_pr(ctx, merged_pr_payload(pr_number=5))
+        await wf.handle_merged_pr(ctx, merged_pr_payload(pr_number=6))
+
+    assert len(eligibility_notices(mock_gh)) == 1
+
+
+@pytest.mark.asyncio
+async def test_next_role_is_still_announced_after_an_earlier_one(mock_gh, ctx):
+    wf = ProgressionWorkflow(mock_gh)
+    junior = {"merged_prs": 5, "reviews_given": 3, "months_active": 3, "login": "alice"}
+    committer = {"merged_prs": 20, "reviews_given": 12, "months_active": 8, "login": "alice"}
+    with patch.object(wf, "_collect_stats", AsyncMock(side_effect=[junior, committer])):
+        await wf.handle_merged_pr(ctx, merged_pr_payload(pr_number=5))
+        await wf.handle_merged_pr(ctx, merged_pr_payload(pr_number=6))
+
+    notices = eligibility_notices(mock_gh)
+    assert len(notices) == 2
+    assert "**committer**" in notices[1]
+
+
+@pytest.mark.asyncio
+async def test_notice_deduplicated_against_legacy_audit_entry(mock_gh, ctx):
+    """Entries written before #122 carry the role only in the reason."""
+    from app.utils import audit
+
+    await audit.record(
+        ctx["db"], action="contributor.role_suggested",
+        owner="hiero", repo="sdk-js", target_login="alice", target_number=1,
+        reason="Post-merge check: eligible_for=junior-committer",
+        metadata={"merged_prs": 3},
+    )
+    stats = {"merged_prs": 5, "reviews_given": 3, "months_active": 3, "login": "alice"}
+    wf = ProgressionWorkflow(mock_gh)
+    with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+        await wf.handle_merged_pr(ctx, merged_pr_payload())
+
+    assert eligibility_notices(mock_gh) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission, role", [
+    ("admin", "maintainer"),
+    ("maintain", "maintainer"),
+    ("write", "committer"),
+])
+async def test_existing_role_holder_is_not_told_they_are_eligible(
+    mock_gh, ctx, permission, role
+):
+    from sqlalchemy import select
+
+    from app.db.models import ContributorSnapshot
+
+    mock_gh.get_collaborator_permission = AsyncMock(return_value=permission)
+    stats = {"merged_prs": 20, "reviews_given": 12, "months_active": 8, "login": "alice"}
+    wf = ProgressionWorkflow(mock_gh)
+    with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+        await wf.handle_merged_pr(ctx, merged_pr_payload())
+
+    assert eligibility_notices(mock_gh) == []
+    snapshot = (await ctx["db"].execute(select(ContributorSnapshot))).scalars().one()
+    assert snapshot.current_role == role
+    assert snapshot.eligible_for is None
+
+
+@pytest.mark.asyncio
+async def test_permission_lookup_failure_treats_author_as_contributor(mock_gh, ctx):
+    mock_gh.get_collaborator_permission = AsyncMock(side_effect=RuntimeError("404"))
+    stats = {"merged_prs": 5, "reviews_given": 3, "months_active": 3, "login": "alice"}
+    wf = ProgressionWorkflow(mock_gh)
+    with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+        await wf.handle_merged_pr(ctx, merged_pr_payload())
+
+    assert len(eligibility_notices(mock_gh)) == 1
