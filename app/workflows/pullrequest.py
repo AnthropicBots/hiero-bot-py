@@ -369,13 +369,16 @@ class PullRequestWorkflow:
                 f"{result['summary']}\n\n"
                 f"---\n_Automated AI review — a human maintainer will also review._"
             )
-            await self._gh.post_comment(
-                owner,
-                repo,
-                pr_number,
-                body,
-                inst,
-            )
+            try:
+                await self._gh.post_comment(
+                    owner,
+                    repo,
+                    pr_number,
+                    body,
+                    inst,
+                )
+            except Exception:
+                log.exception("Failed to post AI review failure notice")
             await audit.record(
                 ctx["db"],
                 action="pr.review_failed",
