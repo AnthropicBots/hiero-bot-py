@@ -458,3 +458,62 @@ async def test_one_bad_inline_comment_does_not_abort_rest_or_audit(
     rows = (await ctx["db"].execute(select(AuditLog))).scalars().all()
     assert [r.action for r in rows] == ["pr.reviewed"]
     assert rows[0].metadata_json["score"] == 70
+
+
+@pytest.mark.asyncio
+async def test_inline_comment_422_does_not_skip_recommendations_or_commit(
+    mock_gh, ctx
+):
+    cfg = ctx["config"].workflows.pull_request
+    cfg.ai_review.enabled = True
+    cfg.reviewer_recommendation = True
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=[{"filename": "app/example.py", "patch": "+x = 1"}]
+    )
+    mock_gh.create_pr_review_comment = AsyncMock(
+        side_effect=[_http_status_error(422), None]
+    )
+
+    wf = PullRequestWorkflow(mock_gh)
+    wf._ai.review = AsyncMock(
+        return_value={
+            "summary": "Found two issues.",
+            "verdict": "comment",
+            "score": 70,
+            "comments": [
+                {"path": "app/example.py", "line": 9999, "body": "Bad line.", "severity": "info"},
+                {"path": "app/example.py", "line": 1, "body": "Valid line.", "severity": "warning"},
+            ],
+            "failed": False,
+        }
+    )
+    wf._recommend_reviewers = AsyncMock()
+    ctx["db"].commit = AsyncMock(wraps=ctx["db"].commit)
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    assert mock_gh.create_pr_review_comment.await_count == 2
+    wf._recommend_reviewers.assert_awaited_once_with(ctx, make_pr())
+    ctx["db"].commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_ai_response_posts_no_score(mock_gh, ctx):
+    from app.ai.reviewer import AIReviewer
+
+    ctx["config"].workflows.pull_request.ai_review.enabled = True
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=[{"filename": "app/example.py", "patch": "+x = 1"}]
+    )
+    backend = AsyncMock()
+    backend.complete.return_value = "{}"
+    wf = PullRequestWorkflow(mock_gh)
+    wf._ai = AIReviewer(backend)
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    bodies = [call.args[3] for call in mock_gh.post_comment.await_args_list]
+    assert all("Score:" not in body and "50/100" not in body for body in bodies)
+    rows = (await ctx["db"].execute(select(AuditLog))).scalars().all()
+    assert "pr.review_failed" in [row.action for row in rows]
+    assert "pr.reviewed" not in [row.action for row in rows]

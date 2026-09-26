@@ -374,3 +374,23 @@ async def test_successful_review_is_not_marked_failed():
     )
 
     assert result["failed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"summary": "ok", "verdict": "approve", "comments": []},
+        {"summary": "ok", "verdict": "approve", "score": "50", "comments": []},
+        {"summary": "ok", "verdict": "approve", "score": 80},
+    ],
+)
+async def test_incomplete_review_is_marked_failed(response):
+    result = await AIReviewer(StubBackend(json.dumps(response))).review(
+        CFG, "PR", "", DIFFS
+    )
+
+    assert result["failed"] is True
+    assert result["comments"] == []
+    assert result["verdict"] == "comment"
