@@ -668,3 +668,130 @@ async def test_welcome_includes_custom_message(mock_gh, ctx):
     wf = OnboardingWorkflow(mock_gh)
     await wf.handle_new_contributor(ctx, make_payload())
     assert "Extra special welcome!" in mock_gh.post_comment.call_args[0][3]
+
+# ── Mentor rotation (#148) ────────────────────────────────────
+
+MENTORS = [{"login": "mentor-c"}, {"login": "mentor-a"}, {"login": "mentor-b"}]
+
+
+def assigned_mentors(mock_gh):
+    return [call.args[3][0] for call in mock_gh.add_assignees.await_args_list]
+
+
+async def assign_mentors(mock_gh, ctx, contributors):
+    wf = OnboardingWorkflow(mock_gh)
+    for number, login in enumerate(contributors, start=1):
+        await wf._assign_mentor(ctx, number, login)
+
+
+@pytest.mark.asyncio
+async def test_consecutive_contributors_rotate_across_mentors(mock_gh, ctx):
+    mock_gh.list_team_members = AsyncMock(return_value=MENTORS)
+
+    await assign_mentors(mock_gh, ctx, ["alice", "bob", "carol", "dave"])
+
+    # Everyone gets a turn before anyone gets a second contributor.
+    assert assigned_mentors(mock_gh) == ["mentor-a", "mentor-b", "mentor-c", "mentor-a"]
+
+
+@pytest.mark.asyncio
+async def test_anagram_logins_get_different_mentors(mock_gh, ctx):
+    """The old ASCII-sum hash sent "alice" and "celia" to the same mentor."""
+    mock_gh.list_team_members = AsyncMock(return_value=MENTORS)
+
+    await assign_mentors(mock_gh, ctx, ["alice", "celia"])
+
+    first, second = assigned_mentors(mock_gh)
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_mentor_with_fewest_past_assignments_is_chosen(mock_gh, ctx):
+    for mentor in ["mentor-a", "mentor-a", "Mentor-B"]:
+        await audit.record(
+            ctx["db"], action="contributor.mentor_assigned",
+            owner="hiero", repo="sdk-js", target_number=1, target_login="someone",
+            reason="seed", metadata={"mentor": mentor},
+        )
+    # Assignments in another repo don't count here.
+    await audit.record(
+        ctx["db"], action="contributor.mentor_assigned",
+        owner="hiero", repo="other", target_number=1, target_login="someone",
+        reason="seed", metadata={"mentor": "mentor-c"},
+    )
+    mock_gh.list_team_members = AsyncMock(return_value=MENTORS)
+
+    await assign_mentors(mock_gh, ctx, ["alice"])
+
+    assert assigned_mentors(mock_gh) == ["mentor-c"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["least-busy", "expertise-match"])
+async def test_unimplemented_strategies_do_not_pile_onto_first_member(
+    mock_gh, ctx, strategy
+):
+    ctx["config"].workflows.onboarding.mentor_assignment_strategy = strategy
+    mock_gh.list_team_members = AsyncMock(return_value=MENTORS)
+
+    await assign_mentors(mock_gh, ctx, ["alice", "bob", "carol"])
+
+    assert sorted(assigned_mentors(mock_gh)) == ["mentor-a", "mentor-b", "mentor-c"]
+
+
+@pytest.mark.asyncio
+async def test_mentor_assignment_records_chosen_mentor(mock_gh, ctx):
+    from sqlalchemy import select
+
+    from app.db.models import AuditLog
+
+    mock_gh.list_team_members = AsyncMock(return_value=MENTORS)
+
+    await assign_mentors(mock_gh, ctx, ["alice"])
+
+    entry = (await ctx["db"].execute(select(AuditLog))).scalars().one()
+    assert entry.action == "contributor.mentor_assigned"
+    assert entry.metadata_json == {"mentor": "mentor-a"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_new_contributors_get_different_mentors(
+    mock_gh, base_config, tmp_path
+):
+    """Two first-time contributors handled at once, each webhook with its own
+    DB session, must not both read the same counts and pick the same mentor."""
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    from app.db.database import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'bot.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def slow_assign(*args, **kwargs):
+        # Let the other webhook interleave between reading counts and committing.
+        await asyncio.sleep(0.05)
+
+    mock_gh.add_assignees = AsyncMock(side_effect=slow_assign)
+    mock_gh.list_team_members = AsyncMock(return_value=MENTORS)
+
+    async def onboard(number, login):
+        async with factory() as session:
+            ctx = {
+                "owner": "hiero", "repo": "sdk-js", "installation_id": 42,
+                "config": base_config, "db": session,
+            }
+            await OnboardingWorkflow(mock_gh)._assign_mentor(ctx, number, login)
+
+    try:
+        await asyncio.gather(onboard(1, "alice"), onboard(2, "bob"))
+    finally:
+        await engine.dispose()
+
+    first, second = assigned_mentors(mock_gh)
+    assert first != second
