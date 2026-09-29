@@ -93,38 +93,36 @@ async def get_user_authorized_accounts(
                 async with httpx.AsyncClient() as client:
                     inst_ids, complete = await _fetch_installation_ids(client, token)
 
+                # Every account link this user has, loaded once and used both
+                # to grant and to revoke, rather than one query per account.
+                links_stmt = (
+                    select(AccountUser, Account.github_installation_id)
+                    .join(Account, Account.id == AccountUser.account_id)
+                    .where(AccountUser.user_id == user.id)
+                )
+                links = {
+                    au.account_id: (au, installation_id)
+                    for au, installation_id in (await db.execute(links_stmt)).all()
+                }
+
                 if inst_ids:
                     acc_stmt = select(Account).where(Account.github_installation_id.in_(inst_ids))
                     acc_res = await db.execute(acc_stmt)
                     accounts = acc_res.scalars().all()
 
                     for acc in accounts:
-                        au_stmt = select(AccountUser).where(
-                            AccountUser.account_id == acc.id,
-                            AccountUser.user_id == user.id,
-                        )
-                        au_res = await db.execute(au_stmt)
-                        au = au_res.scalar_one_or_none()
-                        if not au:
-                            au = AccountUser(account_id=acc.id, user_id=user.id, authorized=True)
-                            db.add(au)
+                        link = links.get(acc.id)
+                        if link is None:
+                            db.add(AccountUser(account_id=acc.id, user_id=user.id, authorized=True))
                         else:
-                            au.authorized = True
+                            link[0].authorized = True
 
                 # #147: GitHub no longer lists installations the user was
                 # removed from, so revoke those. Only a complete list is
                 # trusted; a failed or truncated read leaves access as is.
                 if complete:
-                    held_stmt = (
-                        select(AccountUser, Account.github_installation_id)
-                        .join(Account, Account.id == AccountUser.account_id)
-                        .where(
-                            AccountUser.user_id == user.id,
-                            AccountUser.authorized == True,
-                        )
-                    )
-                    for au, installation_id in (await db.execute(held_stmt)).all():
-                        if installation_id not in inst_ids:
+                    for au, installation_id in links.values():
+                        if au.authorized and installation_id not in inst_ids:
                             au.authorized = False
                             log.info(
                                 "Revoked user %s access to installation %s",

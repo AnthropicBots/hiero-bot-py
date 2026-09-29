@@ -479,3 +479,30 @@ async def test_revocation_only_affects_the_syncing_user(db):
 
     assert await authorized_installations(db, alice) == []
     assert await authorized_installations(db, bob) == [555]
+
+
+@pytest.mark.asyncio
+async def test_sync_query_count_does_not_grow_with_installations(db):
+    """One query per installation (N+1) would make a large sync slow."""
+    from sqlalchemy import event
+
+    async def count_sync_queries(login, installation_ids):
+        user = await user_with_accounts(db, login, installation_ids)
+        clear_sync_cache()
+        statements = []
+
+        def record(conn, cursor, statement, *args):
+            statements.append(statement)
+
+        engine = db.bind.sync_engine
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            await sync(db, user, [(200, installation_ids)])
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        return len(statements)
+
+    small = await count_sync_queries("few-orgs", [700 + i for i in range(3)])
+    large = await count_sync_queries("many-orgs", [800 + i for i in range(40)])
+
+    assert large == small
