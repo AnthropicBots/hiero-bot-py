@@ -22,16 +22,20 @@ class OpenAICompatibleBackend(ReviewBackend):
     """
     Any OpenAI-compatible chat-completions endpoint.
 
-    That covers OpenAI itself and, via `OPENAI_BASE_URL`, self-hosted
-    open-weight serving stacks — vLLM, LM Studio, llama.cpp's server, TGI, or a
-    gateway in front of several of them. Many of those accept any non-empty
-    key, so an unset key with a base URL configured is treated as usable.
+    This covers OpenAI itself and, through OPENAI_BASE_URL, self-hosted
+    serving stacks such as vLLM, LM Studio, llama.cpp's server, TGI,
+    or a gateway in front of several providers.
+
+    Many OpenAI-compatible servers accept any non-empty API key, so an
+    unset key is allowed when a base URL is configured.
     """
 
     name = "openai"
 
     def __init__(
-        self, api_key: str | None = None, base_url: str | None = None
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
     ) -> None:
         self._api_key = api_key or settings.openai_api_key
         self._base_url = base_url or settings.openai_base_url
@@ -39,58 +43,71 @@ class OpenAICompatibleBackend(ReviewBackend):
 
     @classmethod
     def available(cls) -> bool:
-        return bool(settings.openai_api_key or settings.openai_base_url)
+        """Return whether the OpenAI-compatible backend is configured."""
+        return bool(
+            settings.openai_api_key
+            or settings.openai_base_url
+        )
 
-    def _get_client(self, timeout_seconds: float | None = None):
-        if self._client is None:
-            if not (self._api_key or self._base_url):
-                raise BackendUnavailable(
-                    "Set OPENAI_API_KEY or OPENAI_BASE_URL to use this backend"
-                )
+    def _get_client(
+        self,
+        timeout_seconds: float | None = None,
+    ) -> Any:
+        """Create and cache the OpenAI async client."""
+        if self._client is not None:
+            return self._client
 
-            try:
-                import openai
-            except ImportError as exc:  # pragma: no cover - packaging concern
-                raise BackendUnavailable(
-                    "The openai package is not installed"
-                ) from exc
+        if not (self._api_key or self._base_url):
+            raise BackendUnavailable(
+                "Set OPENAI_API_KEY or OPENAI_BASE_URL "
+                "to use this backend"
+            )
 
-            if self._base_url and timeout_seconds is not None:
-                self._client = openai.AsyncOpenAI(
-                    api_key=self._api_key or "not-needed",
-                    base_url=self._base_url,
-                    max_retries=0,
-                    timeout=float(timeout_seconds),
-                )
-            elif self._base_url:
-                self._client = openai.AsyncOpenAI(
-                    api_key=self._api_key or "not-needed",
-                    base_url=self._base_url,
-                    max_retries=0,
-                )
-            elif timeout_seconds is not None:
-                self._client = openai.AsyncOpenAI(
-                    api_key=self._api_key or "not-needed",
-                    max_retries=0,
-                    timeout=float(timeout_seconds),
-                )
-            else:
-                self._client = openai.AsyncOpenAI(
-                    api_key=self._api_key or "not-needed",
-                    max_retries=0,
-                )
+        try:
+            import openai
+        except ImportError as exc:  # pragma: no cover
+            raise BackendUnavailable(
+                "The openai package is not installed"
+            ) from exc
+
+        client_kwargs: dict[str, Any] = {
+            "api_key": self._api_key or "not-needed",
+            "max_retries": 0,
+        }
+
+        if self._base_url:
+            client_kwargs["base_url"] = self._base_url
+
+        if timeout_seconds is not None:
+            client_kwargs["timeout"] = float(timeout_seconds)
+
+        self._client = openai.AsyncOpenAI(
+            **client_kwargs
+        )
 
         return self._client
 
-    async def complete(self, request: CompletionRequest) -> str:
-        client = self._get_client(request.timeout_seconds)
+    async def complete(
+        self,
+        request: CompletionRequest,
+    ) -> str:
+        """Send a chat-completion request."""
+        client = self._get_client(
+            request.timeout_seconds
+        )
 
-        message_kwargs = {
+        message_kwargs: dict[str, Any] = {
             "model": request.model,
             "max_tokens": request.max_tokens,
             "messages": [
-                {"role": "system", "content": request.system},
-                {"role": "user", "content": request.prompt},
+                {
+                    "role": "system",
+                    "content": request.system,
+                },
+                {
+                    "role": "user",
+                    "content": request.prompt,
+                },
             ],
         }
 
@@ -98,9 +115,17 @@ class OpenAICompatibleBackend(ReviewBackend):
             message_kwargs["temperature"] = request.temperature
 
         try:
-            response = await client.chat.completions.create(**message_kwargs)
+            response = await client.chat.completions.create(
+                **message_kwargs
+            )
+
         except Exception as exc:
-            import openai
+            try:
+                import openai
+            except ImportError as import_exc:  # pragma: no cover
+                raise BackendUnavailable(
+                    "The openai package is not installed"
+                ) from import_exc
 
             if isinstance(
                 exc,
@@ -110,41 +135,67 @@ class OpenAICompatibleBackend(ReviewBackend):
                 ),
             ):
                 raise BackendTransientError(
-                    f"OpenAI-compatible transient request failure: {exc}"
+                    "OpenAI-compatible transient request failure: "
+                    f"{exc}"
                 ) from exc
 
-            if isinstance(exc, openai.APIStatusError):
-                if exc.status_code in {408, 409, 429} or exc.status_code >= 500:
+            if isinstance(
+                exc,
+                openai.APIStatusError,
+            ):
+                status_code = exc.status_code
+
+                if (
+                    status_code in {408, 409, 429}
+                    or status_code >= 500
+                ):
                     raise BackendTransientError(
-                        f"OpenAI-compatible transient HTTP "
-                        f"{exc.status_code}: {exc}"
+                        "OpenAI-compatible transient HTTP "
+                        f"{status_code}: {exc}"
                     ) from exc
 
                 raise BackendPermanentError(
-                    f"OpenAI-compatible HTTP {exc.status_code}: {exc}"
+                    "OpenAI-compatible HTTP "
+                    f"{status_code}: {exc}"
                 ) from exc
 
             raise BackendPermanentError(
-                f"OpenAI-compatible request failed: {exc}"
+                "OpenAI-compatible request failed: "
+                f"{exc}"
             ) from exc
 
-        choices = getattr(response, "choices", None) or []
+        choices = getattr(
+            response,
+            "choices",
+            None,
+        ) or []
+
         if not choices:
             raise BackendPermanentError(
                 "OpenAI-compatible endpoint returned no choices"
             )
 
-        message = getattr(choices[0], "message", None)
-        text = getattr(message, "content", "") or ""
+        message = getattr(
+            choices[0],
+            "message",
+            None,
+        )
 
-        if not text:
+        text = getattr(
+            message,
+            "content",
+            None,
+        )
+
+        if not isinstance(text, str) or not text.strip():
             raise BackendPermanentError(
                 "OpenAI-compatible endpoint returned empty content"
             )
 
-        return text
+        return text.strip()
 
     async def close(self) -> None:
+        """Close the cached OpenAI client."""
         if self._client is not None:
             await self._client.close()
             self._client = None
