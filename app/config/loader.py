@@ -19,6 +19,7 @@ from app.utils.logger import get_logger
 if TYPE_CHECKING:
     from app.github.client import GitHubClient
 
+
 log = get_logger("config.loader")
 
 _CONFIG_PATH = ".github/hiero-bot.yml"
@@ -26,17 +27,14 @@ _CONFIG_PATH = ".github/hiero-bot.yml"
 # A repo with a config is the common case and its contents change rarely.
 _CACHE_TTL = 300  # 5 minutes
 
-# "No config" is cached too, but far more briefly: a maintainer who has just
-# added the file should not have to wait five minutes for the bot to notice.
-# Without this every webhook from every uninstrumented repo hit the contents
-# API, which is the majority of traffic for an app installed org-wide.
+# "No config" is cached too, but far more briefly so a newly added config
+# file is discovered without repeatedly hitting the GitHub Contents API.
 _NEGATIVE_CACHE_TTL = 60
 
-# Bound the cache so an org-wide installation can't grow it without limit.
+# Bound the cache so an org-wide installation cannot grow it without limit.
 _MAX_CACHE_ENTRIES = 512
 
-# A bot config is a few kilobytes. Anything past this is a mistake or an
-# attempt to make the parser do expensive work.
+# A bot config is normally only a few kilobytes.
 _MAX_CONFIG_BYTES = 128 * 1024
 
 
@@ -71,19 +69,25 @@ class ConfigLoader:
         self._misses = 0
 
     async def load(
-        self, owner: str, repo: str, installation_id: int = 0
+        self,
+        owner: str,
+        repo: str,
+        installation_id: int = 0,
     ) -> RepoConfig | None:
         """
-        Load a repo's config, using the cache if fresh.
+        Load a repository's config, using the cache when fresh.
 
-        Returns None when the repository has no config file — the bot stays
-        completely silent in that case. Raises ConfigInvalid when a file exists
-        but is unusable, so the problem surfaces instead of the repo silently
-        behaving as if the bot were uninstalled.
+        Returns None when the repository has no config file.
+
+        Raises:
+            ConfigInvalid: If the config exists but cannot be parsed or
+                validated.
+            httpx.HTTPStatusError: For unexpected GitHub API failures.
         """
         key = f"{owner}/{repo}"
 
         entry = self._cache.get(key)
+
         if entry is not None and entry.fresh:
             self._hits += 1
             self._cache.move_to_end(key)
@@ -93,18 +97,19 @@ class ConfigLoader:
 
         try:
             raw_b64 = await self._client.get_file_content(
-                owner, repo, _CONFIG_PATH, installation_id
+                owner,
+                repo,
+                _CONFIG_PATH,
+                installation_id,
             )
         except httpx.HTTPStatusError as exc:
-            # `get_file_content` already maps 404 to None, but a 404 can still
-            # arrive here from another layer. The previous version tested
-            # `getattr(exc, "status_code")`, which httpx.HTTPStatusError does
-            # not define — the branch could never fire, so a missing config
-            # propagated as a 500 instead of disabling the bot for that repo.
+            # get_file_content normally converts 404 into None, but handle
+            # a 404 defensively in case another layer lets it through.
             if exc.response.status_code == 404:
                 log.debug("No config for %s — bot disabled", key)
                 self._store(key, None)
                 return None
+
             log.error("Failed loading config for %s: %s", key, exc)
             raise
 
@@ -114,8 +119,11 @@ class ConfigLoader:
             return None
 
         config = self._parse(key, raw_b64)
+
         self._store(key, config)
+
         log.info("Loaded config for %s", key)
+
         return config
 
     # ── Parsing ───────────────────────────────────────────────
@@ -123,77 +131,124 @@ class ConfigLoader:
     @staticmethod
     def _parse(slug: str, raw_b64: str) -> RepoConfig:
         try:
-            raw = base64.b64decode(raw_b64)
+            raw = base64.b64decode(raw_b64, validate=True)
         except (binascii.Error, ValueError) as exc:
-            raise ConfigInvalid(slug, f"content is not valid base64 ({exc})") from exc
+            raise ConfigInvalid(
+                slug,
+                f"content is not valid base64 ({exc})",
+            ) from exc
 
         if len(raw) > _MAX_CONFIG_BYTES:
             raise ConfigInvalid(
                 slug,
-                f"file is {len(raw)} bytes, over the {_MAX_CONFIG_BYTES}-byte limit",
+                f"file is {len(raw)} bytes, over the "
+                f"{_MAX_CONFIG_BYTES}-byte limit",
             )
 
         try:
             content = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ConfigInvalid(slug, "file is not valid UTF-8") from exc
+            raise ConfigInvalid(
+                slug,
+                "file is not valid UTF-8",
+            ) from exc
 
         try:
             data = yaml.safe_load(content)
         except yaml.YAMLError as exc:
-            raise ConfigInvalid(slug, f"YAML syntax error ({exc})") from exc
+            raise ConfigInvalid(
+                slug,
+                f"YAML syntax error ({exc})",
+            ) from exc
 
         if data is None:
             raise ConfigInvalid(slug, "file is empty")
+
         if not isinstance(data, dict):
             raise ConfigInvalid(
-                slug, f"top level must be a mapping, got {type(data).__name__}"
+                slug,
+                f"top level must be a mapping, got {type(data).__name__}",
             )
 
         try:
             config = RepoConfig.model_validate(data)
         except ValidationError as exc:
             detail = "; ".join(
-                f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                f"{'.'.join(str(part) for part in error['loc'])}: "
+                f"{error['msg']}"
                 for error in exc.errors()[:5]
             )
-            log.error("Invalid config for %s: %s", slug, detail)
+
+            log.error(
+                "Invalid config for %s: %s",
+                slug,
+                detail,
+            )
+
             raise ConfigInvalid(slug, detail) from exc
 
-        # Unknown keys are ignored, not fatal (existing configs keep working),
-        # but a typo silently leaves the defaults in force, so say so.
+        # Unknown keys are intentionally non-fatal so existing configs remain
+        # compatible. Warn because a typo can otherwise silently activate a
+        # default value.
         unknown = find_unknown_keys(data, RepoConfig)
+
         if unknown:
             log.warning(
                 "Ignoring unknown keys in the config for %s: %s",
                 slug,
                 ", ".join(unknown),
             )
+
         return config
 
     # ── Cache management ──────────────────────────────────────
 
-    def _store(self, key: str, config: RepoConfig | None) -> None:
-        ttl = _CACHE_TTL if config is not None else _NEGATIVE_CACHE_TTL
-        self._cache[key] = _CacheEntry(config, time.monotonic() + ttl)
+    def _store(
+        self,
+        key: str,
+        config: RepoConfig | None,
+    ) -> None:
+        ttl = (
+            _CACHE_TTL
+            if config is not None
+            else _NEGATIVE_CACHE_TTL
+        )
+
+        self._cache[key] = _CacheEntry(
+            config=config,
+            expires_at=time.monotonic() + ttl,
+        )
+
         self._cache.move_to_end(key)
 
         while len(self._cache) > _MAX_CACHE_ENTRIES:
             evicted, _ = self._cache.popitem(last=False)
-            log.debug("Evicted config cache entry for %s", evicted)
 
-    def invalidate(self, owner: str, repo: str) -> None:
+            log.debug(
+                "Evicted config cache entry for %s",
+                evicted,
+            )
+
+    def invalidate(
+        self,
+        owner: str,
+        repo: str,
+    ) -> None:
+        """Invalidate one repository's cached configuration."""
         self._cache.pop(f"{owner}/{repo}", None)
 
     def clear(self) -> None:
+        """Clear all cached configuration entries."""
         self._cache.clear()
 
     def stats(self) -> dict[str, int]:
-        """Cache counters, for the dashboard and for debugging live installs."""
+        """Return cache statistics for monitoring and debugging."""
         return {
             "entries": len(self._cache),
             "configured": sum(
-                1 for entry in self._cache.values() if entry.config is not None
+                1
+                for entry in self._cache.values()
+                if entry.config is not None
             ),
             "hits": self._hits,
             "misses": self._misses,
