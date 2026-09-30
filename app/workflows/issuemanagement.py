@@ -97,7 +97,10 @@ class IssueManagementWorkflow:
 
         # Auto-unassign
         assignees = [a["login"] for a in (issue.get("assignees") or []) if a]
-        if assignees and updated < unassign_cutoff:
+        was_inactive = bool(assignees and updated < unassign_cutoff)
+        should_mark_stale = bool(not is_stale and updated < stale_cutoff)
+
+        if was_inactive:
             await self._unassign_inactive(ctx, issue, assignees, days_inactive)
             counts["unassigned"] += len(assignees)
 
@@ -108,7 +111,7 @@ class IssueManagementWorkflow:
             return
 
         # Mark stale
-        if not is_stale and updated < stale_cutoff:
+        if should_mark_stale:
             await self._mark_stale(ctx, issue, cfg.stale_label, days_inactive)
             counts["stale_marked"] += 1
 
