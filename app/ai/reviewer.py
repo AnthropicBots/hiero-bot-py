@@ -61,6 +61,11 @@ MAX_TOKENS = 4096
 # Backoff between retries, in seconds. Overridable so tests don't sleep.
 RETRY_BASE_DELAY = 1.0
 
+MAX_REVIEW_FILES = 15
+MAX_DIFF_CHARS_PER_FILE = 6000
+MAX_REVIEW_COMMENTS = 20
+MAX_RETRY_LIMIT = 5
+
 
 class AIReviewer:
     """
@@ -75,8 +80,14 @@ class AIReviewer:
 
     def _get_backend(self, cfg) -> ReviewBackend:
         if self._backend is None:
-            self._backend = build_backend(getattr(cfg, "provider", "auto"))
-            log.info("AI review using the %s backend", self._backend.name)
+            self._backend = build_backend(
+                getattr(cfg, "provider", "auto")
+            )
+            log.info(
+                "AI review using the %s backend",
+                self._backend.name,
+            )
+
         return self._backend
 
     async def review(
@@ -90,50 +101,93 @@ class AIReviewer:
         if not cfg.enabled:
             raise ValueError("AI review is disabled in config")
 
-        prompt = self._build_prompt(pr_title, pr_body, diffs, file_contents or [], cfg)
+        prompt = self._build_prompt(
+            pr_title,
+            pr_body,
+            diffs,
+            file_contents or [],
+            cfg,
+        )
+
         request = CompletionRequest(
             system=SYSTEM_PROMPT,
             prompt=prompt,
             model=cfg.model,
             max_tokens=MAX_TOKENS,
             timeout_seconds=getattr(cfg, "timeout_seconds", 60),
-            # Do not force a temperature value here. The pre-backend reviewer
-            # did not set one, so provider defaults must remain unchanged.
+            # Do not force a temperature value here. The pre-backend
+            # reviewer did not set one, so provider defaults remain unchanged.
             temperature=None,
         )
 
         try:
-            text = await self._complete_with_retries(cfg, request)
+            text = await self._complete_with_retries(
+                cfg,
+                request,
+            )
+
         except BackendUnavailable as exc:
-            # Misconfiguration, not a transient failure — retrying a missing
-            # API key just wastes the PR author's time waiting.
-            log.error("AI review backend unavailable: %s", exc)
+            # Missing API keys or unavailable dependencies are not transient.
+            log.error(
+                "AI review backend unavailable: %s",
+                exc,
+            )
             return _unavailable()
+
         except BackendError as exc:
-            log.error("AI review failed: %s", exc)
+            log.error(
+                "AI review failed: %s",
+                exc,
+            )
             return _unavailable()
+
         except Exception:
-            log.exception("Unexpected AI review failure")
+            log.exception(
+                "Unexpected AI review failure"
+            )
             return _unavailable()
 
         return self._parse(text)
 
     async def _complete_with_retries(
-        self, cfg, request: CompletionRequest
+        self,
+        cfg,
+        request: CompletionRequest,
     ) -> str:
         backend = self._get_backend(cfg)
 
-        max_retries = max(0, int(getattr(cfg, "max_retries", 2)))
+        configured_retries = getattr(
+            cfg,
+            "max_retries",
+            2,
+        )
+
+        try:
+            max_retries = int(configured_retries)
+        except (TypeError, ValueError):
+            log.warning(
+                "Invalid AI max_retries=%r; using default of 2",
+                configured_retries,
+            )
+            max_retries = 2
+
+        max_retries = max(
+            0,
+            min(max_retries, MAX_RETRY_LIMIT),
+        )
+
         attempts = max_retries + 1
         last_error: BackendTransientError | None = None
 
         for attempt in range(attempts):
             try:
                 return await backend.complete(request)
+
             except BackendUnavailable:
                 # Retrying a missing API key or unavailable dependency never
-                # helps, so this is deliberately outside the retry contract.
+                # helps, so this remains outside the retry contract.
                 raise
+
             except BackendTransientError as exc:
                 last_error = exc
 
@@ -141,6 +195,7 @@ class AIReviewer:
                     break
 
                 delay = RETRY_BASE_DELAY * (2**attempt)
+
                 log.warning(
                     "AI review attempt %d/%d failed transiently (%s) "
                     "— retrying in %.1fs",
@@ -149,29 +204,93 @@ class AIReviewer:
                     exc,
                     delay,
                 )
+
                 await asyncio.sleep(delay)
+
             except BackendError:
                 # Permanent backend failures are intentionally not retried.
-                # The backend has already determined that another identical
-                # request is not expected to succeed.
                 raise
 
-        raise last_error or BackendError("AI review produced no response")
+        raise last_error or BackendError(
+            "AI review produced no response"
+        )
 
     @staticmethod
     def _build_prompt(
-        pr_title: str, pr_body: str, diffs: list, file_contents: list, cfg
+        pr_title: str,
+        pr_body: str,
+        diffs: list[dict[str, str]],
+        file_contents: list[dict[str, str]],
+        cfg,
     ) -> str:
-        focus = ", ".join(cfg.focus_areas)
-        diff_text = "\n\n".join(
-            f"**{d['path']}**\n```diff\n{d['diff'][:6000]}\n```" for d in diffs[:15]
+        focus_areas = getattr(
+            cfg,
+            "focus_areas",
+            [],
         )
-        files_text = "\n\n".join(
-            f"**Full content — {f['path']}**\n```\n{f['content']}\n```"
-            for f in file_contents
+
+        focus = ", ".join(
+            str(area)
+            for area in focus_areas
         )
+
+        max_comments = getattr(
+            cfg,
+            "max_comments",
+            5,
+        )
+
+        diff_blocks: list[str] = []
+
+        for diff in diffs[:MAX_REVIEW_FILES]:
+            if not isinstance(diff, dict):
+                continue
+
+            path = diff.get("path", "")
+            content = diff.get("diff", "")
+
+            if not isinstance(path, str):
+                path = str(path)
+
+            if not isinstance(content, str):
+                content = str(content)
+
+            diff_blocks.append(
+                f"**{path}**\n"
+                f"```diff\n"
+                f"{content[:MAX_DIFF_CHARS_PER_FILE]}\n"
+                f"```"
+            )
+
+        diff_text = "\n\n".join(diff_blocks)
+
+        file_blocks: list[str] = []
+
+        for file_content in file_contents:
+            if not isinstance(file_content, dict):
+                continue
+
+            path = file_content.get("path", "")
+            content = file_content.get("content", "")
+
+            if not isinstance(path, str):
+                path = str(path)
+
+            if not isinstance(content, str):
+                content = str(content)
+
+            file_blocks.append(
+                f"**Full content — {path}**\n"
+                f"```\n"
+                f"{content}\n"
+                f"```"
+            )
+
+        files_text = "\n\n".join(file_blocks)
+
         files_block = (
-            f"\n\n**Full file contents (for context):**\n{files_text}\n"
+            "\n\n**Full file contents (for context):**\n"
+            f"{files_text}\n"
             if files_text
             else ""
         )
@@ -179,9 +298,9 @@ class AIReviewer:
         return f"""Review this pull request. Judge the code only — ignore PR title/description quality.
 
 **Title:** {pr_title}
-**Description:** {pr_body or '(none)'}
+**Description:** {pr_body or "(none)"}
 **Focus areas:** {focus}
-**Max inline comments:** {cfg.max_comments}
+**Max inline comments:** {max_comments}
 {files_block}
 **Diffs:**
 {diff_text}
@@ -203,59 +322,152 @@ Respond with JSON only:
 
     @staticmethod
     def _parse(text: str) -> dict[str, Any]:
+        if not isinstance(text, str) or not text.strip():
+            return {
+                "summary": (
+                    "_AI review could not be parsed this time — "
+                    "the model returned an empty response._"
+                ),
+                "verdict": "comment",
+                "score": 50,
+                "comments": [],
+                "failed": True,
+            }
+
         try:
-            clean = (
-                text.strip()
-                .removeprefix("```json")
-                .removeprefix("```")
-                .removesuffix("```")
-                .strip()
+            clean = text.strip()
+
+            if clean.startswith("```json"):
+                clean = clean[len("```json"):].strip()
+            elif clean.startswith("```"):
+                clean = clean[len("```"):].strip()
+
+            if clean.endswith("```"):
+                clean = clean[:-3].strip()
+
+            # The model is instructed to return JSON only, but extracting the
+            # outer object makes parsing tolerant of accidental surrounding text.
+            match = re.search(
+                r"\{.*\}",
+                clean,
+                re.DOTALL,
             )
 
-            match = re.search(r"\{.*\}", clean, re.DOTALL)
-            clean = match.group(0) if match else clean
+            if match:
+                clean = match.group(0)
+
             parsed = json.loads(clean)
+
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    "AI review response must be a JSON object"
+                )
+
+            summary = parsed.get("summary")
+            verdict = parsed.get("verdict")
+            score = parsed.get("score")
+            comments = parsed.get("comments")
+
             if (
-                not isinstance(parsed, dict)
-                or not isinstance(parsed.get("summary"), str)
-                or not parsed["summary"].strip()
-                or parsed.get("verdict") not in ("approve", "request_changes", "comment")
-                or isinstance(parsed.get("score"), bool)
-                or not isinstance(parsed.get("score"), int)
-                or not isinstance(parsed.get("comments"), list)
-                or not all(isinstance(c, dict) for c in parsed["comments"])
+                not isinstance(summary, str)
+                or not summary.strip()
             ):
-                raise ValueError("Incomplete AI review response")
-            return {
-                "summary": str(parsed.get("summary", "")),
-                "failed": False,
-                "verdict": (
-                    parsed.get("verdict", "comment")
-                    if parsed.get("verdict")
-                    in ("approve", "request_changes", "comment")
-                    else "comment"
-                ),
-                "score": max(0, min(100, int(parsed.get("score", 50)))),
-                "comments": [
+                raise ValueError(
+                    "AI review response has no valid summary"
+                )
+
+            if verdict not in (
+                "approve",
+                "request_changes",
+                "comment",
+            ):
+                raise ValueError(
+                    "AI review response has an invalid verdict"
+                )
+
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, int)
+            ):
+                raise ValueError(
+                    "AI review response has an invalid score"
+                )
+
+            if not isinstance(comments, list):
+                raise ValueError(
+                    "AI review response has invalid comments"
+                )
+
+            normalized_comments: list[dict[str, Any]] = []
+
+            for comment in comments[:MAX_REVIEW_COMMENTS]:
+                if not isinstance(comment, dict):
+                    continue
+
+                path = comment.get("path")
+                line = comment.get("line", 1)
+                body = comment.get("body")
+                severity = comment.get("severity", "info")
+
+                if not isinstance(path, str) or not path.strip():
+                    continue
+
+                if not isinstance(body, str) or not body.strip():
+                    continue
+
+                if (
+                    isinstance(line, bool)
+                    or not isinstance(line, int)
+                ):
+                    line = 1
+
+                if line < 1:
+                    line = 1
+
+                if severity not in (
+                    "info",
+                    "warning",
+                    "error",
+                ):
+                    severity = "info"
+
+                normalized_comments.append(
                     {
-                        "path": str(c.get("path", "")),
-                        "line": max(1, int(c.get("line", 1))),
-                        "body": str(c.get("body", "")),
-                        "severity": (
-                            c.get("severity", "info")
-                            if c.get("severity")
-                            in ("info", "warning", "error")
-                            else "info"
-                        ),
+                        "path": path.strip(),
+                        "line": line,
+                        "body": body.strip(),
+                        "severity": severity,
                     }
-                    for c in (parsed.get("comments") or [])[:20]
-                    if c.get("path") and c.get("body")
-                ],
-            }
-        except Exception as exc:
-            log.warning("Failed to parse AI response: %s | raw=%s", exc, text[:300])
+                )
+
             return {
-                "summary": "_AI review could not be parsed this time — the model's response wasn't valid JSON. This usually clears up on retry._",
+                "summary": summary.strip(),
+                "failed": False,
+                "verdict": verdict,
+                "score": max(
+                    0,
+                    min(100, score),
+                ),
+                "comments": normalized_comments,
+            }
+
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            log.warning(
+                "Failed to parse AI response: %s | raw=%s",
+                exc,
+                text[:300],
+            )
+
+            return {
+                "summary": (
+                    "_AI review could not be parsed this time — "
+                    "the model's response wasn't valid JSON. "
+                    "This usually clears up on retry._"
+                ),
                 "verdict": "comment",
                 "score": 50,
                 "comments": [],
@@ -265,3 +477,4 @@ Respond with JSON only:
     async def close(self) -> None:
         if self._backend is not None:
             await self._backend.close()
+            self._backend = None
