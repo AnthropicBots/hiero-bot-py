@@ -123,12 +123,16 @@ class WebhookRouter:
             log.debug("No config for %s/%s — skipping", owner, repo)
             return {"ok": True, "skipped": "no config"}
 
+        account = await db.scalar(
+            select(Account).where(Account.github_installation_id == installation_id)
+        )
         ctx = {
             "owner": owner,
             "repo": repo,
             "installation_id": installation_id,
             "config": config,
             "db": db,
+            "account": account,
         }
 
         await self._dispatch(event, payload, ctx)

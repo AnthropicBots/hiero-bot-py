@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy import select
 
 from app.ai.reviewer import AIReviewer
+from app.billing.gating import is_premium_account
 from app.db.models import ReviewerRecommendation
 from app.github.client import GitHubClient
 from app.utils import audit
@@ -119,18 +120,38 @@ class PullRequestWorkflow:
             },
         )
 
-        # AI review
-        if action in ("opened", "reopened") and cfg.ai_review.enabled:
-            try:
-                await self._run_ai_review(ctx, pr)
-            finally:
-                # PullRequestWorkflow owns its AIReviewer, so always release
-                # provider connections after the review attempt completes.
-                await self._ai.close()
+        # AI review and reviewer recommendation are the Premium features the
+        # dashboard advertises. Quality gates above stay available on free.
+        # Missing account is free: an installation with no row must not
+        # receive paid features.
+        premium = is_premium_account(ctx.get("account"))
 
-        # Reviewer recommendation
+        if action in ("opened", "reopened") and cfg.ai_review.enabled:
+            if not premium:
+                log.info(
+                    "Skipping AI review for %s/%s#%s: account is not premium",
+                    owner,
+                    repo,
+                    pr_number,
+                )
+            else:
+                try:
+                    await self._run_ai_review(ctx, pr)
+                finally:
+                    # PullRequestWorkflow owns its AIReviewer, so always release
+                    # provider connections after the review attempt completes.
+                    await self._ai.close()
+
         if action in ("opened", "reopened") and cfg.reviewer_recommendation:
-            await self._recommend_reviewers(ctx, pr)
+            if not premium:
+                log.info(
+                    "Skipping reviewer recommendation for %s/%s#%s: account is not premium",
+                    owner,
+                    repo,
+                    pr_number,
+                )
+            else:
+                await self._recommend_reviewers(ctx, pr)
 
         await db.commit()
 

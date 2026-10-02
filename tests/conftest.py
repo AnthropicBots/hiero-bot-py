@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.auth.sync import clear_sync_cache
 from app.config.schema import RepoConfig
 from app.db.database import Base
+from app.db.models import Account
 
 
 @pytest_asyncio.fixture
@@ -110,4 +111,11 @@ def ctx(base_config, db):
         "installation_id": 42,
         "config": base_config,
         "db": db,
+        # Workflow tests exercise the feature itself. Entitlement is covered
+        # by tests that set plan_tier to free or omit the account.
+        "account": Account(
+            github_installation_id=42,
+            org_login="hiero",
+            plan_tier="premium",
+        ),
     }

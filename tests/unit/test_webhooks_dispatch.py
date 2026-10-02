@@ -139,6 +139,43 @@ async def test_missing_config_is_skipped(db):
     assert result == {"ok": True, "skipped": "no config"}
 
 
+@pytest.mark.asyncio
+async def test_handle_attaches_installation_account(db):
+    acc = Account(github_installation_id=42, org_login="hiero", plan_tier="free")
+    db.add(acc)
+    await db.commit()
+
+    router, _, _ = make_router()
+    router._dispatch = AsyncMock()
+    payload = {
+        "repository": {"owner": {"login": "hiero"}, "name": "sdk-js"},
+        "installation": {"id": 42},
+    }
+    request = make_request({"X-GitHub-Event": "pull_request"}, payload)
+
+    result = await router.handle(request, db)
+
+    assert result == {"ok": True}
+    attached = router._dispatch.await_args.args[2]["account"]
+    assert attached.github_installation_id == 42
+    assert attached.plan_tier == "free"
+
+
+@pytest.mark.asyncio
+async def test_handle_sets_account_to_none_when_installation_is_unknown(db):
+    router, _, _ = make_router()
+    router._dispatch = AsyncMock()
+    payload = {
+        "repository": {"owner": {"login": "hiero"}, "name": "sdk-js"},
+        "installation": {"id": 42},
+    }
+    request = make_request({"X-GitHub-Event": "pull_request"}, payload)
+
+    await router.handle(request, db)
+
+    assert router._dispatch.await_args.args[2]["account"] is None
+
+
 # ── _dispatch(): issues / pull_request / issue_comment routing ─────────
 
 @pytest.mark.asyncio
