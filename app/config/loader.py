@@ -66,8 +66,9 @@ class _CacheEntry:
 
 @dataclass
 class _InFlight:
-    """One contents-API fetch shared by every caller waiting on the same repo."""
+    """One contents-API fetch shared by callers of the same cache generation."""
 
+    generation: int
     event: asyncio.Event = field(default_factory=asyncio.Event)
     result: RepoConfig | None = None
     error: BaseException | None = None
@@ -78,8 +79,12 @@ class ConfigLoader:
         self._client = github_client
         self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._in_flight: dict[str, _InFlight] = {}
+        # Bumped by invalidate() and clear() so a fetch that started earlier
+        # cannot republish its result into the cache.
+        self._generation: dict[str, int] = {}
         self._hits = 0
         self._misses = 0
+        self._coalesced = 0
 
     async def load(
         self, owner: str, repo: str, installation_id: int = 0
@@ -103,15 +108,18 @@ class ConfigLoader:
             return config
 
         # No await between the miss check and registration, so two coroutines
-        # cannot both decide they are the leader for this key.
+        # cannot both decide they are the leader for this generation.
+        generation = self._generation.get(key, 0)
         flight = self._in_flight.get(key)
-        if flight is None:
-            flight = _InFlight()
+        if flight is None or flight.generation != generation:
+            flight = _InFlight(generation=generation)
             self._in_flight[key] = flight
             completed = False
             try:
                 self._misses += 1
-                config = await self._fetch(owner, repo, installation_id, key)
+                config = await self._fetch(
+                    owner, repo, installation_id, key, generation
+                )
                 flight.result = config
                 completed = True
                 return config
@@ -130,7 +138,10 @@ class ConfigLoader:
         await flight.event.wait()
         if flight.error is not None:
             raise flight.error
-        self._hits += 1
+        # Joining an in-flight fetch is not a cache hit: the entry was missing
+        # when this caller looked. Count it separately so `hits` stays
+        # "served from _cache".
+        self._coalesced += 1
         return flight.result
 
     def _read_cache(self, key: str) -> tuple[bool, RepoConfig | None]:
@@ -142,7 +153,12 @@ class ConfigLoader:
         return True, entry.config
 
     async def _fetch(
-        self, owner: str, repo: str, installation_id: int, key: str
+        self,
+        owner: str,
+        repo: str,
+        installation_id: int,
+        key: str,
+        generation: int,
     ) -> RepoConfig | None:
         try:
             raw_b64 = await self._client.get_file_content(
@@ -156,19 +172,19 @@ class ConfigLoader:
             # propagated as a 500 instead of disabling the bot for that repo.
             if exc.response.status_code == 404:
                 log.debug("No config for %s — bot disabled", key)
-                self._store(key, None)
+                self._store_if_current(key, None, generation)
                 return None
             log.error("Failed loading config for %s: %s", key, exc)
             raise
 
         if raw_b64 is None:
             log.debug("No config for %s — bot disabled", key)
-            self._store(key, None)
+            self._store_if_current(key, None, generation)
             return None
 
         config = self._parse(key, raw_b64)
-        self._store(key, config)
-        log.info("Loaded config for %s", key)
+        if self._store_if_current(key, config, generation):
+            log.info("Loaded config for %s", key)
         return config
 
     # ── Parsing ───────────────────────────────────────────────
@@ -235,11 +251,28 @@ class ConfigLoader:
             evicted, _ = self._cache.popitem(last=False)
             log.debug("Evicted config cache entry for %s", evicted)
 
+    def _store_if_current(
+        self, key: str, config: RepoConfig | None, generation: int
+    ) -> bool:
+        """Store only when this fetch still belongs to the current generation."""
+        if self._generation.get(key, 0) != generation:
+            log.debug("Dropping stale config fetch for %s", key)
+            return False
+        self._store(key, config)
+        return True
+
+    def _bump(self, key: str) -> None:
+        self._generation[key] = self._generation.get(key, 0) + 1
+
     def invalidate(self, owner: str, repo: str) -> None:
-        self._cache.pop(f"{owner}/{repo}", None)
+        key = f"{owner}/{repo}"
+        self._cache.pop(key, None)
+        self._bump(key)
 
     def clear(self) -> None:
         self._cache.clear()
+        for key in set(self._generation) | set(self._in_flight):
+            self._bump(key)
 
     def stats(self) -> dict[str, int]:
         """Cache counters, for the dashboard and for debugging live installs."""
@@ -250,4 +283,5 @@ class ConfigLoader:
             ),
             "hits": self._hits,
             "misses": self._misses,
+            "coalesced": self._coalesced,
         }
