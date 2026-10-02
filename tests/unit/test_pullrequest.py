@@ -550,3 +550,131 @@ async def test_missing_account_skips_premium_steps(mock_gh, ctx):
 
     wf._run_ai_review.assert_not_awaited()
     wf._recommend_reviewers.assert_not_awaited()
+
+
+def _disable_all_gates(ctx):
+    g = ctx["config"].workflows.pull_request.quality_gates
+    g.require_linked_issue = False
+    g.require_tests = False
+    g.require_dco = False
+    g.require_gpg_signature = False
+    g.max_files_changed = None
+    g.allowed_branch_pattern = None
+    g.require_changelog_entry = False
+    return g
+
+
+@pytest.mark.asyncio
+async def test_no_gates_enabled_skips_label_and_audit(mock_gh, ctx, monkeypatch):
+    _disable_all_gates(ctx)
+    recorded = AsyncMock()
+    monkeypatch.setattr("app.workflows.pullrequest.audit.record", recorded)
+
+    wf = PullRequestWorkflow(mock_gh)
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    mock_gh.add_label.assert_not_awaited()
+    mock_gh.remove_label.assert_not_awaited()
+    mock_gh.post_comment.assert_not_awaited()
+    recorded.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        ("contest_utils.py", False),
+        ("src/latest/handler.py", False),
+        ("src/contest/app.py", False),
+        ("src/attest_test_data.py", False),
+        ("test_utils.py", True),
+        ("src/test_utils.py", True),
+        ("tests/helpers.py", True),
+        ("pkg/utils_test.py", True),
+        ("web/app.test.ts", True),
+        ("web/app.spec.jsx", True),
+    ],
+)
+async def test_test_file_regex_is_anchored(mock_gh, ctx, filename, expected):
+    g = _disable_all_gates(ctx)
+    g.require_tests = True
+    mock_gh.list_pr_files = AsyncMock(return_value=[{"filename": filename}])
+
+    wf = PullRequestWorkflow(mock_gh)
+    checks = await wf._run_quality_checks(ctx, make_pr())
+
+    assert next(c for c in checks if c.name == "Tests").passed is expected
+
+
+def _commit(message, parents=1):
+    return {"commit": {"message": message}, "parents": [{}] * parents}
+
+
+@pytest.mark.asyncio
+async def test_dco_passes_when_all_commits_have_signoff_trailer(mock_gh, ctx):
+    g = _disable_all_gates(ctx)
+    g.require_dco = True
+    mock_gh.list_pr_commits = AsyncMock(return_value=[
+        _commit("fix: a\n\nSigned-off-by: Alice <alice@example.com>"),
+        _commit("fix: b\n\nsigned-off-by: Alice <alice@example.com>"),
+        _commit("Merge branch 'main'", parents=2),
+    ])
+
+    wf = PullRequestWorkflow(mock_gh)
+    checks = await wf._run_quality_checks(ctx, make_pr())
+
+    assert next(c for c in checks if c.name == "DCO Sign-off").passed is True
+
+
+@pytest.mark.asyncio
+async def test_dco_fails_when_a_commit_lacks_signoff_and_no_status(mock_gh, ctx):
+    g = _disable_all_gates(ctx)
+    g.require_dco = True
+    mock_gh.list_pr_commits = AsyncMock(return_value=[
+        _commit("fix: a\n\nSigned-off-by: Alice <alice@example.com>"),
+        _commit("fix: b"),
+    ])
+    mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
+
+    wf = PullRequestWorkflow(mock_gh)
+    checks = await wf._run_quality_checks(ctx, make_pr())
+
+    assert next(c for c in checks if c.name == "DCO Sign-off").passed is False
+
+
+@pytest.mark.asyncio
+async def test_dco_falls_back_to_status_when_trailers_missing(mock_gh, ctx):
+    g = _disable_all_gates(ctx)
+    g.require_dco = True
+    mock_gh.list_pr_commits = AsyncMock(return_value=[_commit("fix: b")])
+    mock_gh.get_combined_status = AsyncMock(return_value={
+        "statuses": [{"context": "DCO", "state": "success"}]
+    })
+
+    wf = PullRequestWorkflow(mock_gh)
+    checks = await wf._run_quality_checks(ctx, make_pr())
+
+    assert next(c for c in checks if c.name == "DCO Sign-off").passed is True
+
+
+@pytest.mark.asyncio
+async def test_commits_fetched_once_when_dco_and_gpg_both_enabled(mock_gh, ctx):
+    g = _disable_all_gates(ctx)
+    g.require_dco = True
+    g.require_gpg_signature = True
+    mock_gh.list_pr_commits = AsyncMock(return_value=[
+        {
+            "commit": {
+                "message": "fix\n\nSigned-off-by: Alice <alice@example.com>",
+                "verification": {"verified": True},
+            },
+            "parents": [{}],
+        }
+    ])
+
+    wf = PullRequestWorkflow(mock_gh)
+    checks = await wf._run_quality_checks(ctx, make_pr())
+
+    assert mock_gh.list_pr_commits.await_count == 1
+    assert next(c for c in checks if c.name == "DCO Sign-off").passed is True
+    assert next(c for c in checks if c.name == "GPG Signature").passed is True
