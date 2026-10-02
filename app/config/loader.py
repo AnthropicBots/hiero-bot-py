@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import httpx
@@ -63,10 +64,20 @@ class _CacheEntry:
         return time.monotonic() < self.expires_at
 
 
+@dataclass
+class _InFlight:
+    """One contents-API fetch shared by every caller waiting on the same repo."""
+
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    result: RepoConfig | None = None
+    error: BaseException | None = None
+
+
 class ConfigLoader:
     def __init__(self, github_client: GitHubClient) -> None:
         self._client = github_client
         self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
+        self._in_flight: dict[str, _InFlight] = {}
         self._hits = 0
         self._misses = 0
 
@@ -80,17 +91,59 @@ class ConfigLoader:
         completely silent in that case. Raises ConfigInvalid when a file exists
         but is unusable, so the problem surfaces instead of the repo silently
         behaving as if the bot were uninstalled.
+
+        Concurrent misses for the same repo share a single GitHub request.
+        Callers that arrive while a fetch is running wait for it instead of
+        starting another one.
         """
         key = f"{owner}/{repo}"
 
+        hit, config = self._read_cache(key)
+        if hit:
+            return config
+
+        # No await between the miss check and registration, so two coroutines
+        # cannot both decide they are the leader for this key.
+        flight = self._in_flight.get(key)
+        if flight is None:
+            flight = _InFlight()
+            self._in_flight[key] = flight
+            completed = False
+            try:
+                self._misses += 1
+                config = await self._fetch(owner, repo, installation_id, key)
+                flight.result = config
+                completed = True
+                return config
+            except Exception as exc:
+                flight.error = exc
+                raise
+            finally:
+                # A cancelled leader must not look like a successful empty
+                # config to the coroutines waiting on this fetch.
+                if not completed and flight.error is None:
+                    flight.error = RuntimeError("config fetch was cancelled")
+                flight.event.set()
+                if self._in_flight.get(key) is flight:
+                    del self._in_flight[key]
+
+        await flight.event.wait()
+        if flight.error is not None:
+            raise flight.error
+        self._hits += 1
+        return flight.result
+
+    def _read_cache(self, key: str) -> tuple[bool, RepoConfig | None]:
         entry = self._cache.get(key)
-        if entry is not None and entry.fresh:
-            self._hits += 1
-            self._cache.move_to_end(key)
-            return entry.config
+        if entry is None or not entry.fresh:
+            return False, None
+        self._hits += 1
+        self._cache.move_to_end(key)
+        return True, entry.config
 
-        self._misses += 1
-
+    async def _fetch(
+        self, owner: str, repo: str, installation_id: int, key: str
+    ) -> RepoConfig | None:
         try:
             raw_b64 = await self._client.get_file_content(
                 owner, repo, _CONFIG_PATH, installation_id
