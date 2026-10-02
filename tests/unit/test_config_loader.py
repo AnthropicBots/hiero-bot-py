@@ -215,12 +215,27 @@ async def test_broken_base64_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_invalid_config_is_not_cached():
+async def test_invalid_config_is_cached():
     loader, client = make_loader(encode("- list\n"))
 
     for _ in range(2):
         with pytest.raises(ConfigInvalid):
             await loader.load("hiero", "sdk-js", 42)
+
+    assert client.get_file_content.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_config_cache_is_cleared_by_invalidate():
+    loader, client = make_loader(encode("- list\n"))
+
+    with pytest.raises(ConfigInvalid):
+        await loader.load("hiero", "sdk-js", 42)
+
+    loader.invalidate("hiero", "sdk-js")
+
+    with pytest.raises(ConfigInvalid):
+        await loader.load("hiero", "sdk-js", 42)
 
     assert client.get_file_content.await_count == 2
 
