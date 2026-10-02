@@ -7,14 +7,9 @@
 repo: "hiero/your-repo"
 
 difficulty_labels:
-  good_first_issue: "good first issue"
   intermediate: "intermediate"
-  advanced: "advanced"
 
 teams:
-  maintainers: "maintainers"
-  committers: "committers"
-  junior_committers: "junior-committers"
   mentors: "mentors"
 
 workflows:
@@ -78,15 +73,12 @@ workflows:
       require_tests: true
       require_dco: true
       require_gpg_signature: false
-      min_reviewers: 1
       # max_files_changed: 50
       require_changelog_entry: false
       require_linked_issue: false
       # allowed_branch_pattern: "^(feat|fix|chore|docs)/"   # max 200 characters
 
     auto_label: true
-    stale_pr_days: 30
-    auto_close_stale: false
 
   #  Reviewer Assignment
   #
@@ -155,19 +147,16 @@ workflows:
       min_merged_prs: 3
       min_reviews_given: 2
       min_months_active: 1
-      require_endorsement_from: committer
 
     requirements_for_committer:
       min_merged_prs: 15
       min_reviews_given: 10
       min_months_active: 6
-      require_endorsement_from: maintainer
 
     requirements_for_maintainer:
       min_merged_prs: 50
       min_reviews_given: 30
       min_months_active: 12
-      require_endorsement_from: maintainer
 
   # Issue Management 
   issue_management:
@@ -183,7 +172,5 @@ workflows:
     label_escalation_rules:
       - label: "security"
         notify_team: "security-team"
-        after_hours: 24
       - label: "needs-maintainer"
         notify_team: "maintainers"
-        after_hours: 48

@@ -57,6 +57,7 @@ class ConfigInvalid(ConfigError):
 class _CacheEntry:
     config: RepoConfig | None
     expires_at: float
+    invalid_detail: str | None = None
 
     @property
     def fresh(self) -> bool:
@@ -87,6 +88,10 @@ class ConfigLoader:
         if entry is not None and entry.fresh:
             self._hits += 1
             self._cache.move_to_end(key)
+
+            if entry.invalid_detail is not None:
+                raise ConfigInvalid(key, entry.invalid_detail)
+
             return entry.config
 
         self._misses += 1
@@ -113,7 +118,12 @@ class ConfigLoader:
             self._store(key, None)
             return None
 
-        config = self._parse(key, raw_b64)
+        try:
+            config = self._parse(key, raw_b64)
+        except ConfigInvalid as exc:
+            self._store_invalid(key, exc.detail)
+            raise
+
         self._store(key, config)
         log.info("Loaded config for %s", key)
         return config
@@ -172,6 +182,18 @@ class ConfigLoader:
         return config
 
     # ── Cache management ──────────────────────────────────────
+
+    def _store_invalid(self, key: str, detail: str) -> None:
+        self._cache[key] = _CacheEntry(
+            config=None,
+            expires_at=time.monotonic() + _NEGATIVE_CACHE_TTL,
+            invalid_detail=detail,
+        )
+        self._cache.move_to_end(key)
+
+        while len(self._cache) > _MAX_CACHE_ENTRIES:
+            evicted, _ = self._cache.popitem(last=False)
+            log.debug("Evicted config cache entry for %s", evicted)
 
     def _store(self, key: str, config: RepoConfig | None) -> None:
         ttl = _CACHE_TTL if config is not None else _NEGATIVE_CACHE_TTL
