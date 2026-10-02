@@ -519,6 +519,39 @@ async def test_incomplete_ai_response_posts_no_score(mock_gh, ctx):
     assert "pr.reviewed" not in [row.action for row in rows]
 
 
+@pytest.mark.asyncio
+async def test_free_account_keeps_quality_gates_and_skips_premium_steps(mock_gh, ctx):
+    ctx["account"].plan_tier = "free"
+    cfg = ctx["config"].workflows.pull_request
+    cfg.ai_review.enabled = True
+    cfg.reviewer_recommendation = True
+    wf = PullRequestWorkflow(mock_gh)
+    wf._run_ai_review = AsyncMock()
+    wf._recommend_reviewers = AsyncMock()
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    wf._run_ai_review.assert_not_awaited()
+    wf._recommend_reviewers.assert_not_awaited()
+    mock_gh.add_label.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_account_skips_premium_steps(mock_gh, ctx):
+    ctx.pop("account")
+    cfg = ctx["config"].workflows.pull_request
+    cfg.ai_review.enabled = True
+    cfg.reviewer_recommendation = True
+    wf = PullRequestWorkflow(mock_gh)
+    wf._run_ai_review = AsyncMock()
+    wf._recommend_reviewers = AsyncMock()
+
+    await wf.handle_pr_opened(ctx, make_payload(), "opened")
+
+    wf._run_ai_review.assert_not_awaited()
+    wf._recommend_reviewers.assert_not_awaited()
+
+
 def _disable_all_gates(ctx):
     g = ctx["config"].workflows.pull_request.quality_gates
     g.require_linked_issue = False

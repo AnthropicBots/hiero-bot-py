@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.billing.gating import tier_for_subscription_status
 from app.db.database import get_db
 from app.db.models import Account, StripeEvent
 from app.utils.logger import get_logger
@@ -166,16 +167,29 @@ async def stripe_webhook(
     account = await _get_account(db, data_obj)
 
     if account:
-        if event_type in (
-            "checkout.session.completed",
+        if event_type == "checkout.session.completed":
+            # Checkout does not carry a subscription status. A later
+            # customer.subscription.updated event corrects the tier if the
+            # subscription is not active or trialing.
+            account.plan_tier = "premium"
+            log.info(
+                "Upgraded Account ID %d (%s) to premium tier via checkout",
+                account.id,
+                account.org_login,
+            )
+
+        elif event_type in (
             "customer.subscription.created",
             "customer.subscription.updated",
         ):
-            account.plan_tier = "premium"
+            subscription_status = data_obj.get("status")
+            account.plan_tier = tier_for_subscription_status(subscription_status)
             log.info(
-                "Upgraded Account ID %d (%s) to premium tier",
+                "Set Account ID %d (%s) to %s from subscription status %s",
                 account.id,
                 account.org_login,
+                account.plan_tier,
+                subscription_status,
             )
 
         elif event_type == "customer.subscription.deleted":
