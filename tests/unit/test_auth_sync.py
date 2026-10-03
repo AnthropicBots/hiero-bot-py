@@ -15,7 +15,7 @@ from app.auth.sync import (
     clear_sync_cache,
     get_user_authorized_accounts,
 )
-from app.db.models import Account, AccountUser, User, UserOAuthToken
+from app.db.models import Account, AccountRepo, AccountUser, User, UserOAuthToken
 
 
 def make_github_client_mock(status_code=200, json_data=None):
@@ -319,3 +319,76 @@ def test_clear_sync_cache_empties_the_cache():
     _SYNC_CACHE[123] = (time.time(), [{"id": 1}])
     clear_sync_cache()
     assert _SYNC_CACHE == {}
+
+@pytest.mark.asyncio
+async def test_missing_installation_creates_account_and_repos(db):
+    """A GitHub installation missing from the DB is created and linked."""
+    user = User(github_user_id=11, github_login="new-user")
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    token = UserOAuthToken(
+        user_id=user.id,
+        encrypted_access_token=encrypt_token("gho_realtoken"),
+    )
+    db.add(token)
+    await db.commit()
+
+    ctx_manager = make_github_client_mock(
+        status_code=200,
+        json_data={
+            "installations": [
+                {
+                    "id": 2222,
+                    "account": {
+                        "id": 3333,
+                        "login": "new-org",
+                        "type": "Organization",
+                    },
+                    "repositories": [
+                        {"name": "repo-one"},
+                        {"name": "repo-two"},
+                    ],
+                }
+            ]
+        },
+    )
+
+    with patch("app.auth.sync.httpx.AsyncClient", return_value=ctx_manager):
+        result = await get_user_authorized_accounts(user, db)
+
+    assert len(result) == 1
+    assert result[0]["org_login"] == "new-org"
+    assert sorted(result[0]["repos"]) == ["repo-one", "repo-two"]
+
+    from sqlalchemy import select
+
+    account = (
+        await db.execute(
+            select(Account).where(Account.github_installation_id == 2222)
+        )
+    ).scalar_one()
+
+    assert account.github_account_id == 3333
+    assert account.org_login == "new-org"
+    assert account.account_type == "Organization"
+
+    account_user = (
+        await db.execute(
+            select(AccountUser).where(
+                AccountUser.account_id == account.id,
+                AccountUser.user_id == user.id,
+            )
+        )
+    ).scalar_one()
+
+    assert account_user.authorized is True
+
+    repos = (
+        await db.execute(
+            select(AccountRepo).where(AccountRepo.account_id == account.id)
+        )
+    ).scalars().all()
+
+    assert sorted(repo.repo_name for repo in repos) == ["repo-one", "repo-two"]

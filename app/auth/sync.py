@@ -20,7 +20,11 @@ CACHE_TTL_SECONDS = 300  # 5 minutes
 
 
 def _prune_expired_cache(now: float) -> None:
-    expired_keys = [uid for uid, (t, _) in _SYNC_CACHE.items() if now - t > CACHE_TTL_SECONDS * 2]
+    expired_keys = [
+        uid
+        for uid, (t, _) in _SYNC_CACHE.items()
+        if now - t > CACHE_TTL_SECONDS * 2
+    ]
     for uid in expired_keys:
         _SYNC_CACHE.pop(uid, None)
 
@@ -36,6 +40,7 @@ async def get_user_authorized_accounts(
 ) -> list[dict]:
     now = time.time()
     _prune_expired_cache(now)
+
     if not force_sync and user.id in _SYNC_CACHE:
         cached_time, cached_accounts = _SYNC_CACHE[user.id]
         if now - cached_time < CACHE_TTL_SECONDS:
@@ -49,6 +54,7 @@ async def get_user_authorized_accounts(
     if user_token and user_token.encrypted_access_token:
         try:
             token = decrypt_token(user_token.encrypted_access_token)
+
             if token:
                 async with httpx.AsyncClient() as client:
                     res = await client.get(
@@ -59,36 +65,105 @@ async def get_user_authorized_accounts(
                             "User-Agent": "Hiero-Bot-Py",
                         },
                     )
+
                     if res.status_code == 200:
                         installations = res.json().get("installations", [])
-                        inst_ids = [inst["id"] for inst in installations if "id" in inst]
 
-                        if inst_ids:
-                            acc_stmt = select(Account).where(Account.github_installation_id.in_(inst_ids))
+                        for installation in installations:
+                            inst_id = installation.get("id")
+                            if not inst_id:
+                                continue
+
+                            account_info = installation.get("account", {})
+                            org_login = account_info.get("login", "")
+                            github_account_id = account_info.get("id")
+                            account_type = account_info.get(
+                                "type", "Organization"
+                            )
+
+                            # Find the existing account for this installation.
+                            acc_stmt = select(Account).where(
+                                Account.github_installation_id == inst_id
+                            )
                             acc_res = await db.execute(acc_stmt)
-                            accounts = acc_res.scalars().all()
+                            acc = acc_res.scalar_one_or_none()
 
-                            for acc in accounts:
-                                au_stmt = select(AccountUser).where(
-                                    AccountUser.account_id == acc.id,
-                                    AccountUser.user_id == user.id,
+                            # Create the account if the installation exists on
+                            # GitHub but is missing from our database.
+                            if acc:
+                                if org_login:
+                                    acc.org_login = org_login
+                                if github_account_id is not None:
+                                    acc.github_account_id = github_account_id
+                                if account_info.get("type"):
+                                    acc.account_type = account_type
+                            else:
+                                acc = Account(
+                                    github_installation_id=inst_id,
+                                    github_account_id=github_account_id,
+                                    org_login=org_login,
+                                    account_type=account_type,
+                                    plan_tier="free",
                                 )
-                                au_res = await db.execute(au_stmt)
-                                au = au_res.scalar_one_or_none()
-                                if not au:
-                                    au = AccountUser(account_id=acc.id, user_id=user.id, authorized=True)
-                                    db.add(au)
-                                else:
-                                    au.authorized = True
-                            await db.commit()
+                                db.add(acc)
+                                await db.flush()
+
+                            # Link the logged-in user to the account.
+                            au_stmt = select(AccountUser).where(
+                                AccountUser.account_id == acc.id,
+                                AccountUser.user_id == user.id,
+                            )
+                            au_res = await db.execute(au_stmt)
+                            au = au_res.scalar_one_or_none()
+
+                            if not au:
+                                db.add(
+                                    AccountUser(
+                                        account_id=acc.id,
+                                        user_id=user.id,
+                                        authorized=True,
+                                    )
+                                )
+                            else:
+                                au.authorized = True
+
+                            # Sync repositories included in the installation
+                            # response.
+                            for repo in installation.get("repositories", []):
+                                repo_name = repo.get("name")
+                                if not repo_name:
+                                    continue
+
+                                repo_stmt = select(AccountRepo).where(
+                                    AccountRepo.account_id == acc.id,
+                                    AccountRepo.repo_name == repo_name,
+                                )
+                                repo_res = await db.execute(repo_stmt)
+
+                                if not repo_res.scalar_one_or_none():
+                                    db.add(
+                                        AccountRepo(
+                                            account_id=acc.id,
+                                            repo_name=repo_name,
+                                        )
+                                    )
+
+                        await db.commit()
+
         except Exception as e:
-            log.warning("Error syncing user installations from GitHub API: %s", e)
+            log.warning(
+                "Error syncing user installations from GitHub API: %s",
+                e,
+            )
 
     # Query DB for authorized accounts
     stmt = (
         select(Account)
         .join(AccountUser, Account.id == AccountUser.account_id)
-        .where(AccountUser.user_id == user.id, AccountUser.authorized == True)
+        .where(
+            AccountUser.user_id == user.id,
+            AccountUser.authorized == True,
+        )
     )
     db_res = await db.execute(stmt)
     accounts = db_res.scalars().all()
@@ -98,11 +173,17 @@ async def get_user_authorized_accounts(
         return []
 
     account_ids = [acc.id for acc in accounts]
-    repo_stmt = select(AccountRepo).where(AccountRepo.account_id.in_(account_ids))
+
+    repo_stmt = select(AccountRepo).where(
+        AccountRepo.account_id.in_(account_ids)
+    )
     repo_res = await db.execute(repo_stmt)
     repo_rows = repo_res.scalars().all()
 
-    repos_by_account: dict[int, list[str]] = {acc_id: [] for acc_id in account_ids}
+    repos_by_account: dict[int, list[str]] = {
+        acc_id: [] for acc_id in account_ids
+    }
+
     for r in repo_rows:
         repos_by_account[r.account_id].append(r.repo_name)
 
