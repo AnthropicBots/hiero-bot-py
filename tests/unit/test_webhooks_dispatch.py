@@ -419,6 +419,21 @@ async def test_slash_label_dispatches_to_label_handler(ctx):
 
 
 @pytest.mark.asyncio
+async def test_slash_label_preserves_full_argument_string(ctx):
+    router, _gh, _ = make_router()
+    router._handle_label_command = AsyncMock()
+
+    await router._handle_slash_command(
+        "/label action: review, Bug-Fix",
+        slash_payload("/label action: review, Bug-Fix"),
+        ctx,
+    )
+    router._handle_label_command.assert_awaited_once_with(
+        "action: review, Bug-Fix", slash_payload("/label action: review, Bug-Fix"), ctx
+    )
+
+
+@pytest.mark.asyncio
 async def test_slash_label_without_args_is_a_noop(ctx):
     router, _gh, _ = make_router()
     router._handle_label_command = AsyncMock()

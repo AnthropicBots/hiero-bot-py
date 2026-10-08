@@ -51,6 +51,18 @@ async def test_loads_and_validates_config():
 
 
 @pytest.mark.asyncio
+async def test_loads_wrapped_base64_config():
+    encoded = encode(VALID_YAML)
+    wrapped = "\n".join(encoded[i : i + 20] for i in range(0, len(encoded), 20))
+    loader, _ = make_loader(wrapped)
+
+    config = await loader.load("hiero", "sdk-js", 42)
+
+    assert config is not None
+    assert config.repo == "hiero/sdk-js"
+
+
+@pytest.mark.asyncio
 async def test_installation_id_is_passed_through():
     loader, client = make_loader(encode(VALID_YAML))
 
@@ -247,9 +259,7 @@ async def test_cache_evicts_least_recently_used(monkeypatch):
 @pytest.mark.asyncio
 async def test_stats_separate_configured_from_silent_repos():
     loader = ConfigLoader(Mock())
-    loader._client.get_file_content = AsyncMock(
-        side_effect=[encode(VALID_YAML), None]
-    )
+    loader._client.get_file_content = AsyncMock(side_effect=[encode(VALID_YAML), None])
 
     await loader.load("hiero", "configured", 1)
     await loader.load("hiero", "silent", 1)
@@ -561,5 +571,7 @@ async def test_unknown_keys_are_reported_but_do_not_invalidate_the_config(monkey
     config = await loader.load("hiero", "sdk-js", 1)
 
     assert config is not None
-    warned = " ".join(str(arg) for call in log.warning.call_args_list for arg in call.args)
+    warned = " ".join(
+        str(arg) for call in log.warning.call_args_list for arg in call.args
+    )
     assert "workflows.pull_request.quality_gate" in warned

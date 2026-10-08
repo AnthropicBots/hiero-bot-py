@@ -15,6 +15,7 @@ from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.comments import find_bot_comment
 from app.utils.logger import get_logger
+from app.utils.pr_checks import commits_have_signoff, is_test_file
 
 log = get_logger("workflow.prhealth")
 
@@ -43,8 +44,12 @@ class PRHealthWorkflow:
         reviews = await self._gh.list_pr_reviews(owner, repo, pr_number, inst)
         sha = pr.get("head", {}).get("sha", "")
         status_data = await self._gh.get_combined_status(owner, repo, sha, inst) if sha else {}
+        try:
+            commits = await self._gh.list_pr_commits(owner, repo, pr_number, inst)
+        except Exception:
+            commits = []
 
-        signals = self._compute_signals(pr, files, reviews, status_data)
+        signals = self._compute_signals(pr, files, reviews, status_data, commits)
         score = self._compute_score(signals, cfg.score_weights)
 
         label = LABEL_HEALTHY if score >= cfg.label_healthy_above else LABEL_NEEDS_WORK
@@ -149,23 +154,25 @@ class PRHealthWorkflow:
 
     @staticmethod
     def _compute_signals(
-        pr: dict, files: list[dict], reviews: list[dict], status: dict
+        pr: dict,
+        files: list[dict],
+        reviews: list[dict],
+        status: dict,
+        commits: list[dict] | None = None,
     ) -> dict:
         body = pr.get("body") or ""
-        test_re = [re.compile(p) for p in
-                   [r"\.test\.[jt]sx?$", r"\.spec\.[jt]sx?$",
-                    r"tests?/", r"test_.*\.py$", r".*_test\.py$"]]
 
+        # DCO passes on Signed-off-by trailers (same rule as the quality gate in
+        # PullRequestWorkflow), falling back to a DCO commit status.
         statuses = status.get("statuses", [])
-        dco_ok = any(
+        status_ok = any(
             "dco" in s.get("context", "").lower() and s["state"] == "success"
             for s in statuses
         )
+        dco_ok = commits_have_signoff(commits or []) or status_ok
 
         return {
-            "has_tests": any(
-                any(p.search(f["filename"]) for p in test_re) for f in files
-            ),
+            "has_tests": any(is_test_file(f["filename"]) for f in files),
             "has_linked_issue": bool(
                 re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.IGNORECASE)
             ),

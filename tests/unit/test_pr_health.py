@@ -416,3 +416,65 @@ async def test_healthy_to_needs_work_removes_stale_healthy_label(mock_gh, ctx):
     mock_gh.remove_label.assert_awaited_once_with(
         "hiero", "sdk-js", 100, LABEL_HEALTHY, 42
     )
+
+
+# ── Shared test-file / DCO logic with PullRequestWorkflow (issue #123) ──
+
+
+def _commit(message, parents=1):
+    return {"commit": {"message": message}, "parents": [{}] * parents}
+
+
+def test_compute_signals_ignores_unanchored_test_lookalikes():
+    pr = make_pr()
+    files = [{"filename": "contest/app.py"}, {"filename": "src/latest/handler.py"}]
+    assert PRHealthWorkflow._compute_signals(pr, files, [], {})["has_tests"] is False
+
+
+def test_compute_signals_dco_from_signoff_trailer_without_status():
+    commits = [_commit("fix\n\nSigned-off-by: Alice <alice@example.com>")]
+    signals = PRHealthWorkflow._compute_signals(make_pr(), [], [], {}, commits)
+    assert signals["dco_signed"] is True
+
+
+def test_compute_signals_dco_falls_back_to_status():
+    status = {"statuses": [{"context": "DCO", "state": "success"}]}
+    signals = PRHealthWorkflow._compute_signals(
+        make_pr(), [], [], status, [_commit("fix: no trailer")]
+    )
+    assert signals["dco_signed"] is True
+
+
+def test_compute_signals_dco_fails_without_trailer_or_status():
+    signals = PRHealthWorkflow._compute_signals(
+        make_pr(), [], [], {}, [_commit("fix: no trailer")]
+    )
+    assert signals["dco_signed"] is False
+
+
+@pytest.mark.asyncio
+async def test_score_pr_counts_signoff_trailer_as_dco(mock_gh, ctx):
+    """Regression: a properly signed-off PR must not lose DCO points just because
+    no legacy DCO status bot is installed."""
+    mock_gh.list_pr_commits = AsyncMock(return_value=[
+        _commit("fix\n\nSigned-off-by: Alice <alice@example.com>"),
+    ])
+
+    wf = PRHealthWorkflow(mock_gh)
+    await wf.score_pr(ctx, make_payload())
+
+    from sqlalchemy import select
+
+    from app.db.models import PRHealthScore
+    row = (await ctx["db"].execute(select(PRHealthScore))).scalars().one()
+    assert row.dco_signed is True
+
+
+@pytest.mark.asyncio
+async def test_score_pr_survives_commit_fetch_failure(mock_gh, ctx):
+    mock_gh.list_pr_commits = AsyncMock(side_effect=RuntimeError("boom"))
+
+    wf = PRHealthWorkflow(mock_gh)
+    await wf.score_pr(ctx, make_payload())
+
+    mock_gh.add_label.assert_awaited()
