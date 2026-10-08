@@ -209,3 +209,16 @@ async def test_get_assignment_counts_reads_reviewer_assignment_audits(db):
         "alice": 2,
         "bob": 1,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_val", [None, {}, {"login": ""}])
+async def test_reviewer_assignment_missing_or_ghost_author(mock_gh, ctx, user_val):
+    from tests.unit.test_reviewer_assignment import make_payload
+    wf = ReviewerAssignmentWorkflow(mock_gh)
+    payload = make_payload()
+    payload["pull_request"]["user"] = user_val
+
+    await wf.handle_pr_opened(ctx, payload)
+    mock_gh.request_reviewers.assert_not_awaited()
+

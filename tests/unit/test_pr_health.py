@@ -478,3 +478,16 @@ async def test_score_pr_survives_commit_fetch_failure(mock_gh, ctx):
     await wf.score_pr(ctx, make_payload())
 
     mock_gh.add_label.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_val", [None, {}, {"login": ""}])
+async def test_score_pr_missing_or_ghost_author(mock_gh, ctx, user_val):
+    wf = PRHealthWorkflow(mock_gh)
+    payload = make_payload()
+    payload["pull_request"]["user"] = user_val
+
+    await wf.score_pr(ctx, payload)
+    mock_gh.list_pr_files.assert_not_awaited()
+    mock_gh.add_label.assert_not_awaited()
+

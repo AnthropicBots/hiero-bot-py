@@ -140,7 +140,9 @@ class ReviewerAssignmentWorkflow:
         db = ctx["db"]
 
         pr_number = pr["number"]
-        author = pr["user"]["login"]
+        author = (pr.get("user") or {}).get("login") or ""
+        if not author:
+            return
 
         reviewers = await self._load_reviewers(
             owner,
