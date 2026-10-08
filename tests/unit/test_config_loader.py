@@ -486,6 +486,73 @@ async def test_clear_during_fetch_does_not_repopulate_cache():
 
 
 @pytest.mark.asyncio
+async def test_idle_invalidations_do_not_retain_generation_entries():
+    loader, _ = make_loader(encode(VALID_YAML))
+
+    for index in range(20):
+        await loader.load("hiero", f"repo-{index}", 1)
+        loader.invalidate("hiero", f"repo-{index}")
+
+    assert loader._generation == {}
+    assert loader._live == {}
+
+
+@pytest.mark.asyncio
+async def test_generation_is_kept_only_while_a_fetch_is_in_flight():
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def fetch(*args):
+        return await _blocked_then(release, started, encode(VALID_YAML))
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    pending = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started.wait()
+    loader.invalidate("hiero", "sdk-js")
+    assert "hiero/sdk-js" in loader._generation
+
+    release.set()
+    await pending
+
+    assert "hiero/sdk-js" not in loader._generation
+    assert loader._live == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_leader_cancels_waiters_and_clears_in_flight():
+    started = asyncio.Event()
+
+    async def fetch(*args):
+        started.set()
+        await asyncio.Event().wait()
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    leader = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started.wait()
+    await asyncio.sleep(0)
+    waiters = [
+        asyncio.create_task(loader.load("hiero", "sdk-js", 42)) for _ in range(3)
+    ]
+    await asyncio.sleep(0)
+
+    leader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    results = await asyncio.gather(*waiters, return_exceptions=True)
+
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    assert loader._in_flight == {}
+    assert loader._live == {}
+    assert loader._generation == {}
+
+
+@pytest.mark.asyncio
 async def test_unknown_keys_are_reported_but_do_not_invalidate_the_config(monkeypatch):
     log = Mock()
     monkeypatch.setattr(loader_module, "log", log)

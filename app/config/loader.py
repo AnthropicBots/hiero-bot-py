@@ -79,6 +79,11 @@ class ConfigLoader:
         self._client = github_client
         self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._in_flight: dict[str, _InFlight] = {}
+        # How many fetches for this key have not finished yet, including ones
+        # that invalidate() replaced in `_in_flight`. Generation entries exist
+        # only while that count is non-zero, so the map stays bounded by the
+        # number of repos with a request in flight.
+        self._live: dict[str, int] = {}
         # Bumped by invalidate() and clear() so a fetch that started earlier
         # cannot republish its result into the cache.
         self._generation: dict[str, int] = {}
@@ -114,6 +119,7 @@ class ConfigLoader:
         if flight is None or flight.generation != generation:
             flight = _InFlight(generation=generation)
             self._in_flight[key] = flight
+            self._live[key] = self._live.get(key, 0) + 1
             completed = False
             try:
                 self._misses += 1
@@ -123,17 +129,14 @@ class ConfigLoader:
                 flight.result = config
                 completed = True
                 return config
+            except asyncio.CancelledError as exc:
+                flight.error = exc
+                raise
             except Exception as exc:
                 flight.error = exc
                 raise
             finally:
-                # A cancelled leader must not look like a successful empty
-                # config to the coroutines waiting on this fetch.
-                if not completed and flight.error is None:
-                    flight.error = RuntimeError("config fetch was cancelled")
-                flight.event.set()
-                if self._in_flight.get(key) is flight:
-                    del self._in_flight[key]
+                self._finish_flight(key, flight, completed)
 
         await flight.event.wait()
         if flight.error is not None:
@@ -264,15 +267,37 @@ class ConfigLoader:
     def _bump(self, key: str) -> None:
         self._generation[key] = self._generation.get(key, 0) + 1
 
+    def _forget_generation_if_idle(self, key: str) -> None:
+        if not self._live.get(key):
+            self._generation.pop(key, None)
+
+    def _finish_flight(self, key: str, flight: _InFlight, completed: bool) -> None:
+        # A leader cancelled before it recorded an error must not look like a
+        # successful empty config. Propagate CancelledError so waiters keep
+        # cancellation semantics instead of seeing a normal fetch failure.
+        if not completed and flight.error is None:
+            flight.error = asyncio.CancelledError()
+        flight.event.set()
+        if self._in_flight.get(key) is flight:
+            del self._in_flight[key]
+        remaining = self._live.get(key, 0) - 1
+        if remaining > 0:
+            self._live[key] = remaining
+        else:
+            self._live.pop(key, None)
+            self._generation.pop(key, None)
+
     def invalidate(self, owner: str, repo: str) -> None:
         key = f"{owner}/{repo}"
         self._cache.pop(key, None)
         self._bump(key)
+        self._forget_generation_if_idle(key)
 
     def clear(self) -> None:
         self._cache.clear()
-        for key in set(self._generation) | set(self._in_flight):
+        for key in set(self._generation) | set(self._live):
             self._bump(key)
+            self._forget_generation_if_idle(key)
 
     def stats(self) -> dict[str, int]:
         """Cache counters, for the dashboard and for debugging live installs."""
