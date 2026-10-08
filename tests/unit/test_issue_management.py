@@ -82,6 +82,19 @@ async def test_auto_unassigns_inactive(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
+async def test_auto_unassigns_and_marks_stale_in_same_pass(mock_gh, ctx):
+    mock_gh.list_issues = AsyncMock(return_value=[
+        make_issue(updated_days_ago=65, assignees=["sleepy-dev"])
+    ])
+    wf = IssueManagementWorkflow(mock_gh)
+    counts = await wf.run_stale_scan(ctx)
+    assert counts["unassigned"] == 1
+    assert counts["stale_marked"] == 1
+    mock_gh.remove_assignees.assert_awaited_once()
+    mock_gh.add_label.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_skips_when_disabled(mock_gh, ctx):
     ctx["config"].workflows.issue_management.enabled = False
     wf = IssueManagementWorkflow(mock_gh)
