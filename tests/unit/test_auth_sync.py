@@ -4,10 +4,12 @@
 # that decides which organizations a logged-in user can see in the dashboard
 # was completely uncovered.
 
+import itertools
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from app.auth.session import encrypt_token
 from app.auth.sync import (
@@ -319,3 +321,188 @@ def test_clear_sync_cache_empties_the_cache():
     _SYNC_CACHE[123] = (time.time(), [{"id": 1}])
     clear_sync_cache()
     assert _SYNC_CACHE == {}
+
+
+# ── Revocation on sync (#147) ─────────────────────────────────
+
+
+def make_paged_github_client_mock(pages):
+    """Like make_github_client_mock, but each call returns the next page.
+
+    ``pages`` holds (status_code, installation_ids) tuples.
+    """
+    responses = []
+    for status_code, ids in pages:
+        response = MagicMock()
+        response.status_code = status_code
+        response.json = MagicMock(
+            return_value={"installations": [{"id": i} for i in ids]}
+        )
+        responses.append(response)
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=responses)
+
+    ctx_manager = MagicMock()
+    ctx_manager.__aenter__ = AsyncMock(return_value=client)
+    ctx_manager.__aexit__ = AsyncMock(return_value=False)
+    return ctx_manager, client
+
+
+_github_user_ids = itertools.count(10_000)
+
+
+async def user_with_accounts(db, login, installation_ids, *, authorized=True):
+    """A user holding AccountUser rows for the given installations, plus a token."""
+    user = User(github_user_id=next(_github_user_ids), github_login=login)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    for inst_id in installation_ids:
+        account = Account(
+            github_installation_id=inst_id, org_login=f"org-{inst_id}", plan_tier="free"
+        )
+        db.add(account)
+        await db.commit()
+        await db.refresh(account)
+        db.add(AccountUser(account_id=account.id, user_id=user.id, authorized=authorized))
+
+    db.add(UserOAuthToken(user_id=user.id, encrypted_access_token=encrypt_token("gho_tok")))
+    await db.commit()
+    return user
+
+
+async def authorized_installations(db, user):
+    rows = await db.execute(
+        select(Account.github_installation_id)
+        .join(AccountUser, Account.id == AccountUser.account_id)
+        .where(AccountUser.user_id == user.id, AccountUser.authorized.is_(True))
+    )
+    return sorted(rows.scalars().all())
+
+
+async def sync(db, user, pages):
+    ctx_manager, client = make_paged_github_client_mock(pages)
+    with patch("app.auth.sync.httpx.AsyncClient", return_value=ctx_manager):
+        result = await get_user_authorized_accounts(user, db, force_sync=True)
+    return result, client
+
+
+@pytest.mark.asyncio
+async def test_installation_missing_from_github_is_revoked(db):
+    user = await user_with_accounts(db, "erin", [555, 666])
+
+    result, _ = await sync(db, user, [(200, [555])])
+
+    assert [a["github_installation_id"] for a in result] == [555]
+    assert await authorized_installations(db, user) == [555]
+
+
+@pytest.mark.asyncio
+async def test_removed_from_every_installation_revokes_all(db):
+    """An empty list is a real answer: the user has no installations left."""
+    user = await user_with_accounts(db, "frank", [555, 666])
+
+    result, _ = await sync(db, user, [(200, [])])
+
+    assert result == []
+    assert await authorized_installations(db, user) == []
+
+
+@pytest.mark.asyncio
+async def test_restored_access_is_authorized_again(db):
+    user = await user_with_accounts(db, "grace", [555], authorized=False)
+
+    result, _ = await sync(db, user, [(200, [555])])
+
+    assert [a["github_installation_id"] for a in result] == [555]
+    assert await authorized_installations(db, user) == [555]
+
+
+@pytest.mark.asyncio
+async def test_installations_on_later_pages_are_not_revoked(db):
+    """/user/installations is paginated; page one alone is not the full list."""
+    from app.auth.sync import INSTALLATIONS_PER_PAGE
+
+    user = await user_with_accounts(db, "heidi", [555, 666])
+    first_page = [555] + list(range(10_000, 10_000 + INSTALLATIONS_PER_PAGE - 1))
+
+    _, client = await sync(db, user, [(200, first_page), (200, [666])])
+
+    assert await authorized_installations(db, user) == [555, 666]
+    pages = [call.kwargs["params"]["page"] for call in client.get.await_args_list]
+    assert pages == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_failed_later_page_grants_but_does_not_revoke(db):
+    from app.auth.sync import INSTALLATIONS_PER_PAGE
+
+    user = await user_with_accounts(db, "ivan", [666])
+    await user_with_accounts(db, "other-owner", [555])  # creates account 555
+    first_page = [555] + list(range(10_000, 10_000 + INSTALLATIONS_PER_PAGE - 1))
+
+    await sync(db, user, [(200, first_page), (502, [])])
+
+    # 555 (seen on page one) is granted; 666 might be on the page that failed.
+    assert await authorized_installations(db, user) == [555, 666]
+
+
+@pytest.mark.asyncio
+async def test_page_cap_reached_does_not_revoke(db):
+    from app.auth.sync import INSTALLATIONS_PER_PAGE, MAX_INSTALLATION_PAGES
+
+    user = await user_with_accounts(db, "judy", [666])
+    full_page = list(range(10_000, 10_000 + INSTALLATIONS_PER_PAGE))
+
+    _, client = await sync(db, user, [(200, full_page)] * MAX_INSTALLATION_PAGES)
+
+    assert client.get.await_count == MAX_INSTALLATION_PAGES
+    assert await authorized_installations(db, user) == [666]
+
+
+@pytest.mark.asyncio
+async def test_revocation_only_affects_the_syncing_user(db):
+    alice = await user_with_accounts(db, "mallory", [555])
+    bob = User(github_user_id=424242, github_login="trent")
+    db.add(bob)
+    await db.commit()
+    await db.refresh(bob)
+    account_id = (await db.execute(
+        select(Account.id).where(Account.github_installation_id == 555)
+    )).scalar_one()
+    db.add(AccountUser(account_id=account_id, user_id=bob.id, authorized=True))
+    await db.commit()
+
+    await sync(db, alice, [(200, [])])
+
+    assert await authorized_installations(db, alice) == []
+    assert await authorized_installations(db, bob) == [555]
+
+
+@pytest.mark.asyncio
+async def test_sync_query_count_does_not_grow_with_installations(db):
+    """One query per installation (N+1) would make a large sync slow."""
+    from sqlalchemy import event
+
+    async def count_sync_queries(login, installation_ids):
+        user = await user_with_accounts(db, login, installation_ids)
+        clear_sync_cache()
+        statements = []
+
+        def record(conn, cursor, statement, *args):
+            statements.append(statement)
+
+        engine = db.bind.sync_engine
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            await sync(db, user, [(200, installation_ids)])
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        return len(statements)
+
+    small = await count_sync_queries("few-orgs", [700 + i for i in range(3)])
+    large = await count_sync_queries("many-orgs", [800 + i for i in range(40)])
+
+    assert large == small
