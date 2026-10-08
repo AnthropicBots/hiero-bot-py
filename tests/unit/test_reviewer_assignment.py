@@ -209,3 +209,30 @@ async def test_get_assignment_counts_reads_reviewer_assignment_audits(db):
         "alice": 2,
         "bob": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_free_account_does_not_assign_reviewers(mock_gh, ctx):
+    ctx["config"].workflows.reviewer_assignment.enabled = True
+    ctx["account"].plan_tier = "free"
+    mock_gh.get_file_content = AsyncMock(
+        return_value=reviewers_file([{"login": "bob", "available": True}])
+    )
+
+    await ReviewerAssignmentWorkflow(mock_gh).handle_pr_opened(ctx, make_payload())
+
+    mock_gh.request_reviewers.assert_not_awaited()
+    mock_gh.get_file_content.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_account_does_not_assign_reviewers(mock_gh, ctx):
+    ctx["config"].workflows.reviewer_assignment.enabled = True
+    ctx.pop("account")
+    mock_gh.get_file_content = AsyncMock(
+        return_value=reviewers_file([{"login": "bob", "available": True}])
+    )
+
+    await ReviewerAssignmentWorkflow(mock_gh).handle_pr_opened(ctx, make_payload())
+
+    mock_gh.request_reviewers.assert_not_awaited()

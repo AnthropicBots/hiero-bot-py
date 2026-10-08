@@ -7,6 +7,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 
+from app.billing.gating import is_premium_account
 from app.config.schema import ReviewerAssignmentStrategy
 from app.db.models import AuditLog
 from app.github.client import GitHubClient
@@ -128,6 +129,14 @@ class ReviewerAssignmentWorkflow:
     async def handle_pr_opened(self, ctx: dict, payload: dict) -> None:
         cfg = ctx["config"].workflows.reviewer_assignment
         if not cfg.enabled:
+            return
+
+        if not is_premium_account(ctx.get("account")):
+            log.info(
+                "Skipping reviewer assignment for %s/%s: account is not premium",
+                ctx.get("owner"),
+                ctx.get("repo"),
+            )
             return
 
         pr = payload.get("pull_request", {})

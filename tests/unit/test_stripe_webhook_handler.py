@@ -260,3 +260,76 @@ async def test_invalid_json_payload_returns_400(db, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await stripe_webhook(request, db)
     assert exc.value.status_code == 400
+
+
+SUBSCRIPTION_STATUSES = [
+    "incomplete",
+    "incomplete_expired",
+    "trialing",
+    "active",
+    "past_due",
+    "canceled",
+    "unpaid",
+    "paused",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_type",
+    ["customer.subscription.created", "customer.subscription.updated"],
+)
+@pytest.mark.parametrize("subscription_status", SUBSCRIPTION_STATUSES)
+async def test_subscription_status_sets_plan_tier(
+    db, monkeypatch, event_type, subscription_status
+):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=700,
+        org_login="status-org",
+        plan_tier="premium",
+    )
+    db.add(acc)
+    await db.commit()
+
+    body = stripe_event(
+        event_type,
+        event_id=f"evt_{event_type}_{subscription_status}",
+        status=subscription_status,
+        metadata={"org_login": "status-org"},
+    )
+    result = await stripe_webhook(
+        make_request(body, sign(SECRET, body, int(time.time()))),
+        db,
+    )
+
+    await db.refresh(acc)
+    expected = "premium" if subscription_status in {"active", "trialing"} else "free"
+    assert result == {"status": "success"}
+    assert acc.plan_tier == expected
+
+
+@pytest.mark.asyncio
+async def test_subscription_updated_without_status_downgrades(db, monkeypatch):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=701,
+        org_login="missing-status-org",
+        plan_tier="premium",
+    )
+    db.add(acc)
+    await db.commit()
+
+    body = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_missing_status",
+        metadata={"org_login": "missing-status-org"},
+    )
+    result = await stripe_webhook(
+        make_request(body, sign(SECRET, body, int(time.time()))),
+        db,
+    )
+
+    await db.refresh(acc)
+    assert result == {"status": "success"}
+    assert acc.plan_tier == "free"
