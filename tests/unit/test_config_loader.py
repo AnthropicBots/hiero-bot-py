@@ -1,5 +1,6 @@
 # tests/unit/test_config_loader.py — per-repo config loading (#43)
 
+import asyncio
 import base64
 from unittest.mock import AsyncMock, Mock
 
@@ -276,6 +277,408 @@ workflows:
     quality_gate:
       require_dco: false
 """
+
+
+# ── In-flight coalescing (#100) ───────────────────────────────
+
+
+async def _hold_fetch(started: asyncio.Event, release: asyncio.Event, value):
+    started.set()
+    await release.wait()
+    return value
+
+
+@pytest.mark.asyncio
+async def test_concurrent_loads_share_one_github_request():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch(*args):
+        return await _hold_fetch(started, release, encode(VALID_YAML))
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    pending = asyncio.gather(
+        *[loader.load("hiero", "sdk-js", 42) for _ in range(10)]
+    )
+    await started.wait()
+    await asyncio.sleep(0)
+    release.set()
+    results = await pending
+
+    assert client.get_file_content.await_count == 1
+    assert all(
+        result is not None and result.repo == "hiero/sdk-js" for result in results
+    )
+    assert loader.stats()["misses"] == 1
+    assert loader.stats()["hits"] == 0
+    assert loader.stats()["coalesced"] == 9
+    assert loader._in_flight == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_missing_configs_share_one_request():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    async def fetch(*args):
+        return await _hold_fetch(started, release, None)
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    pending = asyncio.gather(
+        *[loader.load("hiero", "sdk-js", 42) for _ in range(10)]
+    )
+    await started.wait()
+    await asyncio.sleep(0)
+    release.set()
+    results = await pending
+
+    assert client.get_file_content.await_count == 1
+    assert results == [None] * 10
+    assert loader._in_flight == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failures_share_one_request_and_clear_in_flight():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fail(*args):
+        started.set()
+        await release.wait()
+        raise http_status_error(500)
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fail)
+    loader = ConfigLoader(client)
+
+    pending = asyncio.gather(
+        *[loader.load("hiero", "sdk-js", 42) for _ in range(10)],
+        return_exceptions=True,
+    )
+    await started.wait()
+    await asyncio.sleep(0)
+    release.set()
+    results = await pending
+
+    assert client.get_file_content.await_count == 1
+    assert all(isinstance(result, httpx.HTTPStatusError) for result in results)
+    assert loader._in_flight == {}
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await loader.load("hiero", "sdk-js", 42)
+    assert client.get_file_content.await_count == 2
+    assert loader.stats()["coalesced"] == 9
+
+
+@pytest.mark.asyncio
+async def test_concurrent_loads_of_different_repos_are_not_coalesced():
+    started = [asyncio.Event(), asyncio.Event()]
+    release = asyncio.Event()
+
+    async def fetch(owner, repo, *args):
+        started[sum(event.is_set() for event in started)].set()
+        await release.wait()
+        if repo == "sdk-js":
+            return encode(VALID_YAML)
+        if repo == "sdk-python":
+            return encode(FRESH_YAML)
+        raise AssertionError(f"Unexpected repository: {repo}")
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    pending = asyncio.gather(
+        loader.load("hiero", "sdk-js", 1),
+        loader.load("hiero", "sdk-python", 1),
+    )
+
+    await asyncio.gather(*(event.wait() for event in started))
+    assert client.get_file_content.await_count == 2
+
+    release.set()
+    results = await pending
+
+    assert results[0] is not None
+    assert results[0].repo == "hiero/sdk-js"
+    assert results[1] is not None
+    assert results[1].repo == "hiero/sdk-python"
+    assert loader._in_flight == {}
+    assert loader._live == {}
+
+
+FRESH_YAML = """
+repo: "hiero/sdk-python"
+workflows:
+  onboarding:
+    enabled: true
+"""
+
+
+async def _blocked_then(release: asyncio.Event, started: asyncio.Event, value):
+    started.set()
+    await release.wait()
+    return value
+
+
+@pytest.mark.asyncio
+async def test_invalidate_during_fetch_does_not_republish_stale_config():
+    release_first = asyncio.Event()
+    first_started = asyncio.Event()
+    calls = {"n": 0}
+
+    async def fetch(*args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await _blocked_then(release_first, first_started, encode(VALID_YAML))
+        return encode(FRESH_YAML)
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    first = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await first_started.wait()
+    loader.invalidate("hiero", "sdk-js")
+    second = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await asyncio.sleep(0)
+    release_first.set()
+    stale, fresh = await asyncio.gather(first, second)
+
+    assert calls["n"] == 2
+    assert stale.repo == "hiero/sdk-js"
+    assert fresh.repo == "hiero/sdk-python"
+    assert loader._cache["hiero/sdk-js"].config.repo == "hiero/sdk-python"
+    cached = await loader.load("hiero", "sdk-js", 42)
+    assert cached.repo == "hiero/sdk-python"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_invalidate_during_missing_fetch_does_not_install_negative_cache():
+    release_first = asyncio.Event()
+    first_started = asyncio.Event()
+    calls = {"n": 0}
+
+    async def fetch(*args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await _blocked_then(release_first, first_started, None)
+        return encode(FRESH_YAML)
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    first = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await first_started.wait()
+    loader.invalidate("hiero", "sdk-js")
+    second = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await asyncio.sleep(0)
+    release_first.set()
+    stale, fresh = await asyncio.gather(first, second)
+
+    assert stale is None
+    assert fresh is not None and fresh.repo == "hiero/sdk-python"
+    assert loader._cache["hiero/sdk-js"].config is not None
+    cached = await loader.load("hiero", "sdk-js", 42)
+    assert cached.repo == "hiero/sdk-python"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_clear_during_fetch_does_not_repopulate_cache():
+    release_first = asyncio.Event()
+    first_started = asyncio.Event()
+    calls = {"n": 0}
+
+    async def fetch(*args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await _blocked_then(release_first, first_started, encode(VALID_YAML))
+        return encode(FRESH_YAML)
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    first = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await first_started.wait()
+    loader.clear()
+    second = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await asyncio.sleep(0)
+    release_first.set()
+    await asyncio.gather(first, second)
+
+    assert loader._cache["hiero/sdk-js"].config.repo == "hiero/sdk-python"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_idle_invalidations_do_not_retain_generation_entries():
+    loader, _ = make_loader(encode(VALID_YAML))
+
+    for index in range(20):
+        await loader.load("hiero", f"repo-{index}", 1)
+        loader.invalidate("hiero", f"repo-{index}")
+
+    assert loader._generation == {}
+    assert loader._live == {}
+
+
+@pytest.mark.asyncio
+async def test_generation_is_kept_only_while_a_fetch_is_in_flight():
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def fetch(*args):
+        return await _blocked_then(release, started, encode(VALID_YAML))
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    pending = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started.wait()
+    loader.invalidate("hiero", "sdk-js")
+    assert "hiero/sdk-js" in loader._generation
+
+    release.set()
+    await pending
+
+    assert "hiero/sdk-js" not in loader._generation
+    assert loader._live == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_leader_cancels_waiters_and_clears_in_flight():
+    started = asyncio.Event()
+
+    async def fetch(*args):
+        started.set()
+        await asyncio.Event().wait()
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    leader = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started.wait()
+    await asyncio.sleep(0)
+    waiters = [
+        asyncio.create_task(loader.load("hiero", "sdk-js", 42)) for _ in range(3)
+    ]
+    await asyncio.sleep(0)
+
+    leader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    results = await asyncio.gather(*waiters, return_exceptions=True)
+
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    assert loader._in_flight == {}
+    assert loader._live == {}
+    assert loader._generation == {}
+
+
+INVALID_YAML = "- just\n- a\n- list\n"
+
+THIRD_YAML = """
+repo: "hiero/sdk-go"
+workflows:
+  onboarding:
+    enabled: true
+"""
+
+
+@pytest.mark.asyncio
+async def test_concurrent_invalid_configs_share_one_request_and_retry():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch(*args):
+        return await _blocked_then(release, started, encode(INVALID_YAML))
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    pending = asyncio.gather(
+        *[loader.load("hiero", "sdk-js", 42) for _ in range(10)],
+        return_exceptions=True,
+    )
+    await started.wait()
+    await asyncio.sleep(0)
+    release.set()
+    results = await pending
+
+    assert client.get_file_content.await_count == 1
+    assert all(isinstance(result, ConfigInvalid) for result in results)
+    assert loader._in_flight == {}
+    assert loader._live == {}
+
+    with pytest.raises(ConfigInvalid):
+        await loader.load("hiero", "sdk-js", 42)
+    assert client.get_file_content.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_successive_invalidations_ignore_stale_generations():
+    releases = [asyncio.Event(), asyncio.Event(), asyncio.Event()]
+    started = [asyncio.Event(), asyncio.Event(), asyncio.Event()]
+    payloads = [encode(VALID_YAML), encode(FRESH_YAML), encode(THIRD_YAML)]
+    calls = {"n": 0}
+
+    async def fetch(*args):
+        index = calls["n"]
+        calls["n"] += 1
+        started[index].set()
+        await releases[index].wait()
+        return payloads[index]
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    oldest = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started[0].wait()
+    loader.invalidate("hiero", "sdk-js")
+
+    middle = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started[1].wait()
+    loader.invalidate("hiero", "sdk-js")
+
+    newest = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started[2].wait()
+
+    assert calls["n"] == 3
+    assert loader._live["hiero/sdk-js"] == 3
+
+    releases[1].set()
+    await middle
+    assert "hiero/sdk-js" not in loader._cache
+
+    releases[0].set()
+    await oldest
+    assert "hiero/sdk-js" not in loader._cache
+
+    releases[2].set()
+    fresh = await newest
+
+    assert fresh.repo == "hiero/sdk-go"
+    assert loader._cache["hiero/sdk-js"].config.repo == "hiero/sdk-go"
+    assert loader._in_flight == {}
+    assert loader._live == {}
+    assert loader._generation == {}
+
+    cached = await loader.load("hiero", "sdk-js", 42)
+    assert cached.repo == "hiero/sdk-go"
+    assert calls["n"] == 3
 
 
 @pytest.mark.asyncio
