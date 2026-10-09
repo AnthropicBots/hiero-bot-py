@@ -378,18 +378,15 @@ async def test_concurrent_failures_share_one_request_and_clear_in_flight():
 async def test_concurrent_loads_of_different_repos_are_not_coalesced():
     started = [asyncio.Event(), asyncio.Event()]
     release = asyncio.Event()
-    payloads = [encode(VALID_YAML), encode(FRESH_YAML)]
-    calls = {"n": 0}
 
     async def fetch(owner, repo, *args):
-        started[len([event for event in started if event.is_set()])].set()
+        started[sum(event.is_set() for event in started)].set()
         await release.wait()
         if repo == "sdk-js":
             return encode(VALID_YAML)
         if repo == "sdk-python":
             return encode(FRESH_YAML)
         raise AssertionError(f"Unexpected repository: {repo}")
-
 
     client = Mock()
     client.get_file_content = AsyncMock(side_effect=fetch)
