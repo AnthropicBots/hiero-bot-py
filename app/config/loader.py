@@ -55,6 +55,7 @@ class ConfigInvalid(ConfigError):
 class _CacheEntry:
     config: RepoConfig | None
     expires_at: float
+    invalid_detail: str | None = None
 
     @property
     def fresh(self) -> bool:
@@ -91,6 +92,10 @@ class ConfigLoader:
         if entry is not None and entry.fresh:
             self._hits += 1
             self._cache.move_to_end(key)
+
+            if entry.invalid_detail is not None:
+                raise ConfigInvalid(key, entry.invalid_detail)
+
             return entry.config
 
         self._misses += 1
