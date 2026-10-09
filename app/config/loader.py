@@ -141,12 +141,9 @@ class ConfigLoader:
                 self._finish_flight(key, flight, completed)
 
         await flight.event.wait()
+        self._coalesced += 1
         if flight.error is not None:
             raise flight.error
-        # Joining an in-flight fetch is not a cache hit: the entry was missing
-        # when this caller looked. Count it separately so `hits` stays
-        # "served from _cache".
-        self._coalesced += 1
         return flight.result
 
     def _read_cache(self, key: str) -> tuple[bool, RepoConfig | None]:

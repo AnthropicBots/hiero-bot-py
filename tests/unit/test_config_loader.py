@@ -372,6 +372,7 @@ async def test_concurrent_failures_share_one_request_and_clear_in_flight():
     with pytest.raises(httpx.HTTPStatusError):
         await loader.load("hiero", "sdk-js", 42)
     assert client.get_file_content.await_count == 2
+    assert loader.stats()["coalesced"] == 9
 
 
 @pytest.mark.asyncio
