@@ -7,7 +7,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AuditLog, ContributorSnapshot
@@ -105,7 +105,9 @@ class ProgressionWorkflow:
 
         # A merge must see fresh counts: cached stats would repeat or miss
         # milestone celebrations when merges land close together.
-        stats = await self._collect_stats(owner, repo, login, inst, use_cache=False)
+        stats = await self._collect_stats(
+            owner, repo, login, inst, use_cache=False, merged_pr=pr
+        )
 
         # Milestone celebration
         if cfg.celebrate_milestones and stats["merged_prs"] in MILESTONES:
@@ -192,7 +194,14 @@ class ProgressionWorkflow:
     # ── Helpers ───────────────────────────────────────────────
 
     async def _collect_stats(
-        self, owner: str, repo: str, login: str, inst: int, *, use_cache: bool = True
+        self,
+        owner: str,
+        repo: str,
+        login: str,
+        inst: int,
+        *,
+        use_cache: bool = True,
+        merged_pr: dict | None = None,
     ) -> dict:
         """
         Gather a contributor's merged-PR count, reviews given, and tenure.
@@ -201,6 +210,10 @@ class ProgressionWorkflow:
         otherwise need the repo's entire PR history — and falls back to
         paginated REST when search is unavailable or rate limited. Both paths
         are bounded; `partial` is set when a cap cut the count short.
+
+        `merged_pr` is the pull request whose merge triggered this call. The
+        search index lags merges, so it is counted even when search has not
+        caught up with it yet (#149).
         """
         key = (owner.lower(), repo.lower(), login.lower())
 
@@ -210,7 +223,9 @@ class ProgressionWorkflow:
                 _stats_cache.move_to_end(key)
                 return dict(cached[1])
 
-        stats = await self._collect_stats_via_search(owner, repo, login, inst)
+        stats = await self._collect_stats_via_search(
+            owner, repo, login, inst, merged_pr=merged_pr
+        )
         if stats is None:
             stats = await self._collect_stats_via_rest(owner, repo, login, inst)
 
@@ -222,7 +237,13 @@ class ProgressionWorkflow:
         return stats
 
     async def _collect_stats_via_search(
-        self, owner: str, repo: str, login: str, inst: int
+        self,
+        owner: str,
+        repo: str,
+        login: str,
+        inst: int,
+        *,
+        merged_pr: dict | None = None,
     ) -> dict | None:
         slug = f"{owner}/{repo}"
 
@@ -239,6 +260,15 @@ class ProgressionWorkflow:
             return None
 
         merged_prs = int(merged.get("total_count") or 0)
+
+        if merged_pr is not None:
+            indexed = await self._merged_pr_indexed(slug, login, merged_pr, inst)
+            if indexed is False:
+                merged_prs += 1
+            elif indexed is None:
+                # Can't tell whether search has caught up, but this PR was
+                # merged, so the contributor has at least one merged PR.
+                merged_prs = max(merged_prs, 1)
 
         first_contribution = None
         items = merged.get("items") or []
@@ -297,6 +327,32 @@ class ProgressionWorkflow:
         reviews_given = sum(1 if count is None else count for count in counts)
         uninspected = total - len(pr_numbers)
         return reviews_given + uninspected, incomplete or uninspected > 0
+
+    async def _merged_pr_indexed(
+        self, slug: str, login: str, merged_pr: dict, inst: int
+    ) -> bool | None:
+        """
+        Whether the search index already includes a just-merged pull request.
+
+        GitHub indexes a merge for search a few seconds after the webhook
+        fires, so the merged-PR count can still be missing it. Returns None
+        when this cannot be determined.
+        """
+        number = merged_pr.get("number")
+        merged_at = merged_pr.get("merged_at")
+        if not number or not merged_at:
+            return None
+
+        try:
+            result = await self._gh.search_issues(
+                f"repo:{slug} type:pr author:{login} is:merged merged:>={merged_at}",
+                inst,
+            )
+        except Exception as exc:
+            log.warning("Could not check search indexing of PR #%s: %s", number, exc)
+            return None
+
+        return any(item.get("number") == number for item in result.get("items") or [])
 
     async def _collect_stats_via_rest(
         self, owner: str, repo: str, login: str, inst: int
@@ -447,7 +503,9 @@ class ProgressionWorkflow:
                 AuditLog.action == "contributor.role_suggested",
                 AuditLog.owner == owner,
                 AuditLog.repo == repo,
-                AuditLog.target_login == login,
+                # GitHub logins are case-insensitive, but `==` is not on
+                # Postgres (#149).
+                func.lower(AuditLog.target_login) == login.lower(),
             )
         )
         for entry in result.scalars():

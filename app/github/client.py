@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import urllib.parse
 from datetime import datetime
 from typing import Any
 
@@ -490,18 +491,40 @@ class GitHubClient:
             json={"body": body},
         )
 
+    async def list_labels(
+        self, owner: str, repo: str, installation_id: int
+    ) -> list[dict]:
+        """List all labels in a repository across all pages."""
+        return await self.paginate(
+            f"/repos/{owner}/{repo}/labels",
+            installation_id,
+        )
+
     async def add_label(
-        self, owner: str, repo: str, number: int, label: str, installation_id: int
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        label: str,
+        installation_id: int,
+        create_if_missing: bool = True,
     ) -> None:
-        # Ensure label exists
-        try:
-            await self.get(f"/repos/{owner}/{repo}/labels/{label}", installation_id)
-        except httpx.HTTPStatusError:
-            await self.post(
-                f"/repos/{owner}/{repo}/labels",
-                installation_id,
-                json={"name": label, "color": "ededed"},
-            )
+        if create_if_missing:
+            encoded_label = urllib.parse.quote(label, safe="")
+            # Ensure label exists
+            try:
+                await self.get(
+                    f"/repos/{owner}/{repo}/labels/{encoded_label}", installation_id
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    await self.post(
+                        f"/repos/{owner}/{repo}/labels",
+                        installation_id,
+                        json={"name": label, "color": "ededed"},
+                    )
+                else:
+                    raise
         await self.post(
             f"/repos/{owner}/{repo}/issues/{number}/labels",
             installation_id,

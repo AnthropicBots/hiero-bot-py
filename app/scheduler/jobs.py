@@ -60,7 +60,7 @@ class BotScheduler:
         # itself if the process was paused or the previous run overran.
         self._scheduler.add_job(
             self.run_stale_scan,
-            CronTrigger(hour=2, minute=0),
+            CronTrigger(hour=2, minute=0, timezone="UTC"),
             id="stale_scan",
             name="Daily stale issue scan",
             replace_existing=True,
