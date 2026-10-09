@@ -826,3 +826,122 @@ async def test_concurrent_merges_post_a_single_eligibility_notice(
         await engine.dispose()
 
     assert len(eligibility_notices(mock_gh)) == 1
+
+
+# ── Search indexing lag and login case (#149) ─────────────────
+
+
+def lagging_search(merged_total, indexed_numbers=(), index_check_error=None):
+    """Answer each search query the way GitHub would shortly after a merge."""
+
+    async def search(query, inst, **kwargs):
+        if "merged:>=" in query:
+            if index_check_error:
+                raise index_check_error
+            return {"total_count": len(indexed_numbers),
+                    "items": [{"number": n} for n in indexed_numbers]}
+        if "is:merged" in query:
+            return search_result(merged_total, iso_days_ago(90) if merged_total else None)
+        return {"total_count": 0, "items": []}  # reviewed-by
+
+    return AsyncMock(side_effect=search)
+
+
+def milestone_comments(mock_gh):
+    return [c for c in all_comments(mock_gh) if any(e in c for e in MILESTONE_EMOJI)]
+
+
+MILESTONE_EMOJI = ["🎊", "🌟", "🚀", "💎", "🏆"]
+
+
+@pytest.mark.asyncio
+async def test_first_merge_celebrated_before_search_indexes_it(mock_gh, ctx):
+    """Search still reports 0 merged PRs when the webhook arrives."""
+    mock_gh.search_issues = lagging_search(merged_total=0)
+
+    await ProgressionWorkflow(mock_gh).handle_merged_pr(ctx, merged_pr_payload(pr_number=5))
+
+    comments = milestone_comments(mock_gh)
+    assert len(comments) == 1
+    assert "First merged PR" in comments[0]
+
+
+@pytest.mark.asyncio
+async def test_later_milestone_celebrated_before_search_indexes_it(mock_gh, ctx):
+    """The lag hides the 5th merge too, not only the first."""
+    mock_gh.search_issues = lagging_search(merged_total=4)
+
+    await ProgressionWorkflow(mock_gh).handle_merged_pr(ctx, merged_pr_payload(pr_number=5))
+
+    comments = milestone_comments(mock_gh)
+    assert len(comments) == 1
+    assert "5 merged PRs" in comments[0]
+
+
+@pytest.mark.asyncio
+async def test_indexed_merge_is_not_counted_twice(mock_gh, ctx):
+    mock_gh.search_issues = lagging_search(merged_total=5, indexed_numbers=[5])
+
+    await ProgressionWorkflow(mock_gh).handle_merged_pr(ctx, merged_pr_payload(pr_number=5))
+
+    comments = milestone_comments(mock_gh)
+    assert len(comments) == 1
+    assert "5 merged PRs" in comments[0]
+
+
+@pytest.mark.asyncio
+async def test_failed_index_check_still_counts_the_merged_pr(mock_gh, ctx):
+    mock_gh.search_issues = lagging_search(
+        merged_total=0, index_check_error=RuntimeError("rate limited")
+    )
+
+    await ProgressionWorkflow(mock_gh).handle_merged_pr(ctx, merged_pr_payload(pr_number=5))
+
+    assert any("First merged PR" in c for c in milestone_comments(mock_gh))
+
+
+@pytest.mark.asyncio
+async def test_index_check_query_shape(mock_gh):
+    mock_gh.search_issues = lagging_search(merged_total=0)
+    pr = merged_pr_payload(pr_number=5)["pull_request"]
+
+    wf = ProgressionWorkflow(mock_gh)
+    stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42, merged_pr=pr)
+
+    queries = [c.args[0] for c in mock_gh.search_issues.await_args_list]
+    assert (
+        "repo:hiero/sdk-js type:pr author:alice is:merged merged:>=2025-01-10T12:00:00Z"
+        in queries
+    )
+    assert stats["merged_prs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_check_eligibility_does_not_run_index_check(mock_gh):
+    """Only a merge has a just-merged PR to account for."""
+    mock_gh.search_issues = lagging_search(merged_total=3)
+
+    wf = ProgressionWorkflow(mock_gh)
+    stats = await wf._collect_stats("hiero", "sdk-js", "alice", 42)
+
+    queries = [c.args[0] for c in mock_gh.search_issues.await_args_list]
+    assert not any("merged:>=" in q for q in queries)
+    assert stats["merged_prs"] == 3
+
+
+@pytest.mark.asyncio
+async def test_already_suggested_matches_login_case_insensitively(mock_gh, ctx):
+    from app.utils import audit
+
+    await audit.record(
+        ctx["db"], action="contributor.role_suggested",
+        owner="hiero", repo="sdk-js", target_login="Alice", target_number=1,
+        reason="Post-merge check: eligible_for=junior-committer",
+        metadata={"eligible_for": "junior-committer"},
+    )
+    stats = {"merged_prs": 5, "reviews_given": 3, "months_active": 3, "login": "alice"}
+    wf = ProgressionWorkflow(mock_gh)
+    with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+        await wf.handle_merged_pr(ctx, merged_pr_payload(login="alice"))
+
+    assert eligibility_notices(mock_gh) == []

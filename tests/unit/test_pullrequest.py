@@ -648,20 +648,27 @@ async def test_commits_fetched_once_when_dco_and_gpg_both_enabled(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
-async def test_gpg_fails_when_commit_fetch_raises(mock_gh, ctx):
+async def test_gpg_signature_fails_when_commits_cannot_be_fetched(mock_gh, ctx):
     g = _disable_all_gates(ctx)
     g.require_gpg_signature = True
-
-    mock_gh.list_pr_commits = AsyncMock(
-        side_effect=RuntimeError("GitHub API failed")
-    )
+    mock_gh.list_pr_commits = AsyncMock(side_effect=Exception("API Error"))
 
     wf = PullRequestWorkflow(mock_gh)
-
     checks = await wf._run_quality_checks(ctx, make_pr())
 
-    gpg_check = next(
-        c for c in checks if c.name == "GPG Signature"
-    )
-
+    gpg_check = next(c for c in checks if c.name == "GPG Signature")
     assert gpg_check.passed is False
+
+
+@pytest.mark.asyncio
+async def test_gpg_signature_fails_when_commits_list_empty(mock_gh, ctx):
+    g = _disable_all_gates(ctx)
+    g.require_gpg_signature = True
+    mock_gh.list_pr_commits = AsyncMock(return_value=[])
+
+    wf = PullRequestWorkflow(mock_gh)
+    checks = await wf._run_quality_checks(ctx, make_pr())
+
+    gpg_check = next(c for c in checks if c.name == "GPG Signature")
+    assert gpg_check.passed is False
+
