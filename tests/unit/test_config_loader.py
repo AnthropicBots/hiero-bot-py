@@ -374,7 +374,6 @@ async def test_concurrent_failures_share_one_request_and_clear_in_flight():
     assert client.get_file_content.await_count == 2
 
 
-
 @pytest.mark.asyncio
 async def test_concurrent_loads_of_different_repos_are_not_coalesced():
     started = [asyncio.Event(), asyncio.Event()]
@@ -382,12 +381,15 @@ async def test_concurrent_loads_of_different_repos_are_not_coalesced():
     payloads = [encode(VALID_YAML), encode(FRESH_YAML)]
     calls = {"n": 0}
 
-    async def fetch(*args):
-        index = calls["n"]
-        calls["n"] += 1
-        started[index].set()
+    async def fetch(owner, repo, *args):
+        started[len([event for event in started if event.is_set()])].set()
         await release.wait()
-        return payloads[index]
+        if repo == "sdk-js":
+            return encode(VALID_YAML)
+        if repo == "sdk-python":
+            return encode(FRESH_YAML)
+        raise AssertionError(f"Unexpected repository: {repo}")
+
 
     client = Mock()
     client.get_file_content = AsyncMock(side_effect=fetch)
@@ -410,7 +412,6 @@ async def test_concurrent_loads_of_different_repos_are_not_coalesced():
     assert results[1].repo == "hiero/sdk-python"
     assert loader._in_flight == {}
     assert loader._live == {}
-
 
 
 FRESH_YAML = """
