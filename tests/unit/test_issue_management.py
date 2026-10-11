@@ -104,7 +104,7 @@ async def test_no_action_within_stale_period(mock_gh, ctx):
 async def test_label_escalation_notifies_team(mock_gh, ctx):
     from app.config.schema import LabelEscalationRule
     ctx["config"].workflows.issue_management.label_escalation_rules = [
-        LabelEscalationRule(label="security", notify_team="sec-team", after_hours=24)
+        LabelEscalationRule(label="security", notify_team="sec-team")
     ]
     payload = {
         "issue": {"number": 5, "title": "Critical bug"},

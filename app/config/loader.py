@@ -27,8 +27,7 @@ _CONFIG_PATH = ".github/hiero-bot.yml"
 # A repo with a config is the common case and its contents change rarely.
 _CACHE_TTL = 300  # 5 minutes
 
-# "No config" is cached too, but far more briefly so a newly added config
-# file is discovered without repeatedly hitting the GitHub Contents API.
+# "No config" is cached briefly so newly added configs are discovered.
 _NEGATIVE_CACHE_TTL = 60
 
 # Bound the cache so an org-wide installation cannot grow it without limit.
@@ -55,6 +54,7 @@ class ConfigInvalid(ConfigError):
 class _CacheEntry:
     config: RepoConfig | None
     expires_at: float
+    invalid_detail: str | None = None
 
     @property
     def fresh(self) -> bool:
@@ -91,6 +91,10 @@ class ConfigLoader:
         if entry is not None and entry.fresh:
             self._hits += 1
             self._cache.move_to_end(key)
+
+            if entry.invalid_detail is not None:
+                raise ConfigInvalid(key, entry.invalid_detail)
+
             return entry.config
 
         self._misses += 1
@@ -118,7 +122,12 @@ class ConfigLoader:
             self._store(key, None)
             return None
 
-        config = self._parse(key, raw_b64)
+        try:
+            config = self._parse(key, raw_b64)
+        except ConfigInvalid as exc:
+            # Cache invalid configs to avoid repeated GitHub API requests.
+            self._store(key, None, invalid_detail=exc.detail)
+            raise
 
         self._store(key, config)
 
@@ -186,8 +195,8 @@ class ConfigLoader:
             raise ConfigInvalid(slug, detail) from exc
 
         # Unknown keys are intentionally non-fatal so existing configs remain
-        # compatible. Warn because a typo can otherwise silently activate a
-        # default value.
+        # compatible. Warn because a typo can otherwise silently activate
+        # a default value.
         unknown = find_unknown_keys(data, RepoConfig)
 
         if unknown:
@@ -205,11 +214,18 @@ class ConfigLoader:
         self,
         key: str,
         config: RepoConfig | None,
+        invalid_detail: str | None = None,
     ) -> None:
-        ttl = _CACHE_TTL if config is not None else _NEGATIVE_CACHE_TTL
+        # Invalid configs use the normal TTL; missing configs use the shorter TTL.
+        ttl = (
+            _CACHE_TTL
+            if config is not None or invalid_detail is not None
+            else _NEGATIVE_CACHE_TTL
+        )
 
         self._cache[key] = _CacheEntry(
             config=config,
+            invalid_detail=invalid_detail,
             expires_at=time.monotonic() + ttl,
         )
 
@@ -240,7 +256,9 @@ class ConfigLoader:
         return {
             "entries": len(self._cache),
             "configured": sum(
-                1 for entry in self._cache.values() if entry.config is not None
+                1
+                for entry in self._cache.values()
+                if entry.config is not None
             ),
             "hits": self._hits,
             "misses": self._misses,

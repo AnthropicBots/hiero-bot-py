@@ -1,5 +1,8 @@
 # tests/unit/test_config_schema.py
 
+import ast
+import pathlib
+
 import pytest
 from pydantic import ValidationError
 
@@ -23,7 +26,6 @@ def test_defaults_applied():
     assert cfg.workflows.onboarding.enabled is True
     assert cfg.workflows.onboarding.minimum_account_age_days == 0
     assert cfg.workflows.onboarding.max_concurrent_assignments is None
-    assert cfg.workflows.pull_request.stale_pr_days == 30
     assert cfg.workflows.issue_management.stale_issue_days == 60
     assert cfg.workflows.pr_health.enabled is True
 
@@ -267,19 +269,16 @@ def test_full_valid_config():
                     "min_merged_prs": 3,
                     "min_reviews_given": 2,
                     "min_months_active": 1,
-                    "require_endorsement_from": "committer",
                 },
                 "requirements_for_committer": {
                     "min_merged_prs": 15,
                     "min_reviews_given": 10,
                     "min_months_active": 6,
-                    "require_endorsement_from": "maintainer",
                 },
                 "requirements_for_maintainer": {
                     "min_merged_prs": 50,
                     "min_reviews_given": 30,
                     "min_months_active": 12,
-                    "require_endorsement_from": "maintainer",
                 },
             },
             "issue_management": {
@@ -289,15 +288,11 @@ def test_full_valid_config():
                     {
                         "label": "security",
                         "notify_team": "sec-team",
-                        "after_hours": 24,
                     }
                 ],
             },
         },
         "teams": {
-            "maintainers": "maint",
-            "committers": "comm",
-            "junior_committers": "jc",
             "mentors": "mentors",
         },
     }
@@ -414,3 +409,52 @@ def test_shipped_configs_use_only_known_keys(path):
     data = yaml.safe_load((root / path).read_text(encoding="utf-8"))
 
     assert find_unknown_keys(data, RepoConfig) == []
+
+
+def test_every_schema_field_has_a_runtime_reader():
+    """
+    Every configuration schema field must have evidence of being consumed
+    outside the schema definition itself.
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    app_root = root / "app"
+    schema_path = app_root / "config" / "schema.py"
+
+    runtime_names = set()
+
+    for path in app_root.rglob("*.py"):
+        if path == schema_path:
+            continue
+
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                runtime_names.add(node.attr)
+            elif isinstance(node, ast.keyword):
+                if node.arg is not None:
+                    runtime_names.add(node.arg)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                runtime_names.add(node.value)
+
+    def collect_fields(model):
+        fields = set()
+
+        for name, field in model.model_fields.items():
+            fields.add(name)
+
+            annotation = field.annotation
+            if isinstance(annotation, type) and hasattr(
+                annotation, "model_fields"
+            ):
+                fields.update(collect_fields(annotation))
+
+        return fields
+
+    schema_fields = collect_fields(RepoConfig)
+    unused = sorted(schema_fields - runtime_names)
+
+    assert unused == [], (
+        "Schema fields without runtime readers: "
+        f"{unused}"
+    )
