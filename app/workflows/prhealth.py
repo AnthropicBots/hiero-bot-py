@@ -171,6 +171,19 @@ class PRHealthWorkflow:
         )
         dco_ok = commits_have_signoff(commits or []) or status_ok
 
+        # GitHub returns submitted reviews in chronological order. Count each
+        # reviewer's effective approval once; comments do not replace a decision.
+        approvers: set[str] = set()
+        for review in reviews:
+            login = (review.get("user") or {}).get("login")
+            if not login:
+                continue
+            reviewer = login.casefold()
+            if review.get("state") == "APPROVED":
+                approvers.add(reviewer)
+            elif review.get("state") in {"CHANGES_REQUESTED", "DISMISSED"}:
+                approvers.discard(reviewer)
+
         return {
             "has_tests": any(is_test_file(f["filename"]) for f in files),
             "has_linked_issue": bool(
@@ -178,7 +191,7 @@ class PRHealthWorkflow:
             ),
             "has_description": len(body.strip()) >= 50,
             "dco_signed": dco_ok,
-            "review_count": len([r for r in reviews if r.get("state") == "APPROVED"]),
+            "review_count": len(approvers),
             "small_diff": (pr.get("additions", 0) + pr.get("deletions", 0)) < 400,
         }
 

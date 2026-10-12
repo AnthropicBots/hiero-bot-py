@@ -33,7 +33,9 @@ async def test_score_persisted_to_db(mock_gh, ctx):
     mock_gh.get_combined_status = AsyncMock(return_value={
         "statuses": [{"context": "DCO", "state": "success"}]
     })
-    mock_gh.list_pr_reviews = AsyncMock(return_value=[{"state": "APPROVED"}])
+    mock_gh.list_pr_reviews = AsyncMock(return_value=[
+        {"user": {"login": "reviewer1"}, "state": "APPROVED"}
+    ])
 
     wf = PRHealthWorkflow(mock_gh)
     await wf.score_pr(ctx, make_payload())
@@ -59,7 +61,8 @@ async def test_healthy_label_applied_for_high_score(mock_gh, ctx):
         "statuses": [{"context": "DCO", "state": "success"}]
     })
     mock_gh.list_pr_reviews = AsyncMock(return_value=[
-        {"state": "APPROVED"}, {"state": "APPROVED"}
+        {"user": {"login": "reviewer1"}, "state": "APPROVED"},
+        {"user": {"login": "reviewer2"}, "state": "APPROVED"},
     ])
 
     wf = PRHealthWorkflow(mock_gh)
@@ -95,7 +98,8 @@ async def test_no_comment_above_threshold(mock_gh, ctx):
         "statuses": [{"context": "DCO", "state": "success"}]
     })
     mock_gh.list_pr_reviews = AsyncMock(return_value=[
-        {"state": "APPROVED"}, {"state": "APPROVED"}
+        {"user": {"login": "reviewer1"}, "state": "APPROVED"},
+        {"user": {"login": "reviewer2"}, "state": "APPROVED"},
     ])
 
     ctx["config"].workflows.pr_health.comment_threshold = 0  # never comment
@@ -168,6 +172,28 @@ def test_compute_signals_detects_tests():
     assert signals["has_tests"] is True
     assert signals["has_linked_issue"] is True
     assert signals["small_diff"] is True
+
+
+@pytest.mark.parametrize(
+    ("reviews", "expected"),
+    [
+        (["alice:APPROVED", "alice:APPROVED"], 1),
+        (["alice:APPROVED", "bob:APPROVED"], 2),
+        (["alice:APPROVED", "alice:CHANGES_REQUESTED"], 0),
+        (["alice:APPROVED", "alice:COMMENTED"], 1),
+        (["alice:CHANGES_REQUESTED", "alice:APPROVED"], 1),
+        (["alice:APPROVED", "alice:DISMISSED"], 0),
+        (["alice:APPROVED", "bob:APPROVED", "alice:CHANGES_REQUESTED"], 1),
+        (["Alice:APPROVED", "alice:APPROVED"], 1),
+    ],
+)
+def test_compute_signals_counts_current_distinct_approvals(reviews, expected):
+    review_objects = [
+        {"user": {"login": login}, "state": state}
+        for login, state in (review.split(":") for review in reviews)
+    ]
+    signals = PRHealthWorkflow._compute_signals(make_pr(), [], review_objects, {})
+    assert signals["review_count"] == expected
 
 
 @pytest.mark.asyncio
@@ -366,7 +392,8 @@ async def test_needs_work_to_healthy_removes_stale_needs_work_label(mock_gh, ctx
         "statuses": [{"context": "DCO", "state": "success"}]
     })
     mock_gh.list_pr_reviews = AsyncMock(return_value=[
-        {"state": "APPROVED"}, {"state": "APPROVED"}
+        {"user": {"login": "reviewer1"}, "state": "APPROVED"},
+        {"user": {"login": "reviewer2"}, "state": "APPROVED"},
     ])
 
     pr2 = make_pr(number=99, body="Closes #10 " + "x" * 50)
@@ -391,7 +418,8 @@ async def test_healthy_to_needs_work_removes_stale_healthy_label(mock_gh, ctx):
         "statuses": [{"context": "DCO", "state": "success"}]
     })
     mock_gh.list_pr_reviews = AsyncMock(return_value=[
-        {"state": "APPROVED"}, {"state": "APPROVED"}
+        {"user": {"login": "reviewer1"}, "state": "APPROVED"},
+        {"user": {"login": "reviewer2"}, "state": "APPROVED"},
     ])
 
     wf = PRHealthWorkflow(mock_gh)
