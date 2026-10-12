@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -46,7 +46,7 @@ async def github_oauth_login(request: Request, db: AsyncSession = Depends(get_db
                 github_login="demo_maintainer",
                 github_email="maintainer@hiero.local",
                 avatar_url="https://avatars.githubusercontent.com/u/185269030?v=4",
-                last_login_at=datetime.now(timezone.utc),
+                last_login_at=datetime.now(UTC),
             )
             db.add(user)
             await db.commit()
@@ -178,7 +178,7 @@ async def github_oauth_callback(
     github_email = gh_user.get("email")
     avatar_url = gh_user.get("avatar_url", "")
     encrypted_token = encrypt_token(access_token)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Upsert user record
     stmt = select(User).where(User.github_user_id == github_user_id)

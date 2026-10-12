@@ -4,7 +4,7 @@
 # timestamp-skew replay defense, the event dispatcher, the slash-command
 # handlers, and several installation-event edge cases had no tests at all.
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,7 +42,7 @@ def make_router(config=_UNSET):
 @pytest.mark.asyncio
 async def test_stale_date_header_is_rejected(db):
     router, _, _ = make_router()
-    stale = datetime.now(timezone.utc) - timedelta(seconds=999)
+    stale = datetime.now(UTC) - timedelta(seconds=999)
     request = make_request(
         {
             "X-GitHub-Event": "ping",
@@ -61,7 +61,7 @@ async def test_stale_date_header_is_rejected(db):
 @pytest.mark.asyncio
 async def test_fresh_date_header_is_accepted(db):
     router, _, _ = make_router()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     request = make_request(
         {
             "X-GitHub-Event": "ping",
@@ -453,6 +453,21 @@ async def test_slash_label_dispatches_to_label_handler(ctx):
     )
     router._handle_label_command.assert_awaited_once()
     assert router._handle_label_command.call_args[0][0] == "good-first-issue"
+
+
+@pytest.mark.asyncio
+async def test_slash_label_preserves_full_argument_string(ctx):
+    router, _gh, _ = make_router()
+    router._handle_label_command = AsyncMock()
+
+    await router._handle_slash_command(
+        "/label action: review, Bug-Fix",
+        slash_payload("/label action: review, Bug-Fix"),
+        ctx,
+    )
+    router._handle_label_command.assert_awaited_once_with(
+        "action: review, Bug-Fix", slash_payload("/label action: review, Bug-Fix"), ctx
+    )
 
 
 @pytest.mark.asyncio

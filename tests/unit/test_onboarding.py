@@ -3,7 +3,7 @@
 import asyncio
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -316,7 +316,7 @@ async def test_self_assign_blocked_by_min_age(mock_gh, ctx):
     ctx["config"].workflows.onboarding.minimum_account_age_days = 90
 
     # Create a dynamic date that is exactly 10 days ago so this test never expires
-    recent_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
+    recent_date = (datetime.now(UTC) - timedelta(days=10)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     mock_gh.get = AsyncMock(return_value={"number": 1, "assignees": []})

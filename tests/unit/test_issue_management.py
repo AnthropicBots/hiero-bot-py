@@ -1,6 +1,6 @@
 # tests/unit/test_issue_management.py
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import httpx
@@ -12,7 +12,7 @@ from app.workflows.issuemanagement import IssueManagementWorkflow
 
 
 def make_issue(number=1, updated_days_ago=65, labels=None, assignees=None, is_pr=False):
-    updated = (datetime.now(timezone.utc) - timedelta(days=updated_days_ago)).isoformat()
+    updated = (datetime.now(UTC) - timedelta(days=updated_days_ago)).isoformat()
     issue = {
         "number": number,
         "title": f"Issue #{number}",
@@ -73,7 +73,7 @@ async def test_auto_unassigns_inactive(mock_gh, ctx):
         make_issue(updated_days_ago=20, assignees=["sleepy-dev"])
     ])
     mock_gh.get = AsyncMock(return_value={
-        "updated_at": (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+        "updated_at": (datetime.now(UTC) - timedelta(days=20)).isoformat()
     })
     wf = IssueManagementWorkflow(mock_gh)
     counts = await wf.run_stale_scan(ctx)
@@ -279,7 +279,7 @@ async def _run_daily(wf, ctx, clock, issue, days, on_day=None):
 
 @pytest.mark.asyncio
 async def test_issue_closes_close_stale_after_days_after_being_marked(mock_gh, ctx):
-    clock = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
     issue = _FakeGitHubIssue(clock, idle_days=61)
     _wire(mock_gh, issue)
 
@@ -293,7 +293,7 @@ async def test_issue_closes_close_stale_after_days_after_being_marked(mock_gh, c
 
 @pytest.mark.asyncio
 async def test_human_activity_after_marking_delays_the_close(mock_gh, ctx):
-    clock = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
     issue = _FakeGitHubIssue(clock, idle_days=61)
     _wire(mock_gh, issue)
     start = clock["now"]

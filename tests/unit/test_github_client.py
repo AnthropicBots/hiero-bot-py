@@ -762,3 +762,130 @@ async def test_remove_label_tolerates_label_already_absent():
     mock_delete.assert_awaited_once()
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_labels_paginates():
+    client = GitHubClient()
+
+    first_page = [{"name": f"label_{i}"} for i in range(100)]
+    second_page = [{"name": "label_100"}]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(side_effect=[first_page, second_page]),
+    ) as mock_get:
+        labels = await client.list_labels("hiero", "sdk-js", 123)
+
+    assert len(labels) == 101
+    assert labels[-1]["name"] == "label_100"
+
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/labels",
+        123,
+        params={"per_page": 100, "page": 1},
+    )
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/labels",
+        123,
+        params={"per_page": 100, "page": 2},
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_add_label_creates_missing_label_on_404():
+    client = GitHubClient()
+
+    not_found_err = httpx.HTTPStatusError(
+        "Not found", request=Mock(), response=Mock(status_code=404)
+    )
+
+    with (
+        patch.object(client, "get", new=AsyncMock(side_effect=not_found_err)) as mock_get,
+        patch.object(client, "post", new=AsyncMock(return_value={})) as mock_post,
+    ):
+        await client.add_label("hiero", "sdk-js", 7, "action: merge", 123)
+
+    mock_get.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/labels/action%3A%20merge", 123
+    )
+    mock_post.assert_any_await(
+        "/repos/hiero/sdk-js/labels",
+        123,
+        json={"name": "action: merge", "color": "ededed"},
+    )
+    mock_post.assert_any_await(
+        "/repos/hiero/sdk-js/issues/7/labels",
+        123,
+        json={"labels": ["action: merge"]},
+    )
+    assert mock_post.await_count == 2
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_add_label_existing_label_does_not_create():
+    client = GitHubClient()
+
+    with (
+        patch.object(client, "get", new=AsyncMock(return_value={"name": "bug"})) as mock_get,
+        patch.object(client, "post", new=AsyncMock(return_value={})) as mock_post,
+    ):
+        await client.add_label("hiero", "sdk-js", 7, "bug", 123)
+
+    mock_get.assert_awaited_once_with("/repos/hiero/sdk-js/labels/bug", 123)
+    mock_post.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/issues/7/labels",
+        123,
+        json={"labels": ["bug"]},
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_add_label_non_404_error_raises_and_does_not_create():
+    client = GitHubClient()
+
+    server_err = httpx.HTTPStatusError(
+        "Internal Server Error", request=Mock(), response=Mock(status_code=500)
+    )
+
+    with (
+        patch.object(client, "get", new=AsyncMock(side_effect=server_err)) as mock_get,
+        patch.object(client, "post", new=AsyncMock(return_value={})) as mock_post,
+        pytest.raises(httpx.HTTPStatusError) as exc_info,
+    ):
+        await client.add_label("hiero", "sdk-js", 7, "bug", 123)
+
+    assert exc_info.value.response.status_code == 500
+    mock_get.assert_awaited_once_with("/repos/hiero/sdk-js/labels/bug", 123)
+    mock_post.assert_not_called()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_add_label_create_if_missing_false_never_creates():
+    client = GitHubClient()
+
+    with (
+        patch.object(client, "get", new=AsyncMock()) as mock_get,
+        patch.object(client, "post", new=AsyncMock(return_value={})) as mock_post,
+    ):
+        await client.add_label(
+            "hiero", "sdk-js", 7, "action: merge", 123, create_if_missing=False
+        )
+
+    mock_get.assert_not_called()
+    mock_post.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/issues/7/labels",
+        123,
+        json={"labels": ["action: merge"]},
+    )
+
+    await client.close()

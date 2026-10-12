@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,7 +30,7 @@ class IssueManagementWorkflow:
 
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db: AsyncSession = ctx["db"]
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
 
         stale_cutoff = now - timedelta(days=cfg.stale_issue_days)
         # Marking an issue stale (label + comment) bumps its `updated_at`, so
@@ -90,7 +90,7 @@ class IssueManagementWorkflow:
         if labels & {name.casefold() for name in cfg.exempt_labels}:
             return
 
-        updated = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
+        updated = datetime.fromisoformat(issue["updated_at"])
         is_stale = cfg.stale_label.casefold() in labels
 
         days_inactive = (now - updated).days

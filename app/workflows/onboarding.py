@@ -7,7 +7,7 @@ import base64
 import json
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -384,8 +384,8 @@ class OnboardingWorkflow:
         # legitimate contributor from picking up an issue.
         try:
             user = await self._gh.get_user(login, ctx["installation_id"])
-            created = datetime.fromisoformat(user["created_at"].replace("Z", "+00:00"))
-            age_days = (datetime.now(timezone.utc) - created).days
+            created = datetime.fromisoformat(user["created_at"])
+            age_days = (datetime.now(UTC) - created).days
 
             if age_days < cfg.minimum_account_age_days:
                 return False, (

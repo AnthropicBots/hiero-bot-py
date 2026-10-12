@@ -1,5 +1,7 @@
 # tests/unit/test_audit.py
 
+from datetime import UTC
+
 import pytest
 from sqlalchemy import select
 
@@ -53,8 +55,8 @@ async def test_multiple_records_stored(db):
 
 @pytest.mark.asyncio
 async def test_timestamp_set_automatically(db):
-    from datetime import datetime, timezone
-    before = datetime.now(timezone.utc)
+    from datetime import datetime
+    before = datetime.now(UTC)
     await record(
         db,
         action="issue.assigned",
@@ -68,7 +70,7 @@ async def test_timestamp_set_automatically(db):
 
     timestamp = row.timestamp
     if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp = timestamp.replace(tzinfo=UTC)
 
     assert timestamp >= before
 
