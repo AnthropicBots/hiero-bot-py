@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     # GitHub OAuth & Session Security
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
+    allow_dev_login: bool = False
     session_secret_key: str = (
         "dev-secret-key-32-bytes-minimum-length-change-in-prod"
     )
