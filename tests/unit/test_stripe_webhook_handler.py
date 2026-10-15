@@ -37,32 +37,40 @@ def make_request(body: bytes, sig_header: str | None) -> Request:
 def stripe_event(
     event_type: str,
     event_id: str = "evt_test_123",
+    created: int | None = 1_700_000_000,
     **data_obj_fields,
 ) -> bytes:
-    return json.dumps(
-        {
-            "id": event_id,
-            "type": event_type,
-            "data": {"object": data_obj_fields},
-        }
-    ).encode()
+    payload = {
+        "id": event_id,
+        "type": event_type,
+        "data": {"object": data_obj_fields},
+    }
+    if created is not None:
+        payload["created"] = created
+    return json.dumps(payload).encode()
 
 
 @pytest.mark.asyncio
-async def test_checkout_completed_upgrades_account(db, monkeypatch):
+async def test_checkout_completed_does_not_grant_premium(db, monkeypatch):
     monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
     acc = Account(github_installation_id=601, org_login="acme-direct", plan_tier="free")
     db.add(acc)
     await db.commit()
 
-    body = stripe_event("checkout.session.completed", metadata={"org_login": "acme-direct"})
+    body = stripe_event(
+        "checkout.session.completed",
+        status="complete",
+        payment_status="paid",
+        metadata={"org_login": "acme-direct"},
+    )
     request = make_request(body, sign(SECRET, body, int(time.time())))
 
     result = await stripe_webhook(request, db)
 
     assert result == {"status": "success"}
     await db.refresh(acc)
-    assert acc.plan_tier == "premium"
+    assert acc.plan_tier == "free"
+    assert acc.stripe_status_event_created is None
 
 
 @pytest.mark.asyncio
@@ -77,8 +85,9 @@ async def test_duplicate_event_id_is_ignored(db, monkeypatch):
     await db.commit()
 
     body = stripe_event(
-        "checkout.session.completed",
+        "customer.subscription.updated",
         event_id="evt_duplicate_test",
+        status="active",
         metadata={"org_login": "duplicate-org"},
     )
     signature = sign(SECRET, body, int(time.time()))
@@ -117,8 +126,10 @@ async def test_distinct_event_ids_are_processed_independently(db, monkeypatch):
     await db.commit()
 
     first_body = stripe_event(
-        "checkout.session.completed",
+        "customer.subscription.created",
         event_id="evt_distinct_1",
+        created=1_700_000_000,
+        status="active",
         metadata={"org_login": "distinct-events-org"},
     )
     first_signature = sign(SECRET, first_body, int(time.time()))
@@ -135,6 +146,7 @@ async def test_distinct_event_ids_are_processed_independently(db, monkeypatch):
     second_body = stripe_event(
         "customer.subscription.deleted",
         event_id="evt_distinct_2",
+        created=1_700_000_100,
         metadata={"org_login": "distinct-events-org"},
     )
     second_signature = sign(SECRET, second_body, int(time.time()))
@@ -167,14 +179,15 @@ async def test_subscription_deleted_downgrades_account(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_checkout_completed_matches_by_installation_id(db, monkeypatch):
+async def test_subscription_created_matches_by_installation_id(db, monkeypatch):
     monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
     acc = Account(github_installation_id=603, org_login="gamma-direct", plan_tier="free")
     db.add(acc)
     await db.commit()
 
     body = stripe_event(
-        "checkout.session.completed",
+        "customer.subscription.created",
+        status="active",
         metadata={"installation_id": "603"},
     )
     request = make_request(body, sign(SECRET, body, int(time.time())))
@@ -333,3 +346,61 @@ async def test_subscription_updated_without_status_downgrades(db, monkeypatch):
     await db.refresh(acc)
     assert result == {"status": "success"}
     assert acc.plan_tier == "free"
+
+
+@pytest.mark.asyncio
+async def test_stale_subscription_event_does_not_regrant_premium(db, monkeypatch):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=702,
+        org_login="stale-event-org",
+        plan_tier="premium",
+    )
+    db.add(acc)
+    await db.commit()
+
+    newer = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_newer_past_due",
+        created=200,
+        status="past_due",
+        metadata={"org_login": "stale-event-org"},
+    )
+    await stripe_webhook(
+        make_request(newer, sign(SECRET, newer, int(time.time()))),
+        db,
+    )
+    await db.refresh(acc)
+    assert acc.plan_tier == "free"
+    assert acc.stripe_status_event_created == 200
+
+    stale = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_stale_active",
+        created=100,
+        status="active",
+        metadata={"org_login": "stale-event-org"},
+    )
+    result = await stripe_webhook(
+        make_request(stale, sign(SECRET, stale, int(time.time()))),
+        db,
+    )
+    await db.refresh(acc)
+    assert result == {"status": "success"}
+    assert acc.plan_tier == "free"
+    assert acc.stripe_status_event_created == 200
+
+    later = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_later_active",
+        created=300,
+        status="active",
+        metadata={"org_login": "stale-event-org"},
+    )
+    await stripe_webhook(
+        make_request(later, sign(SECRET, later, int(time.time()))),
+        db,
+    )
+    await db.refresh(acc)
+    assert acc.plan_tier == "premium"
+    assert acc.stripe_status_event_created == 300

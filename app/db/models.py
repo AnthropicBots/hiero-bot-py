@@ -175,6 +175,9 @@ class Account(Base):
     org_login: Mapped[str] = mapped_column(String(128), index=True)
     account_type: Mapped[str] = mapped_column(String(32), default="Organization")
     plan_tier: Mapped[str] = mapped_column(String(32), default="free")
+    # Unix `created` of the last Stripe event that changed plan_tier.
+    # Older events are ignored so a late delivery cannot undo a newer status.
+    stripe_status_event_created: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
     suspended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 

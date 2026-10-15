@@ -26,7 +26,8 @@ Accepted with issue #130.
 Premium means an account whose `plan_tier` is `premium`.
 
 - Stripe `customer.subscription.created` and `customer.subscription.updated` set that tier from `data.object.status`. `active` and `trialing` map to `premium`. Every other status (`incomplete`, `incomplete_expired`, `past_due`, `unpaid`, `canceled`, `paused`, or a missing status) maps to `free` immediately.
-- `checkout.session.completed` still upgrades the account. That event means Checkout finished and does not carry a subscription status. A later subscription event corrects the tier.
+- `checkout.session.completed` does not change the tier. Checkout does not carry a subscription status, so the account stays on its current tier until a subscription event confirms `active` or `trialing`.
+- Subscription events are applied in Stripe `created` order. An event older than the last one recorded on the account is ignored, so a late delivery cannot re-grant Premium.
 - `customer.subscription.deleted` sets `free`.
 - The features this covers are AI code review, reviewer recommendations, and automated reviewer assignment. Quality gates, PR health scoring, onboarding, progression, and issue management stay on the free tier.
 - Webhook handlers skip those three steps when the installation has no account row or the row is not premium. They do not answer GitHub with HTTP 402, because a non-2xx delivery is retried.

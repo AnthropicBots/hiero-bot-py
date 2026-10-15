@@ -110,6 +110,25 @@ async def _claim_event(
     return True
 
 
+def _stripe_event_created(event: dict) -> int | None:
+    """Stripe event `created` is a unix timestamp and the ordering key."""
+    created = event.get("created")
+    if isinstance(created, bool) or not isinstance(created, int) or created < 0:
+        return None
+    return created
+
+
+def _entitlement_event_is_current(account: Account, created: int | None) -> bool:
+    """False when this event is older than the status already stored.
+
+    A missing timestamp cannot be ordered, so it does not change the tier.
+    """
+    if created is None:
+        return False
+    previous = account.stripe_status_event_created
+    return previous is None or created >= previous
+
+
 @router.post("/stripe")
 async def stripe_webhook(
     request: Request,
@@ -166,24 +185,22 @@ async def stripe_webhook(
 
     account = await _get_account(db, data_obj)
 
-    if account:
-        if event_type == "checkout.session.completed":
-            # Checkout does not carry a subscription status. A later
-            # customer.subscription.updated event corrects the tier if the
-            # subscription is not active or trialing.
-            account.plan_tier = "premium"
+    if account and event_type != "checkout.session.completed":
+        created = _stripe_event_created(event)
+        if not _entitlement_event_is_current(account, created):
             log.info(
-                "Upgraded Account ID %d (%s) to premium tier via checkout",
+                "Ignoring Stripe event %s for Account ID %d; it is not newer than %s",
+                event_id,
                 account.id,
-                account.org_login,
+                account.stripe_status_event_created,
             )
-
         elif event_type in (
             "customer.subscription.created",
             "customer.subscription.updated",
         ):
             subscription_status = data_obj.get("status")
             account.plan_tier = tier_for_subscription_status(subscription_status)
+            account.stripe_status_event_created = created
             log.info(
                 "Set Account ID %d (%s) to %s from subscription status %s",
                 account.id,
@@ -194,6 +211,7 @@ async def stripe_webhook(
 
         elif event_type == "customer.subscription.deleted":
             account.plan_tier = "free"
+            account.stripe_status_event_created = created
             log.info(
                 "Downgraded Account ID %d (%s) to free tier",
                 account.id,

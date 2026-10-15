@@ -28,15 +28,17 @@ def sig_header(payload: bytes, secret: str, timestamp: int | None = None) -> str
 def stripe_event(
     event_type: str,
     event_id: str = "evt_test_123",
+    created: int | None = 1_700_000_000,
     **data_obj_fields,
 ) -> bytes:
-    return json.dumps(
-        {
-            "id": event_id,
-            "type": event_type,
-            "data": {"object": data_obj_fields},
-        }
-    ).encode()
+    payload = {
+        "id": event_id,
+        "type": event_type,
+        "data": {"object": data_obj_fields},
+    }
+    if created is not None:
+        payload["created"] = created
+    return json.dumps(payload).encode()
 
 
 @pytest_asyncio.fixture
@@ -60,13 +62,15 @@ async def client(test_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_checkout_completed_upgrades_account_to_premium(client, test_db):
+async def test_checkout_completed_keeps_account_free(client, test_db):
     acc = Account(github_installation_id=501, org_login="acme", plan_tier="free")
     test_db.add(acc)
     await test_db.commit()
 
     body = stripe_event(
         "checkout.session.completed",
+        status="complete",
+        payment_status="paid",
         metadata={"org_login": "acme", "installation_id": "501"},
     )
     r = await client.post(
@@ -77,7 +81,7 @@ async def test_checkout_completed_upgrades_account_to_premium(client, test_db):
     assert r.status_code == 200
     assert r.json() == {"status": "success"}
     await test_db.refresh(acc)
-    assert acc.plan_tier == "premium"
+    assert acc.plan_tier == "free"
 
 
 @pytest.mark.asyncio
