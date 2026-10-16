@@ -336,6 +336,7 @@ async def test_subscription_updated_without_status_downgrades(db, monkeypatch):
     body = stripe_event(
         "customer.subscription.updated",
         event_id="evt_missing_status",
+        created=1_700_000_050,
         metadata={"org_login": "missing-status-org"},
     )
     result = await stripe_webhook(
@@ -346,6 +347,7 @@ async def test_subscription_updated_without_status_downgrades(db, monkeypatch):
     await db.refresh(acc)
     assert result == {"status": "success"}
     assert acc.plan_tier == "free"
+    assert acc.stripe_status_event_created == 1_700_000_050
 
 
 @pytest.mark.asyncio
@@ -404,3 +406,98 @@ async def test_stale_subscription_event_does_not_regrant_premium(db, monkeypatch
     await db.refresh(acc)
     assert acc.plan_tier == "premium"
     assert acc.stripe_status_event_created == 300
+
+
+@pytest.mark.asyncio
+async def test_same_timestamp_subscription_event_is_ignored(db, monkeypatch):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=703,
+        org_login="same-timestamp-org",
+        plan_tier="free",
+    )
+    db.add(acc)
+    await db.commit()
+
+    created = 1_700_000_000
+
+    first = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_same_timestamp_active",
+        created=created,
+        status="active",
+        metadata={"org_login": "same-timestamp-org"},
+    )
+    await stripe_webhook(
+        make_request(first, sign(SECRET, first, int(time.time()))),
+        db,
+    )
+
+    await db.refresh(acc)
+    assert acc.plan_tier == "premium"
+    assert acc.stripe_status_event_created == created
+
+    second = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_same_timestamp_past_due",
+        created=created,
+        status="past_due",
+        metadata={"org_login": "same-timestamp-org"},
+    )
+    result = await stripe_webhook(
+        make_request(second, sign(SECRET, second, int(time.time()))),
+        db,
+    )
+
+    await db.refresh(acc)
+    assert result == {"status": "success"}
+    assert acc.plan_tier == "premium"
+    assert acc.stripe_status_event_created == created
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "created",
+    [
+        None,
+        -1,
+        True,
+        "1700000000",
+    ],
+    ids=[
+        "missing-timestamp",
+        "negative-timestamp",
+        "boolean-timestamp",
+        "string-timestamp",
+    ],
+)
+async def test_invalid_subscription_event_timestamp_does_not_change_entitlement(
+    db, monkeypatch, created
+):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+
+    acc = Account(
+        github_installation_id=704,
+        org_login="invalid-timestamp-org",
+        plan_tier="premium",
+        stripe_status_event_created=100,
+    )
+    db.add(acc)
+    await db.commit()
+
+    event = stripe_event(
+        "customer.subscription.updated",
+        event_id=f"evt_invalid_timestamp_{created}",
+        created=created,
+        status="past_due",
+        metadata={"org_login": "invalid-timestamp-org"},
+    )
+    result = await stripe_webhook(
+        make_request(event, sign(SECRET, event, int(time.time()))),
+        db,
+    )
+
+    await db.refresh(acc)
+    assert result == {"status": "success"}
+    assert acc.plan_tier == "premium"
+    assert acc.stripe_status_event_created == 100

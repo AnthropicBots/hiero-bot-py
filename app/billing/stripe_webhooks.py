@@ -8,7 +8,7 @@ import json
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -118,17 +118,6 @@ def _stripe_event_created(event: dict) -> int | None:
     return created
 
 
-def _entitlement_event_is_current(account: Account, created: int | None) -> bool:
-    """False when this event is older than the status already stored.
-
-    A missing timestamp cannot be ordered, so it does not change the tier.
-    """
-    if created is None:
-        return False
-    previous = account.stripe_status_event_created
-    return previous is None or created >= previous
-
-
 @router.post("/stripe")
 async def stripe_webhook(
     request: Request,
@@ -187,36 +176,51 @@ async def stripe_webhook(
 
     if account and event_type != "checkout.session.completed":
         created = _stripe_event_created(event)
-        if not _entitlement_event_is_current(account, created):
-            log.info(
-                "Ignoring Stripe event %s for Account ID %d; it is not newer than %s",
+
+        if created is None:
+            log.warning(
+                "Ignoring Stripe event %s without a valid creation timestamp",
                 event_id,
-                account.id,
-                account.stripe_status_event_created,
             )
-        elif event_type in (
-            "customer.subscription.created",
-            "customer.subscription.updated",
-        ):
-            subscription_status = data_obj.get("status")
-            account.plan_tier = tier_for_subscription_status(subscription_status)
-            account.stripe_status_event_created = created
-            log.info(
-                "Set Account ID %d (%s) to %s from subscription status %s",
-                account.id,
-                account.org_login,
-                account.plan_tier,
-                subscription_status,
+        else:
+            if event_type in (
+                "customer.subscription.created",
+                "customer.subscription.updated",
+            ):
+                plan_tier = tier_for_subscription_status(data_obj.get("status"))
+            else:
+                plan_tier = "free"
+
+            result = await db.execute(
+                update(Account)
+                .where(
+                    Account.id == account.id,
+                    or_(
+                        Account.stripe_status_event_created.is_(None),
+                        Account.stripe_status_event_created < created,
+                    ),
+                )
+                .values(
+                    plan_tier=plan_tier,
+                    stripe_status_event_created=created,
+                )
             )
 
-        elif event_type == "customer.subscription.deleted":
-            account.plan_tier = "free"
-            account.stripe_status_event_created = created
-            log.info(
-                "Downgraded Account ID %d (%s) to free tier",
-                account.id,
-                account.org_login,
-            )
+            if result.rowcount:
+                log.info(
+                    "Set Account ID %d (%s) to %s from Stripe event %s",
+                    account.id,
+                    account.org_login,
+                    plan_tier,
+                    event_id,
+                )
+            else:
+                log.info(
+                    "Ignoring stale or same-second Stripe event %s "
+                    "for Account ID %d",
+                    event_id,
+                    account.id,
+                )
 
     await db.commit()
 
