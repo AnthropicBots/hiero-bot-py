@@ -168,6 +168,12 @@ class WebhookDelivery(Base):
 
 class Account(Base):
     __tablename__ = "accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "stripe_subscription_id",
+            name="uq_accounts_stripe_subscription_id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     github_installation_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
@@ -175,10 +181,30 @@ class Account(Base):
     org_login: Mapped[str] = mapped_column(String(128), index=True)
     account_type: Mapped[str] = mapped_column(String(32), default="Organization")
     plan_tier: Mapped[str] = mapped_column(String(32), default="free")
-    # Unix `created` of the last Stripe event that changed plan_tier.
-    # Older events are ignored so a late delivery cannot undo a newer status.
-    stripe_status_event_created: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
+    # Stripe subscription associated with this account. Nullable for existing
+    # accounts that have not yet been linked to a Stripe subscription.
+    # The unique constraint prevents one subscription from belonging to
+    # multiple accounts.
+    stripe_subscription_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    # Immutable Stripe creation timestamp for the associated subscription.
+    # Used to order subscription replacements independently of webhook delivery.
+    stripe_subscription_created: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    # Highest valid Stripe event `created` timestamp observed for the
+    # associated subscription. Older events cannot overwrite newer results.
+    stripe_status_event_created: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime,
+        default=lambda: datetime.now(UTC),
+    )
     suspended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 

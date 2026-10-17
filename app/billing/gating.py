@@ -29,22 +29,26 @@ def is_premium_account(account: Account | None) -> bool:
     return account is not None and account.plan_tier == "premium"
 
 
-def require_premium_account(account: Account) -> None:
-    """HTTP form of the premium check, for request handlers.
 
-    Workflow code uses `is_premium_account` and skips the step instead.
-    Raising 402 from a GitHub webhook would make GitHub retry the delivery.
-    """
+def require_premium_account(account: Account | None) -> None:
+    """Raise HTTP 402 unless the account has Premium entitlement."""
     if is_premium_account(account):
         return
+
+    if account is None:
+        message = "No account is associated with this installation."
+    else:
+        message = (
+            f"Account '{account.org_login}' is on the "
+            f"'{account.plan_tier}' plan. "
+            "This feature requires a Premium subscription."
+        )
+
     raise HTTPException(
         status_code=status.HTTP_402_PAYMENT_REQUIRED,
         detail={
             "error": "Payment Required",
-            "message": (
-                f"Account '{account.org_login}' is on the '{account.plan_tier}' plan. "
-                "This feature requires a Premium subscription."
-            ),
+            "message": message,
             "upsell_url": "https://hiero-bot.com/pricing",
         },
     )

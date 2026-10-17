@@ -7,8 +7,9 @@ import hmac
 import json
 import time
 
+import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import or_, select, update
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,27 +57,49 @@ async def _get_account(
     db: AsyncSession,
     data_obj: dict,
 ) -> Account | None:
-    metadata = data_obj.get("metadata", {})
-    org_login = metadata.get("org_login") or data_obj.get("client_reference_id")
-    inst_id = metadata.get("installation_id")
+    """Resolve an account by subscription association or checkout metadata."""
+    subscription_id = data_obj.get("id")
 
-    if inst_id:
-        try:
-            inst_int = int(inst_id)
-            stmt = select(Account).where(
-                Account.github_installation_id == inst_int
+    if isinstance(subscription_id, str) and subscription_id:
+        result = await db.execute(
+            select(Account).where(
+                Account.stripe_subscription_id == subscription_id
             )
-            res = await db.execute(stmt)
-            account = res.scalar_one_or_none()
-            if account:
-                return account
-        except (ValueError, TypeError):
-            pass
+        )
+        account = result.scalar_one_or_none()
+        if account is not None:
+            return account
 
-    if org_login:
-        stmt = select(Account).where(Account.org_login == org_login)
-        res = await db.execute(stmt)
-        return res.scalar_one_or_none()
+    metadata = data_obj.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    org_login = metadata.get("org_login") or data_obj.get(
+        "client_reference_id"
+    )
+    installation_id = metadata.get("installation_id")
+
+    if installation_id is not None:
+        try:
+            installation_id_int = int(installation_id)
+        except (ValueError, TypeError):
+            installation_id_int = None
+
+        if installation_id_int is not None:
+            result = await db.execute(
+                select(Account).where(
+                    Account.github_installation_id == installation_id_int
+                )
+            )
+            account = result.scalar_one_or_none()
+            if account is not None:
+                return account
+
+    if isinstance(org_login, str) and org_login:
+        result = await db.execute(
+            select(Account).where(Account.org_login == org_login)
+        )
+        return result.scalar_one_or_none()
 
     return None
 
@@ -118,6 +141,53 @@ def _stripe_event_created(event: dict) -> int | None:
     return created
 
 
+async def _retrieve_subscription_details(
+    subscription_id: str,
+) -> tuple[str, int]:
+    """Retrieve the current status and creation time of a Stripe subscription."""
+    if not settings.stripe_secret_key:
+        log.error("STRIPE_SECRET_KEY is not configured")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stripe API is not properly configured.",
+        )
+
+    try:
+        client = stripe.StripeClient(settings.stripe_secret_key)
+        subscription = await client.v1.subscriptions.retrieve_async(
+            subscription_id
+        )
+    except Exception as exc:
+        log.exception(
+            "Unable to retrieve Stripe subscription %s",
+            subscription_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to verify subscription with Stripe.",
+        ) from exc
+
+    subscription_status = getattr(subscription, "status", None)
+    created = getattr(subscription, "created", None)
+
+    if (
+        not isinstance(subscription_status, str)
+        or isinstance(created, bool)
+        or not isinstance(created, int)
+        or created < 0
+    ):
+        log.error(
+            "Stripe returned invalid subscription details for %s",
+            subscription_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Stripe returned an invalid subscription response.",
+        )
+
+    return subscription_status, created
+
+
 @router.post("/stripe")
 async def stripe_webhook(
     request: Request,
@@ -146,82 +216,260 @@ async def stripe_webhook(
 
     try:
         event = json.loads(body.decode("utf-8"))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload",
+        ) from exc
+
+    if not isinstance(event, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Stripe event payload",
+        )
 
     event_id = event.get("id")
     event_type = event.get("type", "")
-    data_obj = (event.get("data") or {}).get("object", {})
+    event_data = event.get("data")
+    data_obj = (
+        event_data.get("object")
+        if isinstance(event_data, dict)
+        else None
+    )
+
+    if not isinstance(event_id, str) or not event_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing Stripe event ID",
+        )
+
+    if not isinstance(event_type, str):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Stripe event type",
+        )
+
+    if not isinstance(data_obj, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Stripe event object",
+        )
 
     log.info(
         "Received Stripe webhook event: %s (%s)",
         event_type,
-        event_id or "missing-id",
+        event_id,
     )
 
-    if event_type not in (
+    supported_events = {
         "checkout.session.completed",
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
-    ):
+    }
+
+    if event_type not in supported_events:
         return {"status": "success"}
 
-    claimed = await _claim_event(db, event_id, event_type)
-    if not claimed:
+    # Checkout completion alone must never grant Premium.
+    # Claiming this event is safe because it does not change entitlement.
+    if event_type == "checkout.session.completed":
+        claimed = await _claim_event(db, event_id, event_type)
+        if not claimed:
+            log.info("Ignoring duplicate Stripe webhook event: %s", event_id)
+            return {"status": "success"}
+
+        await db.commit()
+        return {"status": "success"}
+
+    subscription_id = data_obj.get("id")
+    if not isinstance(subscription_id, str) or not subscription_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing Stripe subscription ID",
+        )
+
+    # Avoid unnecessary API calls for already processed events.
+    existing_event = await db.scalar(
+        select(StripeEvent.id).where(StripeEvent.id == event_id)
+    )
+    if existing_event is not None:
         log.info("Ignoring duplicate Stripe webhook event: %s", event_id)
         return {"status": "success"}
 
+    # Resolve the account before contacting Stripe. Do not claim the event
+    # until reconciliation succeeds so failed requests can be retried.
     account = await _get_account(db, data_obj)
 
-    if account and event_type != "checkout.session.completed":
-        created = _stripe_event_created(event)
+    if account is None:
+        log.warning(
+            "Cannot resolve account for Stripe subscription %s, event %s",
+            subscription_id,
+            event_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Account for this Stripe subscription is not available yet.",
+        )
 
-        if created is None:
-            log.warning(
-                "Ignoring Stripe event %s without a valid creation timestamp",
-                event_id,
-            )
-        else:
-            if event_type in (
-                "customer.subscription.created",
-                "customer.subscription.updated",
+    account_id = account.id
+    account_org_login = account.org_login
+    initial_subscription_id = account.stripe_subscription_id
+    initial_subscription_created = account.stripe_subscription_created
+    # End the read transaction before making network requests.
+    await db.rollback()
+
+    current_status, incoming_created = await _retrieve_subscription_details(
+        subscription_id
+    )
+    plan_tier = tier_for_subscription_status(current_status)
+
+    # Recover a missing timestamp for the previously associated subscription
+    # outside the transaction. Never infer ordering from a missing value.
+    recovered_existing_created = None
+
+    if (
+        initial_subscription_id
+        and initial_subscription_id != subscription_id
+        and initial_subscription_created is None
+    ):
+        _, recovered_existing_created = await _retrieve_subscription_details(
+            initial_subscription_id
+        )
+
+    # Lock and re-read the account so the replacement decision uses its
+    # latest persisted subscription association.
+    result = await db.execute(
+        select(Account)
+        .where(Account.id == account_id)
+        .with_for_update()
+    )
+    account = result.scalar_one_or_none()
+
+    if account is None:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Account is not available yet.",
+        )
+    event_created = _stripe_event_created(event)
+    # Ignore older events for the currently associated subscription.
+    # Equal timestamps remain eligible for reconciliation against Stripe.
+    if (
+        account.stripe_subscription_id == subscription_id
+        and event_created is not None
+        and account.stripe_status_event_created is not None
+        and event_created < account.stripe_status_event_created
+    ):
+        claimed = await _claim_event(db, event_id, event_type)
+        if not claimed:
+            await db.rollback()
+            return {"status": "success"}
+
+        log.info(
+            "Ignoring stale Stripe event %s for subscription %s: "
+            "event timestamp %d is older than processed timestamp %d",
+            event_id,
+            subscription_id,
+            event_created,
+            account.stripe_status_event_created,
+        )
+        await db.commit()
+        return {"status": "success"}
+    # A different subscription can replace the current association only
+    # when its immutable Stripe creation timestamp is strictly newer.
+    if (
+        account.stripe_subscription_id is not None
+        and account.stripe_subscription_id != subscription_id
+    ):
+        existing_created = account.stripe_subscription_created
+
+        if existing_created is None:
+            # Use the recovered timestamp only if the subscription
+            # association is unchanged from the initial account lookup.
+            if (
+                account.stripe_subscription_id == initial_subscription_id
+                and recovered_existing_created is not None
             ):
-                plan_tier = tier_for_subscription_status(data_obj.get("status"))
+                existing_created = recovered_existing_created
+                account.stripe_subscription_created = existing_created
             else:
-                plan_tier = "free"
+                existing_subscription_id = account.stripe_subscription_id
 
-            result = await db.execute(
-                update(Account)
-                .where(
-                    Account.id == account.id,
-                    or_(
-                        Account.stripe_status_event_created.is_(None),
-                        Account.stripe_status_event_created < created,
+                log.error(
+                    "Cannot order Stripe subscriptions for account %s: "
+                    "existing subscription %s has no creation timestamp",
+                    account_org_login,
+                    existing_subscription_id,
+                )
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        "Current subscription ordering is unavailable; "
+                        "retry later."
                     ),
                 )
-                .values(
-                    plan_tier=plan_tier,
-                    stripe_status_event_created=created,
-                )
-            )
 
-            if result.rowcount:
-                log.info(
-                    "Set Account ID %d (%s) to %s from Stripe event %s",
-                    account.id,
-                    account.org_login,
-                    plan_tier,
-                    event_id,
-                )
-            else:
-                log.info(
-                    "Ignoring stale or same-second Stripe event %s "
-                    "for Account ID %d",
-                    event_id,
-                    account.id,
-                )
+        # Creation timestamps have second-level precision. Equal timestamps
+        # cannot establish which subscription should replace the other.
+        if incoming_created <= existing_created:
+            claimed = await _claim_event(db, event_id, event_type)
+            if not claimed:
+                await db.rollback()
+                return {"status": "success"}
+
+            log.info(
+                "Ignoring event %s for subscription %s: it is not newer "
+                "than the subscription currently associated with account %s",
+                event_id,
+                subscription_id,
+                account_org_login,
+            )
+            await db.commit()
+            return {"status": "success"}
+
+    # Claim the event only after account resolution and successful
+    # reconciliation. The unique Stripe event ID protects against retries.
+    claimed = await _claim_event(db, event_id, event_type)
+    if not claimed:
+        await db.rollback()
+        log.info("Ignoring duplicate Stripe webhook event: %s", event_id)
+        return {"status": "success"}
+
+    previous_subscription_id = account.stripe_subscription_id
+    previous_event_created = account.stripe_status_event_created
+
+    account.stripe_subscription_id = subscription_id
+    account.stripe_subscription_created = incoming_created
+    account.plan_tier = plan_tier
+
+    if previous_subscription_id != subscription_id:
+        if event_created is not None:
+            # Use the incoming event timestamp for the new subscription.
+            account.stripe_status_event_created = event_created
+        elif previous_subscription_id is not None:
+            # Do not carry the previous subscription's timestamp forward.
+            # Without a valid timestamp, stale-event ordering is unavailable.
+            account.stripe_status_event_created = None
+        # If no subscription was previously associated, preserve the
+        # existing timestamp when the incoming event timestamp is invalid.
+    elif event_created is not None:
+        # Keep event timestamps monotonic for the same subscription.
+        account.stripe_status_event_created = (
+            event_created
+            if previous_event_created is None
+            else max(previous_event_created, event_created)
+        )
 
     await db.commit()
+
+    log.info(
+        "Reconciled Account ID %d (%s) to %s using Stripe subscription %s",
+        account_id,
+        account_org_login,
+        plan_tier,
+        subscription_id,
+    )
 
     return {"status": "success"}

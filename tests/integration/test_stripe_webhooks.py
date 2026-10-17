@@ -25,12 +25,16 @@ def sig_header(payload: bytes, secret: str, timestamp: int | None = None) -> str
     return f"t={ts},v1={v1}"
 
 
+
 def stripe_event(
     event_type: str,
     event_id: str = "evt_test_123",
     created: int | None = 1_700_000_000,
     **data_obj_fields,
 ) -> bytes:
+    if event_type.startswith("customer.subscription."):
+        data_obj_fields.setdefault("id", "sub_test_123")
+
     payload = {
         "id": event_id,
         "type": event_type,
@@ -52,11 +56,26 @@ async def test_db():
     await engine.dispose()
 
 
+
 @pytest_asyncio.fixture
 async def client(test_db, monkeypatch):
     monkeypatch.setattr(stripe_settings, "stripe_webhook_secret", STRIPE_SECRET)
+
+    async def mock_retrieve_subscription_details(
+        subscription_id: str,
+    ) -> tuple[str, int]:
+        return "canceled", 2_000
+
+    monkeypatch.setattr(
+        "app.billing.stripe_webhooks._retrieve_subscription_details",
+        mock_retrieve_subscription_details,
+    )
+
     app.dependency_overrides[get_db] = lambda: test_db
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as c:
         yield c
     app.dependency_overrides.clear()
 
