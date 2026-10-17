@@ -76,6 +76,9 @@ class BoundedLockRegistry:
 
 _assign_locks = BoundedLockRegistry(max_capacity=2048)
 _contributor_assign_locks = BoundedLockRegistry(max_capacity=2048)
+# One mentor pick per repo at a time, so concurrent first-time contributors
+# see each other's assignment instead of reading the same counts (#148).
+_mentor_assign_locks = BoundedLockRegistry(max_capacity=2048)
 
 
 def _get_assign_lock(
@@ -484,33 +487,76 @@ class OnboardingWorkflow:
             return
 
         strategy = ctx["config"].workflows.onboarding.mentor_assignment_strategy
-        if strategy == "round-robin":
-            idx = sum(ord(c) for c in contributor) % len(members)
-            mentor = members[idx]["login"]
-        else:
-            mentor = members[0]["login"]
+        if strategy != "round-robin":
+            # Not implemented yet. Balancing is a better fallback than sending
+            # every contributor to the first team member.
+            log.info(
+                "Mentor strategy %r is not implemented; using round-robin", strategy
+            )
 
-        await self._gh.add_assignees(
-            ctx["owner"], ctx["repo"], issue_number, [mentor], inst
+        async with _mentor_assign_locks.get(
+            (ctx["owner"].lower(), ctx["repo"].lower())
+        ).acquire():
+            counts = await self._mentor_assignment_counts(
+                db, ctx["owner"], ctx["repo"]
+            )
+            mentor = self._select_mentor(members, counts)
+            if not mentor:
+                return
+
+            await self._gh.add_assignees(
+                ctx["owner"], ctx["repo"], issue_number, [mentor], inst
+            )
+            await self._gh.post_comment(
+                ctx["owner"],
+                ctx["repo"],
+                issue_number,
+                f"👋 @{mentor} has been assigned as mentor to support @{contributor}.",
+                inst,
+            )
+            await audit.record(
+                db,
+                action="contributor.mentor_assigned",
+                owner=ctx["owner"],
+                repo=ctx["repo"],
+                target_number=issue_number,
+                target_login=contributor,
+                reason=f"Mentor @{mentor} assigned via {strategy}",
+                metadata={"mentor": mentor},
+            )
+            await db.commit()
+
+    @staticmethod
+    async def _mentor_assignment_counts(db, owner: str, repo: str) -> dict[str, int]:
+        """How many contributors each mentor has been assigned in this repo."""
+        result = await db.execute(
+            select(AuditLog.metadata_json).where(
+                AuditLog.action == "contributor.mentor_assigned",
+                AuditLog.owner == owner,
+                AuditLog.repo == repo,
+            )
         )
-        await self._gh.post_comment(
-            ctx["owner"],
-            ctx["repo"],
-            issue_number,
-            f"👋 @{mentor} has been assigned as mentor to support @{contributor}.",
-            inst,
-        )
-        await audit.record(
-            db,
-            action="contributor.mentor_assigned",
-            owner=ctx["owner"],
-            repo=ctx["repo"],
-            target_number=issue_number,
-            target_login=contributor,
-            reason=f"Mentor @{mentor} assigned via {strategy}",
-            metadata={"mentor": mentor},
-        )
-        await db.commit()
+
+        counts: dict[str, int] = {}
+        for metadata in result.scalars():
+            mentor = (metadata or {}).get("mentor")
+            if mentor:
+                key = mentor.lower()
+                counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    @staticmethod
+    def _select_mentor(members: list[dict], counts: dict[str, int]) -> str | None:
+        """
+        Pick the team member with the fewest mentor assignments so far.
+
+        Ties go to the alphabetically first login, so consecutive new
+        contributors rotate through the team in a stable order.
+        """
+        logins = [m["login"] for m in members if m.get("login")]
+        if not logins:
+            return None
+        return min(logins, key=lambda login: (counts.get(login.lower(), 0), login.lower()))
 
     @staticmethod
     def _build_welcome(login: str, cfg) -> str:
