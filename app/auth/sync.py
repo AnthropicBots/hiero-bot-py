@@ -18,6 +18,12 @@ log = get_logger("auth.sync")
 _SYNC_CACHE: dict[int, tuple[float, list[dict]]] = {}
 CACHE_TTL_SECONDS = 300  # 5 minutes
 
+INSTALLATIONS_URL = "https://api.github.com/user/installations"
+INSTALLATIONS_PER_PAGE = 100
+# Revoking access needs the complete list. Past this many pages the list is
+# treated as incomplete and nothing is revoked.
+MAX_INSTALLATION_PAGES = 10
+
 
 def _prune_expired_cache(now: float) -> None:
     expired_keys = [
@@ -31,6 +37,40 @@ def _prune_expired_cache(now: float) -> None:
 
 def clear_sync_cache() -> None:
     _SYNC_CACHE.clear()
+
+
+async def _fetch_installation_ids(
+    client: httpx.AsyncClient, token: str
+) -> tuple[set[int], bool]:
+    """
+    Return the installation IDs the user can access and whether that list is
+    complete. It is incomplete when a page fails or the page cap is reached,
+    and callers must not revoke access based on an incomplete list.
+    """
+    ids: set[int] = set()
+    for page in range(1, MAX_INSTALLATION_PAGES + 1):
+        res = await client.get(
+            INSTALLATIONS_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "Hiero-Bot-Py",
+            },
+            params={"per_page": INSTALLATIONS_PER_PAGE, "page": page},
+        )
+        if res.status_code != 200:
+            return ids, False
+
+        batch = res.json().get("installations", [])
+        ids.update(inst["id"] for inst in batch if "id" in inst)
+        if len(batch) < INSTALLATIONS_PER_PAGE:
+            return ids, True
+
+    log.warning(
+        "User installation list exceeded %d pages; skipping revocation",
+        MAX_INSTALLATION_PAGES,
+    )
+    return ids, False
 
 
 async def get_user_authorized_accounts(

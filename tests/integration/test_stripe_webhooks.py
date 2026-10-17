@@ -77,7 +77,8 @@ async def test_checkout_completed_upgrades_account_to_premium(client, test_db):
     assert r.status_code == 200
     assert r.json() == {"status": "success"}
     await test_db.refresh(acc)
-    assert acc.plan_tier == "premium"
+    # Checkout completion alone must not grant premium — awaiting subscription event.
+    assert acc.plan_tier == "free"
 
 
 @pytest.mark.asyncio

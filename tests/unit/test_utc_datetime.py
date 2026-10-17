@@ -1,6 +1,6 @@
 # tests/unit/test_utc_datetime.py - timezone-safe datetime column type
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -14,23 +14,23 @@ def test_bind_converts_aware_datetime_to_naive_utc():
 
     stored = UTCDateTime().process_bind_param(aware, None)
 
-    assert stored == datetime(2026, 9, 20, 0, 0)  # noqa: DTZ001
+    assert stored == datetime(2026, 9, 20, 0, 0)
     assert stored.tzinfo is None
 
 
 def test_bind_leaves_naive_datetime_and_none_untouched():
-    naive = datetime(2026, 9, 20, 0, 0)  # noqa: DTZ001
+    naive = datetime(2026, 9, 20, 0, 0)
 
     assert UTCDateTime().process_bind_param(naive, None) == naive
     assert UTCDateTime().process_bind_param(None, None) is None
 
 
 def test_result_attaches_utc_to_stored_naive_value():
-    stored = datetime(2026, 9, 20, 0, 0)  # noqa: DTZ001
+    stored = datetime(2026, 9, 20, 0, 0)
 
     loaded = UTCDateTime().process_result_value(stored, None)
 
-    assert loaded == datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
+    assert loaded == datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
     assert UTCDateTime().process_result_value(None, None) is None
 
 

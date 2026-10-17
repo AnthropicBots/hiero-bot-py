@@ -6,7 +6,7 @@ This guide walks you through setting up **Hiero Maintainer Bot** for local devel
 
 Before getting started, ensure you have the following installed:
 
-- Python 3.12 or later
+- Python 3.11 or later
 - Git
 - A GitHub account
 - A GitHub App (required for webhook events)
@@ -36,7 +36,7 @@ source .venv/bin/activate
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 ```
 
 ---
@@ -45,6 +45,12 @@ python -m venv .venv
 
 ```bash
 pip install -r requirements.txt
+```
+
+For local development, install the test, lint, and audit tools as well:
+
+```bash
+pip install -r requirements-dev.txt
 ```
 
 ---
@@ -62,7 +68,7 @@ cp .env.example .env
 ### Windows
 
 ```powershell
-copy .env.example .env
+Copy-Item .env.example .env
 ```
 
 Open `.env` and configure the required values:

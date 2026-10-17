@@ -1,5 +1,6 @@
 # tests/conftest.py
 
+import types
 from unittest.mock import AsyncMock
 
 import pytest
@@ -105,10 +106,14 @@ def base_config():
 
 @pytest.fixture
 def ctx(base_config, db):
+    # Provide a premium account so that premium-gated steps (reviewer assignment,
+    # health scoring) run in unit tests that exercise the full dispatch path.
+    premium_account = types.SimpleNamespace(plan_tier="premium")
     return {
         "owner": "hiero",
         "repo": "sdk-js",
         "installation_id": 42,
         "config": base_config,
         "db": db,
+        "account": premium_account,
     }

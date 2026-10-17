@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy import select
 
 from app.ai.reviewer import AIReviewer
+from app.billing.gating import is_premium
 from app.db.models import ReviewerRecommendation
 from app.github.client import GitHubClient
 from app.utils import audit
@@ -123,8 +124,8 @@ class PullRequestWorkflow:
                 },
             )
 
-        # AI review
-        if action in ("opened", "reopened") and cfg.ai_review.enabled:
+        # AI review (Premium only)
+        if action in ("opened", "reopened") and cfg.ai_review.enabled and is_premium(ctx.get("account")):
             try:
                 await self._run_ai_review(ctx, pr)
             finally:
@@ -132,8 +133,8 @@ class PullRequestWorkflow:
                 # provider connections after the review attempt completes.
                 await self._ai.close()
 
-        # Reviewer recommendation
-        if action in ("opened", "reopened") and cfg.reviewer_recommendation:
+        # Reviewer recommendation (Premium only)
+        if action in ("opened", "reopened") and cfg.reviewer_recommendation and is_premium(ctx.get("account")):
             await self._recommend_reviewers(ctx, pr)
 
         await db.commit()
@@ -219,7 +220,7 @@ class PullRequestWorkflow:
         # GPG
         if gates.require_gpg_signature:
             commits = await get_commits()
-            signed = all(
+            signed = bool(commits) and all(
                 (c.get("commit") or {}).get("verification", {}).get("verified")
                 for c in commits
             )

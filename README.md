@@ -7,7 +7,7 @@
 
   PR health scoring · reviewer recommendation · contributor progression tracking · optional AI-assisted review · persistent audit trail · REST API
 
-  [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://python.org)
+  [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
   [![Tests](https://img.shields.io/badge/tests-139%20passing-brightgreen)](tests/)
   [![FastAPI](https://img.shields.io/badge/framework-FastAPI-009688)](https://fastapi.tiangolo.com/)

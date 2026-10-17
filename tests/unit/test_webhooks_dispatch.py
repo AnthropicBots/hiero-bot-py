@@ -4,7 +4,7 @@
 # timestamp-skew replay defense, the event dispatcher, the slash-command
 # handlers, and several installation-event edge cases had no tests at all.
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,7 +42,7 @@ def make_router(config=_UNSET):
 @pytest.mark.asyncio
 async def test_stale_date_header_is_rejected(db):
     router, _, _ = make_router()
-    stale = datetime.now(timezone.utc) - timedelta(seconds=999)
+    stale = datetime.now(UTC) - timedelta(seconds=999)
     request = make_request(
         {
             "X-GitHub-Event": "ping",
@@ -61,7 +61,7 @@ async def test_stale_date_header_is_rejected(db):
 @pytest.mark.asyncio
 async def test_fresh_date_header_is_accepted(db):
     router, _, _ = make_router()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     request = make_request(
         {
             "X-GitHub-Event": "ping",

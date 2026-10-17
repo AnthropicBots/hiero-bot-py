@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,7 +17,7 @@ def make_session(session_id: str, user_id: int, expires_in: timedelta) -> Sessio
     return Session(
         id=session_id,
         user_id=user_id,
-        expires_at=datetime.now(timezone.utc) + expires_in,
+        expires_at=datetime.now(UTC) + expires_in,
     )
 
 
@@ -38,7 +38,7 @@ async def test_purge_deletes_only_expired_sessions(db):
 
 @pytest.mark.asyncio
 async def test_purge_deletes_sessions_at_expiration_boundary(db):
-    boundary = datetime.now(timezone.utc)
+    boundary = datetime.now(UTC)
     db.add(
         Session(
             id="expired-at-boundary",

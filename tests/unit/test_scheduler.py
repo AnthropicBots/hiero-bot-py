@@ -205,6 +205,15 @@ def test_start_registers_scheduler_jobs():
     assert fields["minute"].expressions[0].first == 0
     assert str(trigger.timezone) == "UTC"
 
+    stale_call = mock_add_job.call_args_list[0]
+    assert stale_call.args[0] == scheduler.run_stale_scan
+
+    stale_trigger = stale_call.args[1]
+    stale_fields = {field.name: field for field in stale_trigger.fields}
+    assert stale_fields["hour"].expressions[0].first == 2
+    assert stale_fields["minute"].expressions[0].first == 0
+    assert str(stale_trigger.timezone) == "UTC"
+
 
 def test_summary_reports_errors():
     summary = ScanSummary()

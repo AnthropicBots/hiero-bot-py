@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
 from itsdangerous import BadSignature, Signer
@@ -60,7 +60,7 @@ async def create_db_session(
     ttl_seconds: int = SESSION_EXPIRE_SECONDS,
 ) -> tuple[str, str]:
     raw_session_id = secrets.token_hex(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
 
     db_session = Session(
         id=raw_session_id,
@@ -77,7 +77,7 @@ async def create_db_session(
 async def get_db_session(db: AsyncSession, raw_session_id: str) -> Session | None:
     if not raw_session_id:
         return None
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     stmt = select(Session).where(Session.id == raw_session_id, Session.expires_at > now)
     res = await db.execute(stmt)
     return res.scalar_one_or_none()
@@ -97,7 +97,7 @@ async def purge_expired_sessions(db: AsyncSession) -> int:
     Returns:
         int: Number of deleted expired session rows.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     stmt = delete(Session).where(Session.expires_at <= now)
     result = await db.execute(stmt)
     await db.commit()

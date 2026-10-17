@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
@@ -37,12 +37,12 @@ class UTCDateTime(TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None and value.tzinfo is not None:
-            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+            value = value.astimezone(UTC).replace(tzinfo=None)
         return value
 
     def process_result_value(self, value, dialect):
         if value is not None and value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
+            value = value.replace(tzinfo=UTC)
         return value
 
 
@@ -52,7 +52,7 @@ class AuditLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(
         UTCDateTime,
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         index=True,
     )
     action: Mapped[str] = mapped_column(String(64), index=True)
@@ -75,7 +75,7 @@ class PRHealthScore(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime,
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
     owner: Mapped[str] = mapped_column(String(128), index=True)
     repo: Mapped[str] = mapped_column(String(128), index=True)
@@ -102,7 +102,7 @@ class ContributorSnapshot(Base):
     __tablename__ = "contributor_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
     owner: Mapped[str] = mapped_column(String(128), index=True)
     repo: Mapped[str] = mapped_column(String(128), index=True)
     login: Mapped[str] = mapped_column(String(128), index=True)
@@ -117,7 +117,7 @@ class StaleActionLog(Base):
     __tablename__ = "stale_action_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
     owner: Mapped[str] = mapped_column(String(128))
     repo: Mapped[str] = mapped_column(String(128))
     issue_number: Mapped[int] = mapped_column(Integer)
@@ -133,7 +133,7 @@ class ReviewerRecommendation(Base):
     __tablename__ = "reviewer_recommendations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
     owner: Mapped[str] = mapped_column(String(128))
     repo: Mapped[str] = mapped_column(String(128))
     pr_number: Mapped[int] = mapped_column(Integer)
@@ -150,7 +150,7 @@ class StripeEvent(Base):
     event_type: Mapped[str] = mapped_column(String(128), index=True)
     processed_at: Mapped[datetime] = mapped_column(
         UTCDateTime,
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         index=True,
     )
 
@@ -161,7 +161,7 @@ class WebhookDelivery(Base):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     received_at: Mapped[datetime] = mapped_column(
         UTCDateTime,
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         index=True,
     )
 
@@ -175,7 +175,8 @@ class Account(Base):
     org_login: Mapped[str] = mapped_column(String(128), index=True)
     account_type: Mapped[str] = mapped_column(String(32), default="Organization")
     plan_tier: Mapped[str] = mapped_column(String(32), default="free")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
     suspended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
@@ -187,7 +188,7 @@ class User(Base):
     github_login: Mapped[str] = mapped_column(String(128), index=True)
     github_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
     avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
@@ -198,8 +199,8 @@ class UserOAuthToken(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
     encrypted_access_token: Mapped[str] = mapped_column(Text)
     scope: Mapped[str] = mapped_column(String(256), default="read:org")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
 
 
 class Session(Base):
@@ -208,7 +209,7 @@ class Session(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
 
 
 class AccountUser(Base):
@@ -218,7 +219,7 @@ class AccountUser(Base):
     account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     authorized: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
 
     __table_args__ = (
         UniqueConstraint("account_id", "user_id", name="uq_account_user"),
@@ -231,7 +232,7 @@ class AccountRepo(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     repo_name: Mapped[str] = mapped_column(String(128), index=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
 
     __table_args__ = (
         UniqueConstraint("account_id", "repo_name", name="uq_account_repo"),

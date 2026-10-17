@@ -4,10 +4,12 @@
 # that decides which organizations a logged-in user can see in the dashboard
 # was completely uncovered.
 
+import itertools
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from app.auth.session import encrypt_token
 from app.auth.sync import (

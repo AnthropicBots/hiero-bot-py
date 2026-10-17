@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import select
@@ -64,7 +64,7 @@ class PRHealthWorkflow:
             "review_count": signals["review_count"],
             "files_changed": len(files),
             "label_applied": label,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         }
         await self._upsert_score(db, owner, repo, pr_number, fields)
 

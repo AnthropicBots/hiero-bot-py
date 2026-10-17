@@ -148,9 +148,7 @@ class GitHubClient:
             expires_at_str = data.get("expires_at")
             try:
                 if expires_at_str:
-                    expiry = datetime.fromisoformat(
-                        expires_at_str.replace("Z", "+00:00")
-                    ).timestamp()
+                    expiry = datetime.fromisoformat(expires_at_str).timestamp()
                 else:
                     expiry = time.time() + 3600
             except (ValueError, TypeError):
