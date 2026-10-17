@@ -74,11 +74,12 @@ class PRHealthWorkflow:
         await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
         await self._gh.add_label(owner, repo, pr_number, label, inst)
 
-        # Comment when below threshold or when the PR is labeled needs work. One
-        # comment per PR: later pushes edit it rather than stacking a new one each time.
+        # Comment when below the comment threshold. Labels are governed
+        # separately by label_healthy_above so the two knobs stay independent.
+        # One comment per PR: later pushes edit it rather than stacking new ones.
         await self._sync_health_comment(
             ctx, pr_number, score, signals, cfg,
-            due=score < cfg.comment_threshold or label == LABEL_NEEDS_WORK,
+            due=score < cfg.comment_threshold,
         )
 
         await audit.record(
@@ -100,13 +101,13 @@ class PRHealthWorkflow:
 
         if due:
             body = f"{HEALTH_MARKER}\n" + self._build_health_comment(
-                score, signals, cfg.label_healthy_above
+                score, signals, cfg.comment_threshold
             )
         elif existing:
             # The PR improved: replace the stale "below threshold" text.
             body = (
                 f"{HEALTH_MARKER}\n## 💚 PR Health Score: {score:.0f}/100\n\n"
-                f"This PR is now above the **{cfg.label_healthy_above}/100** healthy "
+                f"This PR is now above the **{cfg.comment_threshold}/100** healthy "
                 "threshold. Thanks for the improvements!"
             )
         else:

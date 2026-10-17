@@ -107,16 +107,10 @@ async def test_no_comment_above_threshold(mock_gh, ctx):
 @pytest.mark.asyncio
 async def test_needs_work_label_posts_comment_for_boundary_score(mock_gh, ctx):
     """
-    Regression test for issue #47: a PR whose score falls between
-    comment_threshold and label_healthy_above must still get both the
-    LABEL_NEEDS_WORK label AND the explanatory comment. Previously only
-    `score < comment_threshold` triggered a comment, so a PR scoring in
-    this gap got an unexplained "needs work" label with no comment.
-
-    Rather than trusting the fixture lands in the gap by luck, this test
-    recomputes the score with the workflow's own static methods (same
-    inputs used above) and asserts it is *actually* in the boundary,
-    so the test stays meaningful if score_weights or thresholds change.
+    Boundary behavior after decoupling comment and label thresholds: a PR
+    scoring between comment_threshold and label_healthy_above gets the
+    LABEL_NEEDS_WORK label without a comment. Comments follow
+    comment_threshold only so operators can quiet them independently.
     """
     files = [
         {"filename": "tests/test_feature.py", "patch": "+def test_case(): pass"}
@@ -144,13 +138,13 @@ async def test_needs_work_label_posts_comment_for_boundary_score(mock_gh, ctx):
         f"fixture score {score} is not between comment_threshold="
         f"{cfg.comment_threshold} and label_healthy_above="
         f"{cfg.label_healthy_above}; this test no longer covers the "
-        "boundary case from issue #47 — adjust the PR/files/reviews "
+        "boundary case — adjust the PR/files/reviews "
         "fixture above so the score lands back in that gap."
     )
 
     label = mock_gh.add_label.call_args[0][3]
     assert label == LABEL_NEEDS_WORK
-    mock_gh.post_comment.assert_awaited_once()
+    mock_gh.post_comment.assert_not_awaited()
 
 
 @pytest.mark.asyncio
