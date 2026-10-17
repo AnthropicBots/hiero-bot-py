@@ -37,7 +37,9 @@ class PRHealthWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db: AsyncSession = ctx["db"]
         pr_number = pr["number"]
-        author = pr["user"]["login"]
+        author = (pr.get("user") or {}).get("login") or ""
+        if not author:
+            return
 
         # Gather signals
         files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
