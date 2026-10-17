@@ -90,7 +90,12 @@ class IssueManagementWorkflow:
         if labels & {name.casefold() for name in cfg.exempt_labels}:
             return
 
-        updated = datetime.fromisoformat(issue["updated_at"])
+        updated_raw = issue["updated_at"]
+        if isinstance(updated_raw, str) and updated_raw.endswith("Z"):
+            updated_raw = updated_raw[:-1] + "+00:00"
+        updated = datetime.fromisoformat(updated_raw)
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=UTC)
         is_stale = cfg.stale_label.casefold() in labels
 
         days_inactive = (now - updated).days
