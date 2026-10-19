@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     port: int = 8000
     host: str = "0.0.0.0"
     log_level: str = "info"
+    log_format: str = "auto"
     environment: str = "development"
 
     # GitHub OAuth & Session Security

@@ -206,6 +206,7 @@ Add `.github/hiero-bot.yml` to any repo where the app is installed. Full referen
 | `DATABASE_URL` | ❌ | Default: `sqlite+aiosqlite:///./hiero_bot.db` |
 | `PORT` | ❌ | Default: `8000` |
 | `LOG_LEVEL` | ❌ | debug/info/warn/error |
+| `LOG_FORMAT` | ❌ | auto / json / text (default: auto; JSON in production, text in dev) |
 | `ENVIRONMENT` | ❌ | development / production |
 
 The dashboard and protected REST API endpoints use GitHub OAuth with signed, database-backed sessions. Configure `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `SESSION_SECRET_KEY`, and `TOKEN_ENCRYPTION_KEY` before exposing the application publicly.
