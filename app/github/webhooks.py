@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.billing.gating import is_premium
@@ -443,17 +444,21 @@ class WebhookRouter:
 
     async def _handle_installation(self, payload: dict, db: AsyncSession) -> dict:
         action = payload.get("action", "")
-        inst = payload.get("installation", {})
+        inst = payload.get("installation", {}) if isinstance(payload.get("installation"), dict) else {}
         inst_id = inst.get("id")
 
         if not inst_id:
             return {"ok": True, "skipped": "no installation id"}
 
         if action in ("created", "unsuspended"):
-            account_info = inst.get("account", {})
+            account_info = inst.get("account", {}) if isinstance(inst.get("account"), dict) else {}
             org_login = account_info.get("login", "")
             github_account_id = account_info.get("id")
             account_type = account_info.get("type", "Organization")
+
+            if not org_login or github_account_id is None:
+                log.warning("Installation %s missing account info, skipping", inst_id)
+                return {"ok": True, "skipped": "missing account info"}
 
             stmt = select(Account).where(Account.github_installation_id == inst_id)
             res = await db.execute(stmt)
@@ -464,32 +469,45 @@ class WebhookRouter:
                 acc.github_account_id = github_account_id
                 acc.account_type = account_type
                 acc.suspended_at = None
+                await db.flush()
             else:
-                acc = Account(
-                    github_installation_id=inst_id,
-                    github_account_id=github_account_id,
-                    org_login=org_login,
-                    account_type=account_type,
-                    plan_tier="free",
-                )
-                db.add(acc)
-
-            await db.commit()
-            await db.refresh(acc)
+                try:
+                    async with db.begin_nested():
+                        acc = Account(
+                            github_installation_id=inst_id,
+                            github_account_id=github_account_id,
+                            org_login=org_login,
+                            account_type=account_type,
+                            plan_tier="free",
+                        )
+                        db.add(acc)
+                        await db.flush()
+                except IntegrityError:
+                    res = await db.execute(stmt)
+                    acc = res.scalar_one_or_none()
+                    if acc is None:
+                        return {"ok": True, "skipped": "concurrent insert"}
+                    acc.org_login = org_login
+                    acc.github_account_id = github_account_id
+                    acc.account_type = account_type
+                    acc.suspended_at = None
+                    await db.flush()
 
             # Sync repos if provided
-            repos = payload.get("repositories", [])
+            repos = payload.get("repositories", []) or []
             for r in repos:
+                if not isinstance(r, dict):
+                    continue
                 repo_name = r.get("name")
                 if repo_name:
-                    repo_stmt = select(AccountRepo).where(
-                        AccountRepo.account_id == acc.id,
-                        AccountRepo.repo_name == repo_name,
-                    )
-                    repo_res = await db.execute(repo_stmt)
-                    if not repo_res.scalar_one_or_none():
-                        db.add(AccountRepo(account_id=acc.id, repo_name=repo_name))
+                    try:
+                        async with db.begin_nested():
+                            db.add(AccountRepo(account_id=acc.id, repo_name=repo_name))
+                            await db.flush()
+                    except IntegrityError:
+                        continue
             await db.commit()
+            await db.refresh(acc)
             log.info("Installation %s (%s) upserted with %d repos", inst_id, org_login, len(repos))
 
         elif action == "deleted" or action == "suspend":
@@ -519,17 +537,18 @@ class WebhookRouter:
             return {"ok": True, "skipped": "account not found"}
 
         if action == "added":
-            repos_added = payload.get("repositories_added", [])
+            repos_added = payload.get("repositories_added", []) or []
             for r in repos_added:
+                if not isinstance(r, dict):
+                    continue
                 repo_name = r.get("name")
                 if repo_name:
-                    repo_stmt = select(AccountRepo).where(
-                        AccountRepo.account_id == acc.id,
-                        AccountRepo.repo_name == repo_name,
-                    )
-                    repo_res = await db.execute(repo_stmt)
-                    if not repo_res.scalar_one_or_none():
-                        db.add(AccountRepo(account_id=acc.id, repo_name=repo_name))
+                    try:
+                        async with db.begin_nested():
+                            db.add(AccountRepo(account_id=acc.id, repo_name=repo_name))
+                            await db.flush()
+                    except IntegrityError:
+                        continue
             await db.commit()
             log.info("Added %d repos to installation %s", len(repos_added), inst_id)
 
