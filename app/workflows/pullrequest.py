@@ -612,7 +612,7 @@ def _score_candidates(histories: list, exclude: str) -> dict[str, int]:
                 seen_shas.add(sha)
 
             login = ((commit.get("author") or {}).get("login") or "").strip()
-            if not login or login == exclude:
+            if not login or login.lower() == (exclude or "").lower():
                 continue
             if login.lower().endswith("[bot]"):
                 continue
