@@ -6,6 +6,7 @@ import csv
 import difflib
 import hashlib
 import hmac
+from profiling.tracing import label
 import time  # #5
 from datetime import UTC, datetime
 from typing import Any
@@ -27,6 +28,10 @@ from app.workflows.prhealth import PRHealthWorkflow
 from app.workflows.progression import ProgressionWorkflow
 from app.workflows.pullrequest import PullRequestWorkflow
 from app.workflows.reviewerassignment import ReviewerAssignmentWorkflow
+
+from flask import request, jsonify
+from werkzeug.exceptions import NotFound
+from app.github.client import add_label, remove_label
 
 log = get_logger("github.webhooks")
 
@@ -327,6 +332,20 @@ class WebhookRouter:
         issue = payload.get("issue") or {}
         issue_number = issue.get("number")
         commenter = (payload.get("comment") or {}).get("user", {}).get("login")
+
+    async def _handle_label_command(label, *args):
+    # Join all arguments using ' '.join(args)
+        label = " ".join(args)
+    # Call the add_label function with the joined label
+        add_label(label)
+        return jsonify({"message": "Label added successfully"})
+
+    async def _handle_remove_label(label, *args):
+    # Join all arguments using ' '.join(args)
+        label = " ".join(args)
+    # Call the remove_label function with the joined label
+        remove_label(label)
+        return jsonify({"message": "Label removed successfully"})
 
         if not issue_number or not commenter:
             return

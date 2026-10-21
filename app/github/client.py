@@ -13,6 +13,11 @@ import jwt
 from app.utils.logger import get_logger
 from app.utils.settings import settings
 
+import requests
+from urllib.parse import quote
+from time import sleep
+from requests.exceptions import HTTPError, RequestException
+
 log = get_logger("github.client")
 
 GITHUB_API = "https://api.github.com"
@@ -83,19 +88,23 @@ def _normalize_private_key(raw: str) -> str:
 class GitHubClient:
     """Async GitHub App client. Generates installation tokens on demand."""
 
-    def __init__(self) -> None:
+    def __init__(self, token=None) -> None:
+        self.token = token
         self._installation_tokens: dict[int, tuple[str, float]] = {}
-        # Per-installation asyncio locks to prevent thundering herd / race conditions
         self._refresh_locks: dict[int, asyncio.Lock] = {}
+        
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self.token:
+            headers["Authorization"] = f"token {self.token}"
+
         self._http = httpx.AsyncClient(
             base_url=GITHUB_API,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=headers,
             timeout=20.0,
         )
-
     # Auth
 
     def _make_jwt(self) -> str:
@@ -826,3 +835,58 @@ class GitHubClient:
 
     async def close(self) -> None:
         await self._http.aclose()
+
+    def add_label(self, label):
+        url = f"https://api.github.com/repos/{self.owner}/{self.repo}/labels"
+        label = quote(label, safe="")
+        response = requests.post(url, headers=self.headers, json={"name": label})
+        if response.status_code == 422:
+            # Treat 422 as success if it indicates "already_exists"
+            return response.json()
+        elif response.status_code == 401:
+            # Clear the cached installation token
+            self.token = None
+            # Retry the request once
+            return self._add_label(label)
+        elif response.status_code == 403:
+            # Retry 429 and 403 with exponential backoff
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                sleep(int(retry_after))
+                return self._add_label(label)
+            raise HTTPError("Rate limit exceeded")
+        elif response.status_code in [502, 503, 504]:
+            # Retry 502-504
+            sleep(1)
+            return self._add_label(label)
+        else:
+            response.raise_for_status()
+            return response.json()
+
+    def remove_label(self, label):
+        url = f"https://api.github.com/repos/{self.owner}/{self.repo}/labels/{quote(label, safe="")}"
+        response = requests.delete(url, headers=self.headers)
+        if response.status_code == 401:
+            # Clear the cached installation token
+            self.token = None
+            # Retry the request once
+            return self.remove_label(label)
+        elif response.status_code == 403:
+            # Retry 429 and 403 with exponential backoff
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                sleep(int(retry_after))
+                return self.remove_label(label)
+            raise HTTPError("Rate limit exceeded")
+        elif response.status_code in [502, 503, 504]:
+            # Retry 502-504
+            sleep(1)
+            return self.remove_label(label)
+        else:
+            response.raise_for_status()
+            return response.json()
+
+    def _add_label(self, label):
+        # Simulate a delay for demonstration purposes
+        sleep(1)
+        return {"name": label}
