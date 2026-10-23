@@ -138,7 +138,7 @@ Base path: `/api/v1`
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/mohityadav8/hiero-bot-py
+git clone https://github.com/AnthropicBots/hiero-bot-py
 cd hiero-bot-py
 pip install -r requirements.txt
 
