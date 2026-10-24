@@ -19,7 +19,12 @@ from app.db.models import (
     StaleActionLog,
     User,
 )
-from app.utils.access import get_authorized_owners, verify_owner_access
+from app.utils.access import (
+    AuthorizedAccess,
+    get_authorized_access,
+    verify_owner_access,
+    verify_repo_access,
+)
 from app.utils.logger import get_logger
 
 log = get_logger("api.routes")
@@ -109,11 +114,14 @@ async def get_audit_log(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
+    allowed_owners = access.owners
+    allowed_repos = access.repos
     if owner:
         verify_owner_access(owner, user, allowed_owners)
+        verify_repo_access(owner, repo, allowed_owners, allowed_repos)
     elif not allowed_owners:
         return []
 
@@ -157,11 +165,14 @@ async def get_pr_health(
     max_score: float | None = Query(None),
     limit: int = Query(default=50, ge=1, le=200),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
+    allowed_owners = access.owners
+    allowed_repos = access.repos
     if owner:
         verify_owner_access(owner, user, allowed_owners)
+        verify_repo_access(owner, repo, allowed_owners, allowed_repos)
     elif not allowed_owners:
         return []
 
@@ -189,10 +200,11 @@ async def get_pr_health_stats(
     owner: str = Query(...),
     repo: str = Query(...),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
-    verify_owner_access(owner, user, allowed_owners)
+    verify_owner_access(owner, user, access.owners)
+    verify_repo_access(owner, repo, access.owners, access.repos)
     result = await db.execute(
         select(
             func.avg(PRHealthScore.score).label("avg_score"),
@@ -222,11 +234,14 @@ async def get_contributors(
     eligible_for: str | None = Query(None),
     limit: int = Query(default=50, ge=1, le=200),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
+    allowed_owners = access.owners
+    allowed_repos = access.repos
     if owner:
         verify_owner_access(owner, user, allowed_owners)
+        verify_repo_access(owner, repo, allowed_owners, allowed_repos)
     elif not allowed_owners:
         return []
 
@@ -254,10 +269,11 @@ async def get_repo_stats(
     owner: str = Query(...),
     repo: str = Query(...),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
-    verify_owner_access(owner, user, allowed_owners)
+    verify_owner_access(owner, user, access.owners)
+    verify_repo_access(owner, repo, access.owners, access.repos)
 
     async def count(model, **filters):
         q = select(func.count()).select_from(model)
@@ -294,11 +310,14 @@ async def get_stale_log(
     action: str | None = Query(None),
     limit: int = Query(default=100, ge=1, le=500),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
+    allowed_owners = access.owners
+    allowed_repos = access.repos
     if owner:
         verify_owner_access(owner, user, allowed_owners)
+        verify_repo_access(owner, repo, allowed_owners, allowed_repos)
     elif not allowed_owners:
         return []
 
