@@ -80,6 +80,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Swagger UI and ReDoc load assets from a CDN and use inline scripts and
+# styles without nonces, so they need a looser policy than the rest of the
+# app. These pages are disabled in production (see docs_url/redoc_url above).
+DOCS_PATHS = ("/docs", "/redoc")
+DOCS_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' "
+    "https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self' data: https://fastapi.tiangolo.com https://cdn.redoc.ly; "
+    "connect-src 'self'; "
+    "worker-src 'self' blob:; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
 # Security Headers Middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
@@ -102,6 +121,8 @@ async def add_security_headers(request: Request, call_next):
         "form-action 'self'; "
         "frame-ancestors 'none'"
     )
+    if request.url.path in DOCS_PATHS and not settings.is_production:
+        response.headers["Content-Security-Policy"] = DOCS_CSP
     if settings.is_production:
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
