@@ -33,3 +33,9 @@ def test_validate_pattern_rejects_bad_input():
         validate_pattern("a" * (MAX_PATTERN_LENGTH + 1))
 
     assert validate_pattern(r"^(feat|fix)/") == r"^(feat|fix)/"
+def test_validate_pattern_rejects_empty_patterns():
+    with pytest.raises(ValueError, match="pattern must not be empty"):
+        validate_pattern("")
+
+    with pytest.raises(ValueError, match="pattern must not be empty"):
+        validate_pattern("   ")
