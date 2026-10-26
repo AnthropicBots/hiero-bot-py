@@ -1,4 +1,3 @@
-
 # .github/hiero-bot.yml  ─────────────────────────────────────────
 # Hiero Maintainer Bot v2 — Repository Configuration
 # Add this file to any repo where the bot is installed.
@@ -14,7 +13,6 @@ teams:
   mentors: "mentors"
 
 workflows:
-
   # Onboarding
   onboarding:
     enabled: true
@@ -34,15 +32,15 @@ workflows:
     cla_signatures_file: ".github/cla-signatures.json"
     # cla_document_url: "https://example.org/cla"
 
-    minimum_account_age_days: 0        # 0 = no minimum
-    minimum_public_contributions: 0    # 0 = no minimum
+    minimum_account_age_days: 0 # 0 = no minimum
+    minimum_public_contributions: 0 # 0 = no minimum
 
     # Maximum number of open issues a contributor can have assigned
     # simultaneously in this repository.
     # Set to null to disable the limit.
     max_concurrent_assignments: 3
     auto_assign_mentor: false
-    mentor_assignment_strategy: round-robin  # round-robin | least-busy | expertise-match
+    mentor_assignment_strategy: round-robin # round-robin | least-busy | expertise-match
     welcome_message: |
       We're thrilled to have you! Please read **CONTRIBUTING.md** before getting started.
     onboarding_checklist:
@@ -53,7 +51,7 @@ workflows:
   # Pull Request
   pull_request:
     enabled: false
-    reviewer_recommendation: true  # Suggest reviewers based on file history
+    reviewer_recommendation: true # Suggest reviewers based on file history
 
     ai_review:
       enabled: false
@@ -66,10 +64,10 @@ workflows:
       #              or hosted on trusted remote infrastructure
       provider: auto
       model: "claude-sonnet-4-20250514"
-      max_comments: 5                 # 1–20
-      focus_areas: [security, logic]  # security | performance | style | logic | tests
-      max_retries: 2                  # transient failures only; 0–5
-      timeout_seconds: 60            # maximum time allowed per request
+      max_comments: 5 # 1–20
+      focus_areas: [security, logic] # security | performance | style | logic | tests
+      max_retries: 2 # transient failures only; 0–5
+      timeout_seconds: 60 # maximum time allowed per request
 
     quality_gates:
       require_tests: true
@@ -111,7 +109,7 @@ workflows:
     # Whether to post a comment mentioning the selected reviewers.
     # off     → only create the GitHub review request
     # mention → create the review request and mention reviewers in a comment
-    notify_comment: off
+    notify_comment: "off"
 
     # Create .github/reviewers.yml with:
     #
@@ -136,15 +134,15 @@ workflows:
       dco_signed: 0.20
       review_count: 0.15
       small_diff: 0.10
-    comment_threshold: 60    # Post comment only if score < this
-    label_healthy_above: 75  # Apply "healthy" label if score >= this
+    comment_threshold: 60 # Post comment only if score < this
+    label_healthy_above: 75 # Apply "healthy" label if score >= this
 
   # Developer Progression
   progression:
     enabled: true
     recommend_issues_after_merge: true
     recommendation_count: 3
-    celebrate_milestones: true  # Celebrate 1st, 5th, 10th, 25th, 50th PRs
+    celebrate_milestones: true # Celebrate 1st, 5th, 10th, 25th, 50th PRs
 
     requirements_for_junior_committer:
       min_merged_prs: 3
@@ -163,9 +161,9 @@ workflows:
 
   # Issue Management
   issue_management:
-    enabled: true              # off by default: this workflow closes issues and unassigns people
-    stale_issue_days: 60       # days without activity before an issue is marked stale
-    close_stale_after_days: 7  # grace period: days after an issue is marked stale (with no further activity) before it is closed
+    enabled: true # off by default: this workflow closes issues and unassigns people
+    stale_issue_days: 60 # days without activity before an issue is marked stale
+    close_stale_after_days: 7 # grace period: days after an issue is marked stale (with no further activity) before it is closed
     stale_label: "stale"
     exempt_labels:
       - pinned
