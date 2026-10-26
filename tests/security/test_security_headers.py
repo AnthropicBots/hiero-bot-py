@@ -176,3 +176,53 @@ async def test_chartjs_script_tag_has_integrity_and_is_not_the_dynamic_min_build
     assert "chart.umd.min.js" not in tag
     assert 'integrity="sha384-' in tag
     assert 'crossorigin="anonymous"' in tag
+
+
+DOCS_PATHS = ["/docs", "/redoc"]
+
+
+def parse_directives(csp: str) -> dict[str, str]:
+    return {d.strip().split(" ")[0]: d.strip() for d in csp.split(";") if d.strip()}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", DOCS_PATHS)
+async def test_docs_pages_get_the_relaxed_docs_csp(client, path):
+    r = await client.get(path)
+    directives = parse_directives(r.headers["content-security-policy"])
+    assert "'unsafe-inline'" in directives["script-src"]
+    assert "'unsafe-inline'" in directives["style-src"]
+    assert "https://cdn.jsdelivr.net" in directives["style-src"]
+    assert "https://fastapi.tiangolo.com" in directives["img-src"]
+    assert "https://cdn.redoc.ly" in directives["img-src"]
+    assert "blob:" in directives["worker-src"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", DOCS_PATHS)
+async def test_docs_csp_has_no_nonce_so_unsafe_inline_takes_effect(client, path):
+    r = await client.get(path)
+    assert "'nonce-" not in r.headers["content-security-policy"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", DOCS_PATHS)
+async def test_docs_csp_keeps_the_core_protections(client, path):
+    r = await client.get(path)
+    csp = r.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert "base-uri 'none'" in csp
+    assert "form-action 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/healthz", "/"])
+async def test_other_pages_keep_the_strict_csp(client, path):
+    r = await client.get(path)
+    csp = r.headers["content-security-policy"]
+    directives = parse_directives(csp)
+    assert "'unsafe-inline'" not in csp
+    assert "worker-src" not in csp
+    assert "'nonce-" in directives["script-src"]
