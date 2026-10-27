@@ -240,14 +240,6 @@ class RepoConfig(BaseModel):
     difficulty_labels: DifficultyLabels = Field(default_factory=DifficultyLabels)
     teams: TeamsConfig = Field(default_factory=TeamsConfig)
 
-    @model_validator(mode="after")
-    def validate_stale_order(self) -> RepoConfig:
-        im = self.workflows.issue_management
-        if im.close_stale_after_days >= im.stale_issue_days:
-            raise ValueError("close_stale_after_days must be less than stale_issue_days")
-        return self
-
-
 #  Unknown-key detection
 
 def _model_types(annotation: object) -> list[type[BaseModel]]:
