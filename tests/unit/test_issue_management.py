@@ -226,6 +226,7 @@ class _FakeGitHubIssue:
         self.clock = clock
         self.updated = clock["now"] - timedelta(days=idle_days)
         self.labels: list[str] = []
+        self.comments: list[dict] = []
         self.state = "open"
 
     def touch(self):
@@ -249,7 +250,15 @@ def _wire(mock_gh, issue: _FakeGitHubIssue):
         issue.touch()
 
     async def post_comment(owner, repo, number, body, inst):
+        issue.comments.append({
+            "body": body,
+            "created_at": issue.clock["now"].isoformat(),
+            "user": {"login": "hiero-bot"},
+        })
         issue.touch()
+
+    async def list_issue_comments(owner, repo, number, inst):
+        return list(issue.comments)
 
     async def close_issue(owner, repo, number, inst):
         issue.state = "closed"
@@ -257,6 +266,7 @@ def _wire(mock_gh, issue: _FakeGitHubIssue):
     mock_gh.list_issues = AsyncMock(side_effect=list_issues)
     mock_gh.add_label = AsyncMock(side_effect=add_label)
     mock_gh.post_comment = AsyncMock(side_effect=post_comment)
+    mock_gh.list_issue_comments = AsyncMock(side_effect=list_issue_comments)
     mock_gh.close_issue = AsyncMock(side_effect=close_issue)
 
 
@@ -300,7 +310,13 @@ async def test_human_activity_after_marking_delays_the_close(mock_gh, ctx):
 
     def human_comments_on_day_3(day):
         if day == 3:
-            issue.updated = start + timedelta(days=3)
+            activity_time = start + timedelta(days=3)
+            issue.updated = activity_time
+            issue.comments.append({
+                "body": "Here is a genuine update.",
+                "created_at": activity_time.isoformat(),
+                "user": {"login": "contributor"},
+            })
 
     marked, closed = await _run_daily(
         IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=120,
