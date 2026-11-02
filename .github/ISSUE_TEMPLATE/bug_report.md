@@ -7,14 +7,14 @@ assignees: ""
 ---
 
 ## Describe the bug
-A clear and concise description of the bug.
+Provide a clear and concise description of the bug.
 
 ## Steps to reproduce
-Steps to reproduce the behavior:
-1. Go to the relevant page or feature.
-2. Perform the required action.
-3. Observe the behavior.
-4. Note the error or unexpected result.
+Describe the steps needed to reproduce the issue:
+1. Navigate to the relevant page or feature.
+2. Perform the action that triggers the issue.
+3. Observe the unexpected behavior.
+4. Record any error messages.
 
 ## Expected behavior
 Describe what you expected to happen.
@@ -23,16 +23,16 @@ Describe what you expected to happen.
 Describe what actually happened.
 
 ## Screenshots
-If applicable, add screenshots to explain the problem.
+If applicable, attach screenshots to help explain the issue.
 
 ## Environment
-- OS:
+- Operating system:
 - Python version:
 - Browser (if applicable):
 - Project version or branch:
 
 ## Error messages
-If applicable, paste the complete error message or traceback.
+If applicable, provide the complete error message or traceback.
 
 ## Additional context
-Add any other context about the problem here.
+Include any other relevant information that may help investigate the issue.
