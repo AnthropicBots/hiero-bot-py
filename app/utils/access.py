@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from fastapi import Depends, HTTPException, status
-from sqlalchemy import and_, false, or_
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.auth.dependencies import get_current_user
 from app.auth.sync import get_user_authorized_accounts
 from app.db.database import get_db
-from app.db.models import User
+from app.db.models import Account, AccountRepo, AccountUser, User
 from app.utils.logger import get_logger
 
 log = get_logger("utils.access")
@@ -43,17 +43,42 @@ async def get_authorized_access(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> AuthorizedAccess:
-    accounts = await get_user_authorized_accounts(user, db)
-    owners = {acc["org_login"] for acc in accounts if acc.get("org_login")}
+    # Preserve the existing GitHub installation synchronization behavior.
+    # Its cached result is not used as the authorization source.
+    await get_user_authorized_accounts(user, db)
+
+    # Read currently authorized, non-suspended installations directly
+    # from the database so webhook changes take effect immediately.
+    accounts_stmt = (
+        select(Account)
+        .join(AccountUser, Account.id == AccountUser.account_id)
+        .where(
+            AccountUser.user_id == user.id,
+            AccountUser.authorized.is_(True),
+            Account.suspended_at.is_(None),
+        )
+    )
+    accounts_result = await db.execute(accounts_stmt)
+    accounts = accounts_result.scalars().all()
+
+    owners = {account.org_login for account in accounts if account.org_login}
     repos: dict[str, set[str]] = {}
-    for acc in accounts:
-        org = acc.get("org_login")
-        if not org:
-            continue
-        names = acc.get("repos") or []
-        if org not in repos:
-            repos[org] = set()
-        repos[org].update(names)
+
+    if accounts:
+        account_ids = [account.id for account in accounts]
+
+        repos_stmt = select(AccountRepo).where(
+            AccountRepo.account_id.in_(account_ids)
+        )
+        repos_result = await db.execute(repos_stmt)
+
+        accounts_by_id = {account.id: account for account in accounts}
+
+        for repo in repos_result.scalars().all():
+            account = accounts_by_id.get(repo.account_id)
+            if account and account.org_login:
+                repos.setdefault(account.org_login, set()).add(repo.repo_name)
+
     return AuthorizedAccess(owners, repos)
 
 
