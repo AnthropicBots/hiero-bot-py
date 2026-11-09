@@ -50,10 +50,17 @@ async def api_db():
                 ),
                 AuditLog(
                     action="issue.assigned",
+                    owner="hiero",
+                    repo="secret",
+                    reason="unauthorized repository",
+                    target_login="bob",
+                ),
+                AuditLog(
+                    action="issue.assigned",
                     owner="other",
                     repo="other-repo",
                     reason="second tenant",
-                    target_login="bob",
+                    target_login="charlie",
                 ),
                 PRHealthScore(
                     owner="hiero",
@@ -389,6 +396,29 @@ async def test_list_endpoints_exclude_unauthorized_repo_filter(
         "/api/v1/stale-log",
     ],
 )
+async def test_list_endpoints_reject_explicit_unauthorized_repo(
+    client,
+    endpoint,
+):
+    response = await client.get(
+        endpoint,
+        params={"owner": "hiero", "repo": "secret"},
+    )
+
+    assert response.status_code == 403
+    assert "Access denied" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/v1/audit",
+        "/api/v1/pr-health",
+        "/api/v1/contributors",
+        "/api/v1/stale-log",
+    ],
+)
 async def test_list_endpoints_return_empty_for_empty_repo_inventory(
     client,
     endpoint,
@@ -478,6 +508,47 @@ async def test_stats_endpoints_require_their_scope(client):
     assert (
         await client.get("/api/v1/repos/stats")
     ).status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/v1/pr-health/stats",
+        "/api/v1/repos/stats",
+    ],
+)
+async def test_stats_endpoints_enforce_repo_access(client, endpoint):
+    authorized_response = await client.get(
+        endpoint,
+        params={"owner": "hiero", "repo": "sdk-js"},
+    )
+
+    assert authorized_response.status_code == 200
+
+    unauthorized_response = await client.get(
+        endpoint,
+        params={"owner": "hiero", "repo": "secret"},
+    )
+
+    assert unauthorized_response.status_code == 403
+    assert "Access denied" in unauthorized_response.json()["detail"]
+
+    app.dependency_overrides[get_authorized_access] = lambda: AuthorizedAccess(
+        {"hiero"},
+        {"hiero": set()},
+    )
+
+    try:
+        empty_inventory_response = await client.get(
+            endpoint,
+            params={"owner": "hiero", "repo": "sdk-js"},
+        )
+
+        assert empty_inventory_response.status_code == 403
+        assert "Access denied" in empty_inventory_response.json()["detail"]
+    finally:
+        app.dependency_overrides.pop(get_authorized_access, None)
 
 
 # ── Responses leak nothing sensitive ──────────────────────────
