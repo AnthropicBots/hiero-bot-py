@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from fastapi import Depends, HTTPException, status
+from sqlalchemy import and_, false, or_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.auth.dependencies import get_current_user
 from app.auth.sync import get_user_authorized_accounts
@@ -18,6 +20,23 @@ class AuthorizedAccess:
     def __init__(self, owners: set[str], repos: dict[str, set[str]]) -> None:
         self.owners = owners
         self.repos = repos
+
+
+def authorized_repo_filter(model, access: AuthorizedAccess) -> ColumnElement[bool]:
+    """Build a SQL filter containing only explicitly authorized owner/repo pairs."""
+    conditions = [
+        and_(
+            model.owner == owner,
+            model.repo.in_(repos),
+        )
+        for owner, repos in access.repos.items()
+        if owner in access.owners and repos
+    ]
+
+    if not conditions:
+        return false()
+
+    return or_(*conditions)
 
 
 async def get_authorized_access(
@@ -60,19 +79,31 @@ def verify_repo_access(
     allowed_owners: set[str],
     allowed_repos: dict[str, set[str]],
 ) -> None:
-    if not repo:
-        return
     if owner not in allowed_owners:
+        log.warning(
+            "User attempted unauthorized access to organization '%s'",
+            owner,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied to organization '{owner}'",
+        )
+
+    # Repository-level verification is performed when a repo is supplied.
+    # Requests without a repo filter must be restricted by the authorized
+    # owner/repository pairs in the corresponding API query.
+    if repo is None:
         return
-    known = allowed_repos.get(owner)
-    if not known:
-        # Installations created before AccountRepo tracking have no repo rows.
-        # Allow org-level access in that legacy case so existing users are not
-        # locked out; once sync populates repos this becomes enforcing.
-        log.debug("No recorded repos for org '%s', allowing repo '%s' (legacy)", owner, repo)
-        return
-    if repo not in known:
-        log.warning("User attempted unauthorized access to repo '%s/%s'", owner, repo)
+
+    known_repos = allowed_repos.get(owner)
+
+    # An empty or missing inventory must never grant unrestricted access.
+    if not known_repos or repo not in known_repos:
+        log.warning(
+            "User attempted unauthorized access to repository '%s/%s'",
+            owner,
+            repo,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access denied to repository '{owner}/{repo}'",

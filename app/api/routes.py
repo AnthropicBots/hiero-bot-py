@@ -21,6 +21,7 @@ from app.db.models import (
 )
 from app.utils.access import (
     AuthorizedAccess,
+    authorized_repo_filter,
     get_authorized_access,
     verify_owner_access,
     verify_repo_access,
@@ -126,10 +127,10 @@ async def get_audit_log(
         return []
 
     q = select(AuditLog).order_by(desc(AuditLog.timestamp))
+    q = q.where(authorized_repo_filter(AuditLog, access))
+
     if owner:
         q = q.where(AuditLog.owner == owner)
-    else:
-        q = q.where(AuditLog.owner.in_(allowed_owners))
 
     if repo:
         q = q.where(AuditLog.repo == repo)
@@ -177,10 +178,10 @@ async def get_pr_health(
         return []
 
     q = select(PRHealthScore).order_by(desc(PRHealthScore.created_at))
+    q = q.where(authorized_repo_filter(PRHealthScore, access))
+
     if owner:
         q = q.where(PRHealthScore.owner == owner)
-    else:
-        q = q.where(PRHealthScore.owner.in_(allowed_owners))
 
     if repo:
         q = q.where(PRHealthScore.repo == repo)
@@ -246,10 +247,10 @@ async def get_contributors(
         return []
 
     q = select(ContributorSnapshot).order_by(desc(ContributorSnapshot.recorded_at))
+    q = q.where(authorized_repo_filter(ContributorSnapshot, access))
+
     if owner:
         q = q.where(ContributorSnapshot.owner == owner)
-    else:
-        q = q.where(ContributorSnapshot.owner.in_(allowed_owners))
 
     if repo:
         q = q.where(ContributorSnapshot.repo == repo)
@@ -322,10 +323,10 @@ async def get_stale_log(
         return []
 
     q = select(StaleActionLog).order_by(desc(StaleActionLog.occurred_at))
+    q = q.where(authorized_repo_filter(StaleActionLog, access))
+
     if owner:
         q = q.where(StaleActionLog.owner == owner)
-    else:
-        q = q.where(StaleActionLog.owner.in_(allowed_owners))
 
     if repo:
         q = q.where(StaleActionLog.repo == repo)
