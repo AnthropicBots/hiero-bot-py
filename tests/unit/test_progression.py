@@ -208,6 +208,65 @@ def test_check_eligibility_maintainer():
     ) == "maintainer"
 
 
+
+def test_check_eligibility_uses_custom_role_requirements():
+    from app.config.schema import ProgressionConfig, RoleRequirements
+
+    cfg = ProgressionConfig(
+        requirements_for_junior_committer=RoleRequirements(
+            min_merged_prs=2,
+            min_reviews_given=1,
+            min_months_active=1,
+        ),
+        requirements_for_committer=RoleRequirements(
+            min_merged_prs=4,
+            min_reviews_given=2,
+            min_months_active=2,
+        ),
+        requirements_for_maintainer=RoleRequirements(
+            min_merged_prs=6,
+            min_reviews_given=3,
+            min_months_active=3,
+        ),
+    )
+
+    assert ProgressionWorkflow._check_eligibility(
+        {"merged_prs": 2, "reviews_given": 1, "months_active": 1},
+        cfg,
+    ) == "junior-committer"
+
+    assert ProgressionWorkflow._check_eligibility(
+        {"merged_prs": 4, "reviews_given": 2, "months_active": 2},
+        cfg,
+    ) == "committer"
+
+    assert ProgressionWorkflow._check_eligibility(
+        {"merged_prs": 6, "reviews_given": 3, "months_active": 3},
+        cfg,
+    ) == "maintainer"
+
+
+def test_build_full_report_uses_custom_role_requirements():
+    from app.config.schema import ProgressionConfig, RoleRequirements
+
+    cfg = ProgressionConfig(
+        requirements_for_junior_committer=RoleRequirements(
+            min_merged_prs=2,
+            min_reviews_given=1,
+            min_months_active=1,
+        ),
+    )
+
+    report = ProgressionWorkflow._build_full_report(
+        "alice",
+        {"merged_prs": 2, "reviews_given": 1, "months_active": 1},
+        cfg,
+    )
+
+    assert "| **junior-committer** | ✅ Eligible | Meets all requirements! |" in report
+    assert "| **committer** | ⏳ Not yet |" in report
+    assert "| **maintainer** | ⏳ Not yet |" in report
+
 # ── Stats collection (#41) ────────────────────────────────────
 
 

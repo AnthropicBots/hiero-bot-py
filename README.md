@@ -1,3 +1,4 @@
+
 <div align="center">
   <img src="./.github/assets/mark2_orbit_ring.jpg" width="120" height="120" alt="hydra-maintainer logo" />
 
@@ -7,9 +8,9 @@
 
   PR health scoring · reviewer recommendation · contributor progression tracking · optional AI-assisted review · persistent audit trail · REST API
 
-  [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://python.org)
+  [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-  [![Tests](https://img.shields.io/badge/tests-139%20passing-brightgreen)](tests/)
+  [![CI](https://github.com/AnthropicBots/hiero-bot-py/actions/workflows/ci.yml/badge.svg)](https://github.com/AnthropicBots/hiero-bot-py/actions/workflows/ci.yml)
   [![FastAPI](https://img.shields.io/badge/framework-FastAPI-009688)](https://fastapi.tiangolo.com/)
   [![GitHub Marketplace](https://img.shields.io/badge/GitHub-Marketplace-24292e?logo=github)](https://github.com/marketplace/hydra-maintainer)
 
@@ -50,7 +51,7 @@ Nobody has a self-hosted, open-source system that treats maintainer-ops as a who
 | **Persistent audit trail** | Every bot action (label, comment, assign, close) is written to Postgres/SQLite with a reason — nothing is silent, everything is queryable later |
 | **Security** | HMAC-SHA256 webhook signature verification with constant-time comparison; the bot is completely silent in any repo without an explicit config file |
 
-Ships with **139 unit + integration tests** (`pytest-asyncio`, `httpx`, `respx`, in-memory SQLite) covering every workflow module and the full REST API surface.
+Includes unit and integration tests (`pytest-asyncio`, `httpx`, `respx`, in-memory SQLite) covering the project's workflows and REST API.
 
 ## Seen in the wild
 
@@ -137,7 +138,7 @@ Base path: `/api/v1`
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/mohityadav8/hiero-bot-py
+git clone https://github.com/AnthropicBots/hiero-bot-py
 cd hiero-bot-py
 pip install -r requirements.txt
 
@@ -162,7 +163,7 @@ docker run -p 8000:8000 --env-file .env hydra-maintainer
 ### Tests
 
 ```bash
-python -m pytest tests/unit/ tests/integration/ -q          # 139 tests
+python -m pytest tests/unit/ tests/integration/ -q          # run unit and integration tests
 python -m pytest tests/ --cov=app --cov-report=term-missing  # with coverage
 ```
 

@@ -11,7 +11,6 @@ from app.utils.safe_regex import validate_pattern
 
 log = get_logger("config.schema")
 
-RoleLevel = Literal["contributor", "junior-committer", "committer", "maintainer"]
 FocusArea = Literal["security", "performance", "style", "logic", "tests"]
 AIProvider = Literal["auto", "anthropic", "openai", "ollama"]
 MentorStrategy = Literal["round-robin", "least-busy", "expertise-match"]
@@ -26,7 +25,6 @@ class RoleRequirements(BaseModel):
     min_merged_prs: int = Field(ge=0)
     min_reviews_given: int = Field(ge=0)
     min_months_active: int = Field(ge=0)
-    require_endorsement_from: RoleLevel
 
 
 #  Onboarding 
@@ -85,7 +83,6 @@ class QualityGatesConfig(BaseModel):
     require_tests: bool = True
     require_dco: bool = True
     require_gpg_signature: bool = False
-    min_reviewers: int = Field(default=1, ge=0)
     max_files_changed: int | None = Field(default=None, gt=0)
     require_changelog_entry: bool = False
     require_linked_issue: bool = False
@@ -104,8 +101,6 @@ class PullRequestConfig(BaseModel):
     ai_review: AIReviewConfig = Field(default_factory=AIReviewConfig)
     quality_gates: QualityGatesConfig = Field(default_factory=QualityGatesConfig)
     auto_label: bool = True
-    stale_pr_days: int = Field(default=30, gt=0)
-    auto_close_stale: bool = False
     reviewer_recommendation: bool = True  # NEW
 
 
@@ -118,19 +113,16 @@ class ProgressionConfig(BaseModel):
     requirements_for_junior_committer: RoleRequirements = Field(
         default_factory=lambda: RoleRequirements(
             min_merged_prs=3, min_reviews_given=2, min_months_active=1,
-            require_endorsement_from="committer"
         )
     )
     requirements_for_committer: RoleRequirements = Field(
         default_factory=lambda: RoleRequirements(
             min_merged_prs=15, min_reviews_given=10, min_months_active=6,
-            require_endorsement_from="maintainer"
         )
     )
     requirements_for_maintainer: RoleRequirements = Field(
         default_factory=lambda: RoleRequirements(
             min_merged_prs=50, min_reviews_given=30, min_months_active=12,
-            require_endorsement_from="maintainer"
         )
     )
     celebrate_milestones: bool = True
@@ -141,7 +133,6 @@ class ProgressionConfig(BaseModel):
 class LabelEscalationRule(BaseModel):
     label: str
     notify_team: str
-    after_hours: int = Field(gt=0)
 
 
 class IssueManagementConfig(BaseModel):
@@ -154,7 +145,6 @@ class IssueManagementConfig(BaseModel):
     exempt_labels: list[str] = ["pinned", "security", "in-progress"]
     auto_unassign_inactive_days: int = Field(default=14, gt=0)
     label_escalation_rules: list[LabelEscalationRule] = []
-    create_good_first_issues: bool = False
 
 
 #  PR Health 
@@ -224,16 +214,11 @@ class ReviewerAssignmentConfig(BaseModel):
 # Teams & Labels 
 
 class TeamsConfig(BaseModel):
-    maintainers: str = "maintainers"
-    committers: str = "committers"
-    junior_committers: str = "junior-committers"
     mentors: str = "mentors"
 
 
 class DifficultyLabels(BaseModel):
-    good_first_issue: str = "good first issue"
     intermediate: str = "intermediate"
-    advanced: str = "advanced"
 
 
 #  Root 

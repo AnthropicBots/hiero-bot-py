@@ -228,7 +228,37 @@ async def test_broken_base64_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_invalid_config_is_not_cached():
+async def test_invalid_config_is_cached_and_logged_once(monkeypatch):
+    log = Mock()
+    monkeypatch.setattr(loader_module, "log", log)
+    loader, client = make_loader(encode("- list\n"))
+
+    for _ in range(2):
+        with pytest.raises(ConfigInvalid):
+            await loader.load("hiero", "sdk-js", 42)
+
+    assert client.get_file_content.await_count == 1
+    assert log.error.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_config_cache_is_cleared_by_invalidate():
+    loader, client = make_loader(encode("- list\n"))
+
+    with pytest.raises(ConfigInvalid):
+        await loader.load("hiero", "sdk-js", 42)
+
+    loader.invalidate("hiero", "sdk-js")
+
+    with pytest.raises(ConfigInvalid):
+        await loader.load("hiero", "sdk-js", 42)
+
+    assert client.get_file_content.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_config_cache_expires(monkeypatch):
+    monkeypatch.setattr(loader_module, "_NEGATIVE_CACHE_TTL", 0)
     loader, client = make_loader(encode("- list\n"))
 
     for _ in range(2):
@@ -624,6 +654,51 @@ async def test_concurrent_invalid_configs_share_one_request_and_retry():
 
     with pytest.raises(ConfigInvalid):
         await loader.load("hiero", "sdk-js", 42)
+    assert client.get_file_content.await_count == 1
+
+    loader.invalidate("hiero", "sdk-js")
+    with pytest.raises(ConfigInvalid):
+        await loader.load("hiero", "sdk-js", 42)
+    assert client.get_file_content.await_count == 2
+
+
+
+@pytest.mark.asyncio
+async def test_invalidate_during_invalid_fetch_does_not_cache_stale_failure():
+    releases = [asyncio.Event(), asyncio.Event()]
+    started = [asyncio.Event(), asyncio.Event()]
+    calls = {"n": 0}
+
+    async def fetch(*args):
+        index = calls["n"]
+        calls["n"] += 1
+        started[index].set()
+        await releases[index].wait()
+        return encode(INVALID_YAML if index == 0 else FRESH_YAML)
+
+    client = Mock()
+    client.get_file_content = AsyncMock(side_effect=fetch)
+    loader = ConfigLoader(client)
+
+    stale = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started[0].wait()
+    loader.invalidate("hiero", "sdk-js")
+
+    fresh_task = asyncio.create_task(loader.load("hiero", "sdk-js", 42))
+    await started[1].wait()
+    releases[1].set()
+    fresh = await fresh_task
+
+    assert fresh is not None and fresh.repo == "hiero/sdk-python"
+    assert loader._cache["hiero/sdk-js"].config is not None
+    assert loader._cache["hiero/sdk-js"].config.repo == "hiero/sdk-python"
+
+    releases[0].set()
+    with pytest.raises(ConfigInvalid):
+        await stale
+
+    cached = await loader.load("hiero", "sdk-js", 42)
+    assert cached is not None and cached.repo == "hiero/sdk-python"
     assert client.get_file_content.await_count == 2
 
 

@@ -38,11 +38,22 @@ def build_backend(provider: str = "auto") -> ReviewBackend:
     provider = (provider or "auto").lower()
 
     if provider == "auto":
-        for name in AUTO_ORDER:
-            backend_cls = BACKENDS[name]
-            if backend_cls.available():
-                log.debug("AI review auto-selected the %s backend", name)
-                return backend_cls()
+        available = [
+            name for name in AUTO_ORDER if BACKENDS[name].available()
+        ]
+
+        if len(available) > 1:
+            log.warning(
+                "Multiple AI review backends are available: %s. "
+                "Auto-selection will use registry priority: %s",
+                ", ".join(available),
+                available[0],
+            )
+
+        if available:
+            name = available[0]
+            log.info("AI review auto-selected the %s backend", name)
+            return BACKENDS[name]()
 
         raise BackendUnavailable(
             "AI review is enabled but no backend is configured. Set one of "
