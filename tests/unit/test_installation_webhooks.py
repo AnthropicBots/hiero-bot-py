@@ -8,9 +8,10 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from app.config.loader import ConfigInvalid
+from app.auth.sync import get_user_authorized_accounts
+from app.config.loader import ConfigInvalid, ConfigLoader
 from app.db.database import Base
-from app.db.models import Account, AccountRepo
+from app.db.models import Account, AccountRepo, AccountUser, User
 from app.github.webhooks import WebhookRouter
 from app.utils.access import get_authorized_access
 
@@ -267,7 +268,7 @@ async def test_repository_removal_webhook_revokes_dashboard_access_with_stale_ca
     cached = await get_user_authorized_accounts(user, db)
     assert cached[0]["repos"] == ["private-repo"]
 
-    result = await router._handle_installation_repositories(
+    await router._handle_installation_repositories(
         {
             "action": "removed",
             "installation": {"id": 9901},
@@ -275,6 +276,66 @@ async def test_repository_removal_webhook_revokes_dashboard_access_with_stale_ca
         },
         db,
     )
+
+
+@pytest.mark.asyncio
+async def test_installation_deletion_webhook_revokes_dashboard_access_with_stale_cache(
+    db,
+):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    user = User(github_user_id=9902, github_login="deletion-test-user")
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    account = Account(
+        github_installation_id=9902,
+        org_login="deleted-org",
+        plan_tier="free",
+    )
+    db.add(account)
+    await db.commit()
+    await db.refresh(account)
+
+    db.add(
+        AccountUser(
+            account_id=account.id,
+            user_id=user.id,
+            authorized=True,
+        )
+    )
+    db.add(
+        AccountRepo(
+            account_id=account.id,
+            repo_name="private-repo",
+        )
+    )
+    await db.commit()
+
+    # Populate the authorization cache before installation deletion.
+    cached = await get_user_authorized_accounts(user, db)
+    assert cached[0]["repos"] == ["private-repo"]
+
+    result = await router._handle_installation(
+        {
+            "action": "deleted",
+            "installation": {"id": 9902},
+        },
+        db,
+    )
+
+    assert result == {"ok": True, "action": "deleted"}
+
+    # The existing cache must still contain the old installation.
+    cached = await get_user_authorized_accounts(user, db)
+    assert cached[0]["repos"] == ["private-repo"]
+
+    # Dashboard authorization must reject the deleted installation.
+    access = await get_authorized_access(user, db)
+
+    assert access.owners == set()
+    assert access.repos == {}
 
 
 @pytest.mark.asyncio
