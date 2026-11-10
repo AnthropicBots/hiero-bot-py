@@ -35,7 +35,6 @@ async def release_delivery(db: AsyncSession, delivery_id: str) -> None:
     if not delivery_id:
         return
 
-    await db.rollback()
     await db.execute(
         delete(WebhookDelivery).where(WebhookDelivery.id == delivery_id)
     )

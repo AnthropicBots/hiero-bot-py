@@ -474,6 +474,68 @@ class WebhookRouter:
 
         return db.begin()
 
+    async def _upsert_installation_account(
+        self,
+        db: AsyncSession,
+        installation_id: int,
+        account_info: dict,
+        error_detail: str,
+    ) -> Account:
+        github_account_id = account_info.get("id")
+        org_login = account_info.get("login")
+        account_type = account_info.get("type", "Organization")
+
+        if (
+            isinstance(github_account_id, bool)
+            or not isinstance(github_account_id, int)
+            or github_account_id <= 0
+            or not isinstance(org_login, str)
+            or not org_login.strip()
+            or not isinstance(account_type, str)
+            or not account_type.strip()
+        ):
+            raise HTTPException(status_code=400, detail=error_detail)
+
+        org_login = org_login.strip()
+        account_type = account_type.strip()
+        dialect = db.get_bind().dialect.name
+
+        account_stmt = (
+            self._installation_insert(Account, dialect)
+            .values(
+                github_installation_id=installation_id,
+                github_account_id=github_account_id,
+                org_login=org_login,
+                account_type=account_type,
+                plan_tier="free",
+                suspended_at=None,
+            )
+            .on_conflict_do_update(
+                index_elements=[Account.github_installation_id],
+                set_={
+                    "github_account_id": github_account_id,
+                    "org_login": org_login,
+                    "account_type": account_type,
+                    "suspended_at": None,
+                },
+            )
+        )
+
+        await db.execute(account_stmt)
+
+        account = await db.scalar(
+            select(Account)
+            .where(Account.github_installation_id == installation_id)
+            .execution_options(populate_existing=True)
+        )
+
+        if account is None:
+            raise RuntimeError(
+                f"Installation account {installation_id} was not available after upsert"
+            )
+
+        return account
+
     async def _handle_installation(self, payload: dict, db: AsyncSession) -> dict:
         action = payload.get("action", "")
         inst = payload.get("installation")
@@ -505,28 +567,6 @@ class WebhookRouter:
                 raise HTTPException(
                     status_code=400,
                     detail="Invalid installation payload: account information is missing",
-                )
-
-            org_login = account_info.get("login")
-            github_account_id = account_info.get("id")
-            account_type = account_info.get("type", "Organization")
-
-            if (
-                not isinstance(org_login, str)
-                or not org_login.strip()
-                or isinstance(github_account_id, bool)
-                or not isinstance(github_account_id, int)
-                or github_account_id <= 0
-                or not isinstance(account_type, str)
-                or not account_type.strip()
-            ):
-                log.warning(
-                    "Installation %s has invalid account information",
-                    inst_id,
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid installation payload: account information is invalid",
                 )
 
             repos = payload.get("repositories", [])
@@ -564,48 +604,18 @@ class WebhookRouter:
 
                 repo_names.add(normalized_name)
 
-            dialect = db.get_bind().dialect.name
-
-            account_values = {
-                "github_installation_id": inst_id,
-                "github_account_id": github_account_id,
-                "org_login": org_login.strip(),
-                "account_type": account_type.strip(),
-                "plan_tier": "free",
-                "suspended_at": None,
-            }
-
-            account_update = {
-                "github_account_id": github_account_id,
-                "org_login": org_login.strip(),
-                "account_type": account_type.strip(),
-                "suspended_at": None,
-            }
-
-            account_stmt = (
-                self._installation_insert(Account, dialect)
-                .values(**account_values)
-                .on_conflict_do_update(
-                    index_elements=[Account.github_installation_id],
-                    set_=account_update,
-                )
-            )
-
             async with self._installation_transaction(db):
-                await db.execute(account_stmt)
-
-                acc = await db.scalar(
-                    select(Account)
-                    .where(Account.github_installation_id == inst_id)
-                    .execution_options(populate_existing=True)
+                acc = await self._upsert_installation_account(
+                    db,
+                    inst_id,
+                    account_info,
+                    "Invalid installation payload: account information is invalid",
                 )
-
-                if acc is None:
-                    raise RuntimeError(
-                        f"Installation account {inst_id} was not available after upsert"
-                    )
+                org_login = acc.org_login
 
                 if repo_names:
+                    dialect = db.get_bind().dialect.name
+
                     repo_values = [
                         {
                             "account_id": acc.id,
@@ -736,68 +746,17 @@ class WebhookRouter:
                         detail="Installation account not found; retry delivery",
                     )
 
-                github_account_id = account_info.get("id")
-                org_login = account_info.get("login")
-                account_type = account_info.get("type", "Organization")
-
-                if (
-                    isinstance(github_account_id, bool)
-                    or not isinstance(github_account_id, int)
-                    or github_account_id <= 0
-                    or not isinstance(org_login, str)
-                    or not org_login.strip()
-                    or not isinstance(account_type, str)
-                    or not account_type.strip()
-                ):
-                    log.warning(
-                        "Installation %s has invalid account information in repository event",
-                        inst_id,
-                    )
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Invalid repository event: installation account information is invalid",
-                    )
-
-                dialect = db.get_bind().dialect.name
-
-                account_stmt = (
-                    self._installation_insert(Account, dialect)
-                    .values(
-                        github_installation_id=inst_id,
-                        github_account_id=github_account_id,
-                        org_login=org_login.strip(),
-                        account_type=account_type.strip(),
-                        plan_tier="free",
-                        suspended_at=None,
-                    )
-                    .on_conflict_do_update(
-                        index_elements=[Account.github_installation_id],
-                        set_={
-                            "github_account_id": github_account_id,
-                            "org_login": org_login.strip(),
-                            "account_type": account_type.strip(),
-                            "suspended_at": None,
-                        },
-                    )
+                acc = await self._upsert_installation_account(
+                    db,
+                    inst_id,
+                    account_info,
+                    "Invalid repository event: installation account information is invalid",
                 )
-
-                await db.execute(account_stmt)
-
-                acc = await db.scalar(
-                    select(Account)
-                    .where(Account.github_installation_id == inst_id)
-                    .execution_options(populate_existing=True)
-                )
-
-                if acc is None:
-                    raise RuntimeError(
-                        f"Installation account {inst_id} was not available after upsert"
-                    )
 
                 log.info(
                     "Recovered missing installation account %s (%s) from repository event",
                     inst_id,
-                    org_login,
+                    acc.org_login,
                 )
 
             if action == "added" and repo_names:

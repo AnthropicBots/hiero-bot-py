@@ -5,12 +5,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
 from app.db.database import Base
 from app.db.models import WebhookDelivery
-from app.github.replay_guard import is_replay
+from app.github.replay_guard import is_replay, release_delivery
 from app.github.webhooks import WebhookRouter
 from app.utils.settings import settings
 
@@ -212,6 +213,33 @@ async def test_installation_repositories_delivery_can_be_retried_after_409(db):
 
     assert retry_exc.value.status_code == 409
     assert retry_exc.value.detail == "Installation account not found; retry delivery"
+
+
+@pytest.mark.asyncio
+async def test_releasing_delivery_does_not_rollback_pending_session_changes(db):
+    from app.db.models import Account
+
+    delivery_id = "delivery-release-preserves-session"
+
+    assert await is_replay(db, delivery_id) is False
+
+    account = Account(
+        github_installation_id=777777,
+        org_login="pending-account",
+        plan_tier="free",
+    )
+    db.add(account)
+
+    await release_delivery(db, delivery_id)
+
+    persisted_account = await db.scalar(
+        select(Account).where(
+            Account.github_installation_id == 777777
+        )
+    )
+
+    assert persisted_account is not None
+    assert await db.get(WebhookDelivery, delivery_id) is None
 
 
 @pytest.mark.asyncio

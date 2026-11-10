@@ -136,3 +136,88 @@ async def test_concurrent_installation_creation_is_idempotent(tmp_path):
 
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_repository_events_recover_missing_account(tmp_path):
+    database_path = tmp_path / "repository-recovery-race.db"
+    database_url = f"sqlite+aiosqlite:///{database_path}"
+
+    engine = create_async_engine(
+        database_url,
+        connect_args={"timeout": 30},
+    )
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+
+        router = WebhookRouter(MagicMock(), MagicMock())
+
+        async def process_delivery(action, repositories):
+            payload = {
+                "action": action,
+                "installation": {
+                    "id": 90002,
+                    "account": {
+                        "id": 80002,
+                        "login": "recovery-org",
+                        "type": "Organization",
+                    },
+                },
+                "repositories_added": repositories,
+                "repositories_removed": [],
+            }
+
+            async with session_factory() as session:
+                return await router._handle_installation_repositories(
+                    payload,
+                    session,
+                )
+
+        results = await asyncio.gather(
+            process_delivery("added", [{"name": "repo-one"}]),
+            process_delivery("added", [{"name": "repo-two"}]),
+        )
+
+        assert results == [
+            {"ok": True, "action": "added"},
+            {"ok": True, "action": "added"},
+        ]
+
+        async with session_factory() as session:
+            account_count = await session.scalar(
+                select(func.count())
+                .select_from(Account)
+                .where(Account.github_installation_id == 90002)
+            )
+
+            assert account_count == 1
+
+            account = await session.scalar(
+                select(Account).where(
+                    Account.github_installation_id == 90002
+                )
+            )
+            assert account is not None
+
+            repo_names = set(
+                (
+                    await session.scalars(
+                        select(AccountRepo.repo_name).where(
+                            AccountRepo.account_id == account.id
+                        )
+                    )
+                ).all()
+            )
+
+            assert repo_names == {"repo-one", "repo-two"}
+
+    finally:
+        await engine.dispose()
