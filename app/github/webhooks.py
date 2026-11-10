@@ -724,13 +724,80 @@ class WebhookRouter:
             )
 
             if acc is None:
-                log.warning(
-                    "Installation %s not found for repository event",
-                    inst_id,
+                account_info = installation.get("account")
+
+                if not isinstance(account_info, dict):
+                    log.warning(
+                        "Installation %s not found and repository event has no account information",
+                        inst_id,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Installation account not found; retry delivery",
+                    )
+
+                github_account_id = account_info.get("id")
+                org_login = account_info.get("login")
+                account_type = account_info.get("type", "Organization")
+
+                if (
+                    isinstance(github_account_id, bool)
+                    or not isinstance(github_account_id, int)
+                    or github_account_id <= 0
+                    or not isinstance(org_login, str)
+                    or not org_login.strip()
+                    or not isinstance(account_type, str)
+                    or not account_type.strip()
+                ):
+                    log.warning(
+                        "Installation %s has invalid account information in repository event",
+                        inst_id,
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid repository event: installation account information is invalid",
+                    )
+
+                dialect = db.get_bind().dialect.name
+
+                account_stmt = (
+                    self._installation_insert(Account, dialect)
+                    .values(
+                        github_installation_id=inst_id,
+                        github_account_id=github_account_id,
+                        org_login=org_login.strip(),
+                        account_type=account_type.strip(),
+                        plan_tier="free",
+                        suspended_at=None,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[Account.github_installation_id],
+                        set_={
+                            "github_account_id": github_account_id,
+                            "org_login": org_login.strip(),
+                            "account_type": account_type.strip(),
+                            "suspended_at": None,
+                        },
+                    )
                 )
-                raise HTTPException(
-                    status_code=409,
-                    detail="Installation account not found; retry delivery",
+
+                await db.execute(account_stmt)
+
+                acc = await db.scalar(
+                    select(Account)
+                    .where(Account.github_installation_id == inst_id)
+                    .execution_options(populate_existing=True)
+                )
+
+                if acc is None:
+                    raise RuntimeError(
+                        f"Installation account {inst_id} was not available after upsert"
+                    )
+
+                log.info(
+                    "Recovered missing installation account %s (%s) from repository event",
+                    inst_id,
+                    org_login,
                 )
 
             if action == "added" and repo_names:

@@ -88,6 +88,86 @@ async def test_handle_installation_repositories_added_and_removed(db):
 
 
 @pytest.mark.asyncio
+async def test_repository_addition_recovers_missing_installation_account(db):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    payload = {
+        "action": "added",
+        "installation": {
+            "id": 39997,
+            "account": {
+                "id": 38887,
+                "login": "added-org",
+                "type": "Organization",
+            },
+        },
+        "repositories_added": [{"name": "added-repo"}],
+    }
+
+    result = await router._handle_installation_repositories(payload, db)
+
+    assert result == {"ok": True, "action": "added"}
+
+    account = await db.scalar(
+        select(Account).where(
+            Account.github_installation_id == 39997
+        )
+    )
+
+    assert account is not None
+    assert account.org_login == "added-org"
+
+    repo = await db.scalar(
+        select(AccountRepo).where(
+            AccountRepo.account_id == account.id,
+            AccountRepo.repo_name == "added-repo",
+        )
+    )
+
+    assert repo is not None
+
+
+@pytest.mark.asyncio
+async def test_repository_removal_recovers_missing_installation_account(db):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    payload = {
+        "action": "removed",
+        "installation": {
+            "id": 39998,
+            "account": {
+                "id": 38888,
+                "login": "removed-org",
+                "type": "Organization",
+            },
+        },
+        "repositories_removed": [{"name": "removed-repo"}],
+    }
+
+    result = await router._handle_installation_repositories(payload, db)
+
+    assert result == {"ok": True, "action": "removed"}
+
+    account = await db.scalar(
+        select(Account).where(
+            Account.github_installation_id == 39998
+        )
+    )
+
+    assert account is not None
+    assert account.org_login == "removed-org"
+
+    repo = await db.scalar(
+        select(AccountRepo).where(
+            AccountRepo.account_id == account.id,
+            AccountRepo.repo_name == "removed-repo",
+        )
+    )
+
+    assert repo is None
+
+
+@pytest.mark.asyncio
 async def test_config_change_invalidates_cache_before_loading(db):
     gh = MagicMock()
     config_loader = MagicMock()
@@ -253,22 +333,26 @@ async def test_repository_removal_webhook_revokes_dashboard_access_with_stale_ca
     await db.commit()
     await db.refresh(account)
 
-    db.add(AccountUser(
-        account_id=account.id,
-        user_id=user.id,
-        authorized=True,
-    ))
-    db.add(AccountRepo(
-        account_id=account.id,
-        repo_name="private-repo",
-    ))
+    db.add(
+        AccountUser(
+            account_id=account.id,
+            user_id=user.id,
+            authorized=True,
+        )
+    )
+    db.add(
+        AccountRepo(
+            account_id=account.id,
+            repo_name="private-repo",
+        )
+    )
     await db.commit()
 
     # Populate the authorization cache before the webhook arrives.
     cached = await get_user_authorized_accounts(user, db)
     assert cached[0]["repos"] == ["private-repo"]
 
-    await router._handle_installation_repositories(
+    result = await router._handle_installation_repositories(
         {
             "action": "removed",
             "installation": {"id": 9901},
@@ -276,6 +360,18 @@ async def test_repository_removal_webhook_revokes_dashboard_access_with_stale_ca
         },
         db,
     )
+
+    assert result == {"ok": True, "action": "removed"}
+
+    # The existing cache must still contain the old repository.
+    cached = await get_user_authorized_accounts(user, db)
+    assert cached[0]["repos"] == ["private-repo"]
+
+    # Dashboard authorization must reflect the database update.
+    access = await get_authorized_access(user, db)
+
+    assert access.owners == {"webhook-org"}
+    assert access.repos == {}
 
 
 @pytest.mark.asyncio
