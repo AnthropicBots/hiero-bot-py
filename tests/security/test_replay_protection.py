@@ -108,13 +108,14 @@ def request_with(
     delivery_id: str,
     signature: str,
     body: bytes = BODY,
+    event: str = "ping",
 ):
     scope = {
         "type": "http",
         "headers": [
             (b"x-github-delivery", delivery_id.encode()),
             (b"x-hub-signature-256", signature.encode()),
-            (b"x-github-event", b"ping"),
+            (b"x-github-event", event.encode()),
             (b"content-type", b"application/json"),
         ],
     }
@@ -173,6 +174,44 @@ async def test_webhook_handler_rejects_replayed_delivery(db):
 
     assert exc.value.status_code == 409
     assert exc.value.detail == "Duplicate delivery"
+
+
+@pytest.mark.asyncio
+async def test_installation_repositories_delivery_can_be_retried_after_409(db):
+    router, _, _ = make_router()
+    delivery_id = "installation-retry-test"
+
+    body = (
+        b'{"action":"added","installation":{"id":999999},'
+        b'"repositories_added":[{"name":"test-repo"}]}'
+    )
+    signature = sign(SECRET, body)
+
+    first_request = request_with(
+        delivery_id,
+        signature,
+        body,
+        event="installation_repositories",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await router.handle(first_request, db)
+
+    assert exc.value.status_code == 409
+    assert await db.get(WebhookDelivery, delivery_id) is None
+
+    retry_request = request_with(
+        delivery_id,
+        signature,
+        body,
+        event="installation_repositories",
+    )
+
+    with pytest.raises(HTTPException) as retry_exc:
+        await router.handle(retry_request, db)
+
+    assert retry_exc.value.status_code == 409
+    assert retry_exc.value.detail == "Installation account not found; retry delivery"
 
 
 @pytest.mark.asyncio
