@@ -672,3 +672,113 @@ async def test_gpg_signature_fails_when_commits_list_empty(mock_gh, ctx):
     gpg_check = next(c for c in checks if c.name == "GPG Signature")
     assert gpg_check.passed is False
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_val",
+    [
+        None,
+        {},
+        {"login": ""},
+    ],
+)
+async def test_handle_pr_opened_missing_or_ghost_author(
+    mock_gh,
+    ctx,
+    user_val,
+):
+    ctx["config"].workflows.pull_request.enabled = True
+
+    payload = make_payload()
+    payload["pull_request"]["user"] = user_val
+
+    wf = PullRequestWorkflow(mock_gh)
+    wf._run_quality_checks = AsyncMock()
+    wf._run_ai_review = AsyncMock()
+    wf._recommend_reviewers = AsyncMock()
+
+    await wf.handle_pr_opened(ctx, payload)
+
+    wf._run_quality_checks.assert_not_awaited()
+    wf._run_ai_review.assert_not_awaited()
+    wf._recommend_reviewers.assert_not_awaited()
+
+    mock_gh.list_issue_comments.assert_not_awaited()
+    mock_gh.post_comment.assert_not_awaited()
+    mock_gh.add_label.assert_not_awaited()
+    mock_gh.remove_label.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_pr_opened_missing_user_key(
+    mock_gh,
+    ctx,
+):
+    ctx["config"].workflows.pull_request.enabled = True
+
+    payload = make_payload()
+    payload["pull_request"].pop("user")
+
+    wf = PullRequestWorkflow(mock_gh)
+    wf._run_quality_checks = AsyncMock()
+    wf._run_ai_review = AsyncMock()
+    wf._recommend_reviewers = AsyncMock()
+
+    await wf.handle_pr_opened(ctx, payload)
+
+    wf._run_quality_checks.assert_not_awaited()
+    wf._run_ai_review.assert_not_awaited()
+    wf._recommend_reviewers.assert_not_awaited()
+
+    mock_gh.list_issue_comments.assert_not_awaited()
+    mock_gh.post_comment.assert_not_awaited()
+    mock_gh.add_label.assert_not_awaited()
+    mock_gh.remove_label.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_val",
+    [
+        None,
+        {},
+        {"login": ""},
+    ],
+)
+async def test_run_ai_review_handles_missing_author_in_audit(
+    mock_gh,
+    ctx,
+    user_val,
+):
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=[
+            {
+                "filename": "app/example.py",
+                "patch": "+x = 1",
+            }
+        ]
+    )
+    mock_gh.create_pr_review_comment = AsyncMock()
+
+    wf = PullRequestWorkflow(mock_gh)
+    wf._ai.review = AsyncMock(
+        return_value={
+            "summary": "_AI review unavailable at this time._",
+            "verdict": "comment",
+            "score": 50,
+            "comments": [],
+            "failed": True,
+        }
+    )
+
+    pr = make_pr()
+    pr["user"] = user_val
+
+    await wf._run_ai_review(ctx, pr)
+
+    rows = (
+        await ctx["db"].execute(select(AuditLog))
+    ).scalars().all()
+
+    assert [row.action for row in rows] == ["pr.review_failed"]
+    assert rows[0].target_login == ""

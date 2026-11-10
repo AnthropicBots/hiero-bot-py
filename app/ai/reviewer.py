@@ -72,11 +72,20 @@ class AIReviewer:
 
     def __init__(self, backend: ReviewBackend | None = None) -> None:
         self._backend = backend
+        self._backend_logged = False
 
     def _get_backend(self, cfg) -> ReviewBackend:
         if self._backend is None:
             self._backend = build_backend(getattr(cfg, "provider", "auto"))
-            log.info("AI review using the %s backend", self._backend.name)
+
+        if not self._backend_logged:
+            log.info(
+                "AI review using provider=%s model=%s",
+                self._backend.name,
+                cfg.model,
+            )
+            self._backend_logged = True
+
         return self._backend
 
     async def review(

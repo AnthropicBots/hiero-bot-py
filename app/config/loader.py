@@ -28,8 +28,7 @@ _CONFIG_PATH = ".github/hiero-bot.yml"
 # A repo with a config is the common case and its contents change rarely.
 _CACHE_TTL = 300  # 5 minutes
 
-# "No config" is cached too, but far more briefly so a newly added config
-# file is discovered without repeatedly hitting the GitHub Contents API.
+# "No config" is cached briefly so newly added configs are discovered.
 _NEGATIVE_CACHE_TTL = 60
 
 # Bound the cache so an org-wide installation cannot grow it without limit.
@@ -56,6 +55,7 @@ class ConfigInvalid(ConfigError):
 class _CacheEntry:
     config: RepoConfig | None
     expires_at: float
+    invalid_detail: str | None = None
 
     @property
     def fresh(self) -> bool:
@@ -152,6 +152,10 @@ class ConfigLoader:
             return False, None
         self._hits += 1
         self._cache.move_to_end(key)
+
+        if entry.invalid_detail is not None:
+            raise ConfigInvalid(key, entry.invalid_detail)
+
         return True, entry.config
 
     async def _fetch(
@@ -185,9 +189,21 @@ class ConfigLoader:
             self._store_if_current(key, None, generation)
             return None
 
-        config = self._parse(key, raw_b64)
+        try:
+            config = self._parse(key, raw_b64)
+        except ConfigInvalid as exc:
+            # Cache invalid configs briefly and log only when the current
+            # generation accepts the cached failure.
+            stored = self._store_if_current(
+                key, None, generation, invalid_detail=exc.detail
+            )
+            if stored:
+                log.error("Invalid config for %s: %s", key, exc.detail)
+            raise
+
         if self._store_if_current(key, config, generation):
             log.info("Loaded config for %s", key)
+
         return config
 
     # ── Parsing ───────────────────────────────────────────────
@@ -241,17 +257,11 @@ class ConfigLoader:
                 for error in exc.errors()[:5]
             )
 
-            log.error(
-                "Invalid config for %s: %s",
-                slug,
-                detail,
-            )
-
             raise ConfigInvalid(slug, detail) from exc
 
         # Unknown keys are intentionally non-fatal so existing configs remain
-        # compatible. Warn because a typo can otherwise silently activate a
-        # default value.
+        # compatible. Warn because a typo can otherwise silently activate
+        # a default value.
         unknown = find_unknown_keys(data, RepoConfig)
 
         if unknown:
@@ -269,11 +279,14 @@ class ConfigLoader:
         self,
         key: str,
         config: RepoConfig | None,
+        invalid_detail: str | None = None,
     ) -> None:
+        # Missing and invalid configs use the shorter TTL for prompt retries.
         ttl = _CACHE_TTL if config is not None else _NEGATIVE_CACHE_TTL
 
         self._cache[key] = _CacheEntry(
             config=config,
+            invalid_detail=invalid_detail,
             expires_at=time.monotonic() + ttl,
         )
 
@@ -284,13 +297,17 @@ class ConfigLoader:
             log.debug("Evicted config cache entry for %s", evicted)
 
     def _store_if_current(
-        self, key: str, config: RepoConfig | None, generation: int
+        self,
+        key: str,
+        config: RepoConfig | None,
+        generation: int,
+        invalid_detail: str | None = None,
     ) -> bool:
         """Store only when this fetch still belongs to the current generation."""
         if self._generation.get(key, 0) != generation:
             log.debug("Dropping stale config fetch for %s", key)
             return False
-        self._store(key, config)
+        self._store(key, config, invalid_detail=invalid_detail)
         return True
 
     def _bump(self, key: str) -> None:
@@ -335,7 +352,9 @@ class ConfigLoader:
         return {
             "entries": len(self._cache),
             "configured": sum(
-                1 for entry in self._cache.values() if entry.config is not None
+                1
+                for entry in self._cache.values()
+                if entry.config is not None
             ),
             "hits": self._hits,
             "misses": self._misses,

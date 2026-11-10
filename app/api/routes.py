@@ -19,7 +19,13 @@ from app.db.models import (
     StaleActionLog,
     User,
 )
-from app.utils.access import get_authorized_owners, verify_owner_access
+from app.utils.access import (
+    AuthorizedAccess,
+    authorized_repo_filter,
+    get_authorized_access,
+    verify_owner_access,
+    verify_repo_access,
+)
 from app.utils.logger import get_logger
 
 log = get_logger("api.routes")
@@ -106,22 +112,25 @@ async def get_audit_log(
     action: str | None = Query(None),
     target_login: str | None = Query(None),
     since: datetime | None = Query(None),
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
+    allowed_owners = access.owners
+    allowed_repos = access.repos
     if owner:
         verify_owner_access(owner, user, allowed_owners)
+        verify_repo_access(owner, repo, allowed_owners, allowed_repos)
     elif not allowed_owners:
         return []
 
     q = select(AuditLog).order_by(desc(AuditLog.timestamp))
+    q = q.where(authorized_repo_filter(AuditLog, access))
+
     if owner:
         q = q.where(AuditLog.owner == owner)
-    else:
-        q = q.where(AuditLog.owner.in_(allowed_owners))
 
     if repo:
         q = q.where(AuditLog.repo == repo)
@@ -155,21 +164,24 @@ async def get_pr_health(
     pr_author: str | None = Query(None),
     min_score: float | None = Query(None),
     max_score: float | None = Query(None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
+    allowed_owners = access.owners
+    allowed_repos = access.repos
     if owner:
         verify_owner_access(owner, user, allowed_owners)
+        verify_repo_access(owner, repo, allowed_owners, allowed_repos)
     elif not allowed_owners:
         return []
 
     q = select(PRHealthScore).order_by(desc(PRHealthScore.created_at))
+    q = q.where(authorized_repo_filter(PRHealthScore, access))
+
     if owner:
         q = q.where(PRHealthScore.owner == owner)
-    else:
-        q = q.where(PRHealthScore.owner.in_(allowed_owners))
 
     if repo:
         q = q.where(PRHealthScore.repo == repo)
@@ -189,10 +201,11 @@ async def get_pr_health_stats(
     owner: str = Query(...),
     repo: str = Query(...),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
-    verify_owner_access(owner, user, allowed_owners)
+    verify_owner_access(owner, user, access.owners)
+    verify_repo_access(owner, repo, access.owners, access.repos)
     result = await db.execute(
         select(
             func.avg(PRHealthScore.score).label("avg_score"),
@@ -220,21 +233,24 @@ async def get_contributors(
     repo: str | None = Query(None),
     login: str | None = Query(None),
     eligible_for: str | None = Query(None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
+    allowed_owners = access.owners
+    allowed_repos = access.repos
     if owner:
         verify_owner_access(owner, user, allowed_owners)
+        verify_repo_access(owner, repo, allowed_owners, allowed_repos)
     elif not allowed_owners:
         return []
 
     q = select(ContributorSnapshot).order_by(desc(ContributorSnapshot.recorded_at))
+    q = q.where(authorized_repo_filter(ContributorSnapshot, access))
+
     if owner:
         q = q.where(ContributorSnapshot.owner == owner)
-    else:
-        q = q.where(ContributorSnapshot.owner.in_(allowed_owners))
 
     if repo:
         q = q.where(ContributorSnapshot.repo == repo)
@@ -254,10 +270,11 @@ async def get_repo_stats(
     owner: str = Query(...),
     repo: str = Query(...),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
-    verify_owner_access(owner, user, allowed_owners)
+    verify_owner_access(owner, user, access.owners)
+    verify_repo_access(owner, repo, access.owners, access.repos)
 
     async def count(model, **filters):
         q = select(func.count()).select_from(model)
@@ -292,21 +309,24 @@ async def get_stale_log(
     owner: str | None = Query(None),
     repo: str | None = Query(None),
     action: str | None = Query(None),
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=100, ge=1, le=500),
     user: User = Depends(get_current_user),
-    allowed_owners: set[str] = Depends(get_authorized_owners),
+    access: AuthorizedAccess = Depends(get_authorized_access),
     db: AsyncSession = Depends(get_db),
 ):
+    allowed_owners = access.owners
+    allowed_repos = access.repos
     if owner:
         verify_owner_access(owner, user, allowed_owners)
+        verify_repo_access(owner, repo, allowed_owners, allowed_repos)
     elif not allowed_owners:
         return []
 
     q = select(StaleActionLog).order_by(desc(StaleActionLog.occurred_at))
+    q = q.where(authorized_repo_filter(StaleActionLog, access))
+
     if owner:
         q = q.where(StaleActionLog.owner == owner)
-    else:
-        q = q.where(StaleActionLog.owner.in_(allowed_owners))
 
     if repo:
         q = q.where(StaleActionLog.repo == repo)

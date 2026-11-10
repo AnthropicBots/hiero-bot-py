@@ -60,3 +60,6 @@ todo.md
 
 # Security audit reports
 audit-report.json
+# Python local cache
+.pytest_cache/
+.ruff_cache/

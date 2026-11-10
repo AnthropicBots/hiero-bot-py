@@ -53,6 +53,81 @@ def test_auto_selects_openai_first(monkeypatch):
     assert build_backend("auto").name == "openai"
 
 
+def test_auto_selection_logs_selected_backend(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-x")
+
+    with caplog.at_level(logging.INFO, logger="hiero.ai.backend.registry"):
+        backend = build_backend("auto")
+
+    assert backend.name == "openai"
+    assert "AI review auto-selected the openai backend" in caplog.text
+
+
+def test_auto_selection_warns_when_multiple_backends_are_available(
+    monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-x")
+    monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant")
+
+    with caplog.at_level(logging.WARNING, logger="hiero.ai.backend.registry"):
+        backend = build_backend("auto")
+
+    assert backend.name == "openai"
+    assert "Multiple AI review backends are available" in caplog.text
+    assert "openai, anthropic" in caplog.text
+
+
+def test_auto_selection_warns_when_openai_base_url_and_anthropic_are_available(
+    monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setattr(
+        settings, "openai_base_url", "http://localhost:8000/v1"
+    )
+    monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant")
+
+    with caplog.at_level(logging.WARNING, logger="hiero.ai.backend.registry"):
+        backend = build_backend("auto")
+
+    assert backend.name == "openai"
+    assert "Multiple AI review backends are available" in caplog.text
+    assert "openai, anthropic" in caplog.text
+
+
+def test_auto_selection_does_not_warn_for_single_backend(
+    monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant")
+
+    with caplog.at_level(logging.WARNING, logger="hiero.ai.backend.registry"):
+        backend = build_backend("auto")
+
+    assert backend.name == "anthropic"
+    assert "Multiple AI review backends are available" not in caplog.text
+
+
+def test_explicit_provider_does_not_emit_auto_selection_warning(
+    monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-x")
+    monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant")
+
+    with caplog.at_level(logging.WARNING, logger="hiero.ai.backend.registry"):
+        backend = build_backend("anthropic")
+
+    assert backend.name == "anthropic"
+    assert "Multiple AI review backends are available" not in caplog.text
+
+
 def test_auto_falls_back_to_anthropic(monkeypatch):
     monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant")
 

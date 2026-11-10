@@ -175,6 +175,7 @@ class Account(Base):
     org_login: Mapped[str] = mapped_column(String(128), index=True)
     account_type: Mapped[str] = mapped_column(String(32), default="Organization")
     plan_tier: Mapped[str] = mapped_column(String(32), default="free")
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
     suspended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 

@@ -1,5 +1,6 @@
 """A failing PR step must not silently skip the steps after it."""
 
+import types
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -13,7 +14,15 @@ PAYLOAD = {
     "action": "opened",
     "pull_request": {"number": 1, "draft": False, "user": {"login": "author"}},
 }
-CTX = {"owner": "o", "repo": "r", "installation_id": 1, "config": None, "db": None}
+# Include a premium account so the gating check allows reviewer and health steps.
+CTX = {
+    "owner": "o",
+    "repo": "r",
+    "installation_id": 1,
+    "config": None,
+    "db": None,
+    "account": types.SimpleNamespace(plan_tier="premium"),
+}
 
 
 def _http_422() -> httpx.HTTPStatusError:
@@ -52,3 +61,26 @@ async def test_quality_failure_does_not_skip_later_steps():
 
 async def test_no_failure_runs_all_steps_in_order():
     assert await _run("none") == ["quality", "reviewer", "health"]
+
+
+async def test_free_account_still_gets_health_scoring():
+    """Free accounts must receive PR health scoring — it is not a Premium feature."""
+    calls: list[str] = []
+
+    async def _step(name):
+        async def _inner(*_a, **_k):
+            calls.append(name)
+        return _inner
+
+    free_ctx = {**CTX, "account": types.SimpleNamespace(plan_tier="free")}
+    router = WebhookRouter(MagicMock(), MagicMock())
+    with (
+        patch.object(PullRequestWorkflow, "handle_pr_opened", await _step("quality")),
+        patch.object(ReviewerAssignmentWorkflow, "handle_pr_opened", await _step("reviewer")),
+        patch.object(PRHealthWorkflow, "score_pr", await _step("health")),
+    ):
+        await router._dispatch("pull_request", PAYLOAD, free_ctx)
+
+    assert "health" in calls
+    assert "reviewer" not in calls
+    assert "quality" in calls

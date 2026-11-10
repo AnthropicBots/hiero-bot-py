@@ -13,6 +13,7 @@ def test_pragma_runs_on_sqlite():
     cursor = dbapi_connection.cursor.return_value
     cursor.execute.assert_any_call("PRAGMA journal_mode=WAL")
     cursor.execute.assert_any_call("PRAGMA busy_timeout=30000")
+    cursor.execute.assert_any_call("PRAGMA foreign_keys=ON")
     cursor.close.assert_called_once()
 
 

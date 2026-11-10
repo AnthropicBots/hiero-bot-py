@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.billing.gating import is_premium
 from app.config.loader import ConfigInvalid, ConfigLoader
 from app.db.models import Account, AccountRepo
 from app.github.client import GitHubClient
@@ -153,16 +154,22 @@ class WebhookRouter:
 
         try:
             config = await self._config_loader.load(owner, repo, installation_id)
-        except ConfigInvalid as exc:
-            # A broken config is the repository's problem, not a delivery
-            # failure. Returning 200 stops GitHub retrying the same delivery
-            # for hours against a file that will not parse until a human edits it.
-            log.error("Skipping %s/%s: %s", owner, repo, exc.detail)
+        except ConfigInvalid:
+            # ConfigLoader logs the invalid config when it is first cached.
+            # Avoid repeating an ERROR for every webhook delivery that
+            # encounters the cached invalid configuration.
             return {"ok": True, "skipped": "invalid config"}
 
         if config is None:
             log.debug("No config for %s/%s — skipping", owner, repo)
             return {"ok": True, "skipped": "no config"}
+
+        # Look up the Account so downstream handlers can check plan_tier.
+        account = await db.scalar(
+            select(Account).where(
+                Account.github_installation_id == installation_id
+            )
+        )
 
         ctx = {
             "owner": owner,
@@ -170,6 +177,7 @@ class WebhookRouter:
             "installation_id": installation_id,
             "config": config,
             "db": db,
+            "account": account,
         }
 
         await self._dispatch(event, payload, ctx)
@@ -230,6 +238,9 @@ class WebhookRouter:
         if action == "opened" and pr.get("draft"):
             return
 
+        account = ctx.get("account")
+        premium = account is not None and is_premium(account)
+
         if action in ("opened", "ready_for_review", "synchronize", "reopened"):
             # Each step is isolated: one failing (e.g. GitHub rejecting a reviewer
             # request with 422) must not silently skip the steps after it.
@@ -237,11 +248,20 @@ class WebhookRouter:
                 "quality gates", wf_pr.handle_pr_opened(ctx, payload, action), ctx
             )
 
+            # Reviewer assignment is a Premium feature (AI-powered rota).
             if action in ("opened", "ready_for_review"):
-                await self._run_step(
-                    "reviewer assignment", wf_reviewer.handle_pr_opened(ctx, payload), ctx
-                )
+                if premium:
+                    await self._run_step(
+                        "reviewer assignment", wf_reviewer.handle_pr_opened(ctx, payload), ctx
+                    )
+                else:
+                    log.debug(
+                        "Skipping reviewer assignment for %s/%s — account is not premium",
+                        ctx.get("owner"),
+                        ctx.get("repo"),
+                    )
 
+            # PR health scoring is available to all accounts (free feature).
             await self._run_step("health scoring", wf_health.score_pr(ctx, payload), ctx)
 
         elif action == "closed" and pr.get("merged"):

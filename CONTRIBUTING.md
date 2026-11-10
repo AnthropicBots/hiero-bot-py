@@ -98,6 +98,7 @@ When submitting a pull request:
 - Reference any related issues using keywords such as `Fixes #123`.
 - Include screenshots for dashboard or UI changes when appropriate.
 - Keep pull requests small and focused.
+- Sign off each commit with `git commit -s` to certify the Developer Certificate of Origin.
 
 ## Pull Request Checklist
 

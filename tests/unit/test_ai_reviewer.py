@@ -111,6 +111,56 @@ async def test_request_carries_config_model_and_timeout():
 
 
 @pytest.mark.asyncio
+async def test_logs_provider_and_model(caplog):
+    import logging
+
+    backend = StubBackend(review_json())
+    cfg = AIReviewConfig(
+        enabled=True,
+        model="local-model:7b",
+        provider="auto",
+    )
+
+    with caplog.at_level(logging.INFO, logger="hiero.ai.reviewer"):
+        await AIReviewer(backend).review(cfg, "PR", "", DIFFS)
+
+    assert "provider=stub" in caplog.text
+    assert "model=local-model:7b" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_logs_configured_provider_and_model_on_backend_creation(
+    monkeypatch, caplog
+):
+    import logging
+
+    class ConfiguredBackend(StubBackend):
+        name = "anthropic"
+
+    backend = ConfiguredBackend(review_json())
+    requested_providers = []
+
+    def fake_build_backend(provider):
+        requested_providers.append(provider)
+        return backend
+
+    monkeypatch.setattr(reviewer_module, "build_backend", fake_build_backend)
+
+    cfg = AIReviewConfig(
+        enabled=True,
+        model="claude-test-model",
+        provider="anthropic",
+    )
+
+    with caplog.at_level(logging.INFO, logger="hiero.ai.reviewer"):
+        await AIReviewer().review(cfg, "PR", "", DIFFS)
+
+    assert requested_providers == ["anthropic"]
+    assert "provider=anthropic" in caplog.text
+    assert "model=claude-test-model" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_request_does_not_force_temperature():
     backend = StubBackend(review_json())
 

@@ -1,6 +1,7 @@
 # tests/unit/test_installation_webhooks.py — Installation webhook unit tests
 
-from unittest.mock import AsyncMock, MagicMock
+import base64
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -11,6 +12,7 @@ from app.config.loader import ConfigInvalid
 from app.db.database import Base
 from app.db.models import Account, AccountRepo
 from app.github.webhooks import WebhookRouter
+from app.utils.access import get_authorized_access
 
 
 @pytest.mark.asyncio
@@ -134,10 +136,14 @@ async def test_config_change_invalidates_cache_before_loading(db):
 
 
 @pytest.mark.asyncio
-async def test_invalid_config_is_acknowledged_without_retrying(db):
+async def test_invalid_config_is_acknowledged_without_retrying(db, monkeypatch):
+    from app.github import webhooks as webhooks_module
+
+    webhook_log = Mock()
+    monkeypatch.setattr(webhooks_module, "log", webhook_log)
+
     gh = MagicMock()
     config_loader = MagicMock()
-    config_loader.load = AsyncMock()
 
     async def load(owner, repo, installation_id):
         raise ConfigInvalid(
@@ -145,8 +151,7 @@ async def test_invalid_config_is_acknowledged_without_retrying(db):
             "workflows.pull_request.enabled: Input should be a valid boolean",
         )
 
-    config_loader.load.side_effect = load
-
+    config_loader.load = AsyncMock(side_effect=load)
     router = WebhookRouter(gh, config_loader)
 
     payload = {
@@ -160,21 +165,115 @@ async def test_invalid_config_is_acknowledged_without_retrying(db):
     request = MagicMock()
     request.body = AsyncMock(return_value=b"")
     router._verify_signature = MagicMock()
-    request.headers = {
-        "X-GitHub-Event": "pull_request",
-    }
+    request.headers = {"X-GitHub-Event": "pull_request"}
     request.json = AsyncMock(return_value=payload)
+
+    for _ in range(3):
+        result = await router.handle(request, db)
+        assert result == {"ok": True, "skipped": "invalid config"}
+
+    assert config_loader.load.await_count == 3
+    webhook_log.error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_push_config_change_invalidates_real_invalid_config_cache(db):
+    invalid_content = base64.b64encode(b"- invalid\n").decode()
+    valid_content = base64.b64encode(
+        b'repo: "testorg/testrepo"\nworkflows: {}\n'
+    ).decode()
+
+    gh = MagicMock()
+    gh.get_file_content = AsyncMock(
+        side_effect=[invalid_content, valid_content]
+    )
+    config_loader = ConfigLoader(gh)
+    router = WebhookRouter(gh, config_loader)
+
+    # Prime the real loader with an invalid configuration.
+    with pytest.raises(ConfigInvalid):
+        await config_loader.load("testorg", "testrepo", 8888)
+
+    # A second load should use the cached invalid result.
+    with pytest.raises(ConfigInvalid):
+        await config_loader.load("testorg", "testrepo", 8888)
+
+    assert gh.get_file_content.await_count == 1
+
+    payload = {
+        "repository": {
+            "owner": {"login": "testorg"},
+            "name": "testrepo",
+        },
+        "installation": {"id": 8888},
+        "commits": [
+            {
+                "added": [],
+                "modified": [".github/hiero-bot.yml"],
+                "removed": [],
+            }
+        ],
+    }
+
+    request = MagicMock()
+    request.body = AsyncMock(return_value=b"")
+    request.headers = {"X-GitHub-Event": "push"}
+    request.json = AsyncMock(return_value=payload)
+    router._verify_signature = MagicMock()
 
     result = await router.handle(request, db)
 
-    assert result == {
-        "ok": True,
-        "skipped": "invalid config",
-    }
-    config_loader.load.assert_awaited_once_with(
-        "testorg",
-        "testrepo",
-        8888,
+    assert result == {"ok": True}
+    assert gh.get_file_content.await_count == 2
+
+    # The valid configuration should now be cached.
+    cached = await config_loader.load("testorg", "testrepo", 8888)
+
+    assert cached is not None
+    assert cached.repo == "testorg/testrepo"
+    assert gh.get_file_content.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_repository_removal_webhook_revokes_dashboard_access_with_stale_cache(db):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    user = User(github_user_id=9901, github_login="webhook-test-user")
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    account = Account(
+        github_installation_id=9901,
+        org_login="webhook-org",
+        plan_tier="free",
+    )
+    db.add(account)
+    await db.commit()
+    await db.refresh(account)
+
+    db.add(AccountUser(
+        account_id=account.id,
+        user_id=user.id,
+        authorized=True,
+    ))
+    db.add(AccountRepo(
+        account_id=account.id,
+        repo_name="private-repo",
+    ))
+    await db.commit()
+
+    # Populate the authorization cache before the webhook arrives.
+    cached = await get_user_authorized_accounts(user, db)
+    assert cached[0]["repos"] == ["private-repo"]
+
+    result = await router._handle_installation_repositories(
+        {
+            "action": "removed",
+            "installation": {"id": 9901},
+            "repositories_removed": [{"name": "private-repo"}],
+        },
+        db,
     )
 
 
