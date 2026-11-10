@@ -12,13 +12,15 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.billing.gating import is_premium
 from app.config.loader import ConfigInvalid, ConfigLoader
 from app.db.models import Account, AccountRepo
 from app.github.client import GitHubClient
-from app.github.replay_guard import is_replay  # #4
+from app.github.replay_guard import is_replay, release_delivery
 from app.utils.logger import get_logger
 from app.utils.settings import settings
 from app.workflows.issuemanagement import IssueManagementWorkflow
@@ -111,7 +113,18 @@ class WebhookRouter:
         if event == "installation":
             return await self._handle_installation(payload, db)
         elif event == "installation_repositories":
-            return await self._handle_installation_repositories(payload, db)
+            try:
+                return await self._handle_installation_repositories(payload, db)
+            except HTTPException as exc:
+                if exc.status_code == 409:
+                    try:
+                        await release_delivery(db, delivery_id)
+                    except Exception:
+                        log.exception(
+                            "Failed to release webhook delivery %s after retryable error",
+                            delivery_id,
+                        )
+                raise
 
         repo_data = payload.get("repository")
         installation_data = payload.get("installation")
@@ -441,110 +454,348 @@ class WebhookRouter:
 
     # ── Installation Webhook Handlers ──────────────────────────
 
+    @staticmethod
+    def _installation_insert(table: Any, dialect: str) -> Any:
+        if dialect == "sqlite":
+            return sqlite_insert(table)
+
+        if dialect == "postgresql":
+            return postgresql_insert(table)
+
+        raise RuntimeError(
+            f"Unsupported database dialect for installation upsert: {dialect}"
+        )
+
+    @staticmethod
+    def _installation_transaction(db: AsyncSession) -> Any:
+        """Return a transaction context appropriate for the current session."""
+        if db.in_transaction():
+            return db.begin_nested()
+
+        return db.begin()
+
+    async def _upsert_installation_account(
+        self,
+        db: AsyncSession,
+        installation_id: int,
+        account_info: dict,
+        error_detail: str,
+    ) -> Account:
+        github_account_id = account_info.get("id")
+        org_login = account_info.get("login")
+        account_type = account_info.get("type", "Organization")
+
+        if (
+            isinstance(github_account_id, bool)
+            or not isinstance(github_account_id, int)
+            or github_account_id <= 0
+            or not isinstance(org_login, str)
+            or not org_login.strip()
+            or not isinstance(account_type, str)
+            or not account_type.strip()
+        ):
+            raise HTTPException(status_code=400, detail=error_detail)
+
+        org_login = org_login.strip()
+        account_type = account_type.strip()
+        dialect = db.get_bind().dialect.name
+
+        account_stmt = (
+            self._installation_insert(Account, dialect)
+            .values(
+                github_installation_id=installation_id,
+                github_account_id=github_account_id,
+                org_login=org_login,
+                account_type=account_type,
+                plan_tier="free",
+                suspended_at=None,
+            )
+            .on_conflict_do_update(
+                index_elements=[Account.github_installation_id],
+                set_={
+                    "github_account_id": github_account_id,
+                    "org_login": org_login,
+                    "account_type": account_type,
+                    "suspended_at": None,
+                },
+            )
+        )
+
+        await db.execute(account_stmt)
+
+        account = await db.scalar(
+            select(Account)
+            .where(Account.github_installation_id == installation_id)
+            .execution_options(populate_existing=True)
+        )
+
+        if account is None:
+            raise RuntimeError(
+                f"Installation account {installation_id} was not available after upsert"
+            )
+
+        return account
+
     async def _handle_installation(self, payload: dict, db: AsyncSession) -> dict:
         action = payload.get("action", "")
-        inst = payload.get("installation", {})
+        inst = payload.get("installation")
+
+        if not isinstance(inst, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid installation payload: installation object is missing",
+            )
+
         inst_id = inst.get("id")
 
-        if not inst_id:
-            return {"ok": True, "skipped": "no installation id"}
+        if inst_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid installation payload: installation ID is missing",
+            )
+
+        if isinstance(inst_id, bool) or not isinstance(inst_id, int) or inst_id <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid installation payload: installation ID must be a positive integer",
+            )
 
         if action in ("created", "unsuspended"):
-            account_info = inst.get("account", {})
-            org_login = account_info.get("login", "")
-            github_account_id = account_info.get("id")
-            account_type = account_info.get("type", "Organization")
+            account_info = inst.get("account")
 
-            stmt = select(Account).where(Account.github_installation_id == inst_id)
-            res = await db.execute(stmt)
-            acc = res.scalar_one_or_none()
-
-            if acc:
-                acc.org_login = org_login
-                acc.github_account_id = github_account_id
-                acc.account_type = account_type
-                acc.suspended_at = None
-            else:
-                acc = Account(
-                    github_installation_id=inst_id,
-                    github_account_id=github_account_id,
-                    org_login=org_login,
-                    account_type=account_type,
-                    plan_tier="free",
+            if not isinstance(account_info, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid installation payload: account information is missing",
                 )
-                db.add(acc)
 
-            await db.commit()
-            await db.refresh(acc)
-
-            # Sync repos if provided
             repos = payload.get("repositories", [])
-            for r in repos:
-                repo_name = r.get("name")
-                if repo_name:
-                    repo_stmt = select(AccountRepo).where(
-                        AccountRepo.account_id == acc.id,
-                        AccountRepo.repo_name == repo_name,
-                    )
-                    repo_res = await db.execute(repo_stmt)
-                    if not repo_res.scalar_one_or_none():
-                        db.add(AccountRepo(account_id=acc.id, repo_name=repo_name))
-            await db.commit()
-            log.info("Installation %s (%s) upserted with %d repos", inst_id, org_login, len(repos))
 
-        elif action == "deleted" or action == "suspend":
-            stmt = select(Account).where(Account.github_installation_id == inst_id)
-            res = await db.execute(stmt)
-            acc = res.scalar_one_or_none()
-            if acc:
-                acc.suspended_at = datetime.now(UTC)
-                await db.commit()
-                log.info("Installation %s suspended/deleted", inst_id)
+            if not isinstance(repos, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid installation payload: repositories must be a list",
+                )
+
+            repo_names = set()
+
+            for repo_data in repos:
+                if not isinstance(repo_data, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid installation payload: repository entry must be an object",
+                    )
+
+                repo_name = repo_data.get("name")
+
+                if not isinstance(repo_name, str):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid installation payload: repository name must be a string",
+                    )
+
+                normalized_name = repo_name.strip()
+
+                if not normalized_name or len(normalized_name) > 128:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid installation payload: repository name is empty or too long",
+                    )
+
+                repo_names.add(normalized_name)
+
+            async with self._installation_transaction(db):
+                acc = await self._upsert_installation_account(
+                    db,
+                    inst_id,
+                    account_info,
+                    "Invalid installation payload: account information is invalid",
+                )
+                org_login = acc.org_login
+
+                if repo_names:
+                    dialect = db.get_bind().dialect.name
+
+                    repo_values = [
+                        {
+                            "account_id": acc.id,
+                            "repo_name": repo_name,
+                        }
+                        for repo_name in sorted(repo_names)
+                    ]
+
+                    repo_stmt = (
+                        self._installation_insert(AccountRepo, dialect)
+                        .values(repo_values)
+                        .on_conflict_do_nothing(
+                            index_elements=[
+                                AccountRepo.account_id,
+                                AccountRepo.repo_name,
+                            ]
+                        )
+                    )
+
+                    await db.execute(repo_stmt)
+
+            log.info(
+                "Installation %s (%s) upserted with %d repos",
+                inst_id,
+                org_login,
+                len(repo_names),
+            )
+
+        elif action in ("deleted", "suspend"):
+            async with self._installation_transaction(db):
+                acc = await db.scalar(
+                    select(Account).where(
+                        Account.github_installation_id == inst_id
+                    )
+                )
+
+                if acc:
+                    acc.suspended_at = datetime.now(UTC)
 
         return {"ok": True, "action": action}
 
-    async def _handle_installation_repositories(self, payload: dict, db: AsyncSession) -> dict:
+    async def _handle_installation_repositories(
+        self,
+        payload: dict,
+        db: AsyncSession,
+    ) -> dict:
         action = payload.get("action", "")
-        inst_id = payload.get("installation", {}).get("id")
+        installation = payload.get("installation")
 
-        if not inst_id:
-            return {"ok": True, "skipped": "no installation id"}
+        if not isinstance(installation, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid repository event: installation object is missing",
+            )
 
-        stmt = select(Account).where(Account.github_installation_id == inst_id)
-        res = await db.execute(stmt)
-        acc = res.scalar_one_or_none()
+        inst_id = installation.get("id")
 
-        if not acc:
-            log.warning("Installation %s not found for repository event", inst_id)
-            return {"ok": True, "skipped": "account not found"}
+        if inst_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid repository event: installation ID is missing",
+            )
+
+        if isinstance(inst_id, bool) or not isinstance(inst_id, int) or inst_id <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid repository event: installation ID must be a positive integer",
+            )
+
+        if action not in ("added", "removed"):
+            return {"ok": True, "action": action}
 
         if action == "added":
-            repos_added = payload.get("repositories_added", [])
-            for r in repos_added:
-                repo_name = r.get("name")
-                if repo_name:
-                    repo_stmt = select(AccountRepo).where(
-                        AccountRepo.account_id == acc.id,
-                        AccountRepo.repo_name == repo_name,
-                    )
-                    repo_res = await db.execute(repo_stmt)
-                    if not repo_res.scalar_one_or_none():
-                        db.add(AccountRepo(account_id=acc.id, repo_name=repo_name))
-            await db.commit()
-            log.info("Added %d repos to installation %s", len(repos_added), inst_id)
+            repositories = payload.get("repositories_added")
+        else:
+            repositories = payload.get("repositories_removed")
 
-        elif action == "removed":
-            repos_removed = payload.get("repositories_removed", [])
-            for r in repos_removed:
-                repo_name = r.get("name")
-                if repo_name:
-                    await db.execute(
-                        delete(AccountRepo).where(
-                            AccountRepo.account_id == acc.id,
-                            AccountRepo.repo_name == repo_name,
-                        )
+        if not isinstance(repositories, list):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid repository event: repositories must be a list",
+            )
+
+        repo_names = set()
+
+        for repo_data in repositories:
+            if not isinstance(repo_data, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid repository event: repository entry must be an object",
+                )
+
+            repo_name = repo_data.get("name")
+
+            if not isinstance(repo_name, str):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid repository event: repository name must be a string",
+                )
+
+            normalized_name = repo_name.strip()
+
+            if not normalized_name or len(normalized_name) > 128:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid repository event: repository name is empty or too long",
+                )
+
+            repo_names.add(normalized_name)
+
+        async with self._installation_transaction(db):
+            acc = await db.scalar(
+                select(Account).where(
+                    Account.github_installation_id == inst_id
+                )
+            )
+
+            if acc is None:
+                account_info = installation.get("account")
+
+                if not isinstance(account_info, dict):
+                    log.warning(
+                        "Installation %s not found and repository event has no account information",
+                        inst_id,
                     )
-            await db.commit()
-            log.info("Removed %d repos from installation %s", len(repos_removed), inst_id)
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Installation account not found; retry delivery",
+                    )
+
+                acc = await self._upsert_installation_account(
+                    db,
+                    inst_id,
+                    account_info,
+                    "Invalid repository event: installation account information is invalid",
+                )
+
+                log.info(
+                    "Recovered missing installation account %s (%s) from repository event",
+                    inst_id,
+                    acc.org_login,
+                )
+
+            if action == "added" and repo_names:
+                dialect = db.get_bind().dialect.name
+
+                repo_values = [
+                    {
+                        "account_id": acc.id,
+                        "repo_name": repo_name,
+                    }
+                    for repo_name in sorted(repo_names)
+                ]
+
+                repo_stmt = (
+                    self._installation_insert(AccountRepo, dialect)
+                    .values(repo_values)
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            AccountRepo.account_id,
+                            AccountRepo.repo_name,
+                        ]
+                    )
+                )
+
+                await db.execute(repo_stmt)
+
+            elif action == "removed" and repo_names:
+                await db.execute(
+                    delete(AccountRepo).where(
+                        AccountRepo.account_id == acc.id,
+                        AccountRepo.repo_name.in_(repo_names),
+                    )
+                )
+
+        log.info(
+            "%s %d repos for installation %s",
+            "Added" if action == "added" else "Removed",
+            len(repo_names),
+            inst_id,
+        )
 
         return {"ok": True, "action": action}

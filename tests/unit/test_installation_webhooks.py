@@ -4,9 +4,13 @@ import base64
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.auth.sync import get_user_authorized_accounts
 from app.config.loader import ConfigInvalid, ConfigLoader
+from app.db.database import Base
 from app.db.models import Account, AccountRepo, AccountUser, User
 from app.github.webhooks import WebhookRouter
 from app.utils.access import get_authorized_access
@@ -18,7 +22,6 @@ async def test_handle_installation_created_and_deleted(db):
     config_loader = MagicMock()
     router = WebhookRouter(gh, config_loader)
 
-    # 1. Created action
     created_payload = {
         "action": "created",
         "installation": {
@@ -35,15 +38,17 @@ async def test_handle_installation_created_and_deleted(db):
     res = await router._handle_installation(created_payload, db)
     assert res == {"ok": True, "action": "created"}
 
-    acc = (await db.execute(Account.__table__.select().where(Account.github_installation_id == 8888))).first()
+    acc = await db.scalar(
+        select(Account).where(Account.github_installation_id == 8888)
+    )
     assert acc is not None
     assert acc.org_login == "testorg"
 
-    # 2. Deleted action
     deleted_payload = {
         "action": "deleted",
         "installation": {"id": 8888},
     }
+
     res_del = await router._handle_installation(deleted_payload, db)
     assert res_del == {"ok": True, "action": "deleted"}
 
@@ -54,28 +59,112 @@ async def test_handle_installation_repositories_added_and_removed(db):
     config_loader = MagicMock()
     router = WebhookRouter(gh, config_loader)
 
-    acc = Account(github_installation_id=9999, org_login="repoorg", plan_tier="free")
+    acc = Account(
+        github_installation_id=9999,
+        org_login="repoorg",
+        plan_tier="free",
+    )
     db.add(acc)
     await db.commit()
     await db.refresh(acc)
 
-    # Added action
     added_payload = {
         "action": "added",
         "installation": {"id": 9999},
         "repositories_added": [{"name": "repo-added"}],
     }
+
     res_add = await router._handle_installation_repositories(added_payload, db)
     assert res_add == {"ok": True, "action": "added"}
 
-    # Removed action
     removed_payload = {
         "action": "removed",
         "installation": {"id": 9999},
         "repositories_removed": [{"name": "repo-added"}],
     }
+
     res_rem = await router._handle_installation_repositories(removed_payload, db)
     assert res_rem == {"ok": True, "action": "removed"}
+
+
+@pytest.mark.asyncio
+async def test_repository_addition_recovers_missing_installation_account(db):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    payload = {
+        "action": "added",
+        "installation": {
+            "id": 39997,
+            "account": {
+                "id": 38887,
+                "login": "added-org",
+                "type": "Organization",
+            },
+        },
+        "repositories_added": [{"name": "added-repo"}],
+    }
+
+    result = await router._handle_installation_repositories(payload, db)
+
+    assert result == {"ok": True, "action": "added"}
+
+    account = await db.scalar(
+        select(Account).where(
+            Account.github_installation_id == 39997
+        )
+    )
+
+    assert account is not None
+    assert account.org_login == "added-org"
+
+    repo = await db.scalar(
+        select(AccountRepo).where(
+            AccountRepo.account_id == account.id,
+            AccountRepo.repo_name == "added-repo",
+        )
+    )
+
+    assert repo is not None
+
+
+@pytest.mark.asyncio
+async def test_repository_removal_recovers_missing_installation_account(db):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    payload = {
+        "action": "removed",
+        "installation": {
+            "id": 39998,
+            "account": {
+                "id": 38888,
+                "login": "removed-org",
+                "type": "Organization",
+            },
+        },
+        "repositories_removed": [{"name": "removed-repo"}],
+    }
+
+    result = await router._handle_installation_repositories(payload, db)
+
+    assert result == {"ok": True, "action": "removed"}
+
+    account = await db.scalar(
+        select(Account).where(
+            Account.github_installation_id == 39998
+        )
+    )
+
+    assert account is not None
+    assert account.org_login == "removed-org"
+
+    repo = await db.scalar(
+        select(AccountRepo).where(
+            AccountRepo.account_id == account.id,
+            AccountRepo.repo_name == "removed-repo",
+        )
+    )
+
+    assert repo is None
 
 
 @pytest.mark.asyncio
@@ -244,15 +333,19 @@ async def test_repository_removal_webhook_revokes_dashboard_access_with_stale_ca
     await db.commit()
     await db.refresh(account)
 
-    db.add(AccountUser(
-        account_id=account.id,
-        user_id=user.id,
-        authorized=True,
-    ))
-    db.add(AccountRepo(
-        account_id=account.id,
-        repo_name="private-repo",
-    ))
+    db.add(
+        AccountUser(
+            account_id=account.id,
+            user_id=user.id,
+            authorized=True,
+        )
+    )
+    db.add(
+        AccountRepo(
+            account_id=account.id,
+            repo_name="private-repo",
+        )
+    )
     await db.commit()
 
     # Populate the authorization cache before the webhook arrives.
@@ -274,7 +367,7 @@ async def test_repository_removal_webhook_revokes_dashboard_access_with_stale_ca
     cached = await get_user_authorized_accounts(user, db)
     assert cached[0]["repos"] == ["private-repo"]
 
-    # Dashboard authorization must reflect the webhook's DB update.
+    # Dashboard authorization must reflect the database update.
     access = await get_authorized_access(user, db)
 
     assert access.owners == {"webhook-org"}
@@ -282,7 +375,9 @@ async def test_repository_removal_webhook_revokes_dashboard_access_with_stale_ca
 
 
 @pytest.mark.asyncio
-async def test_installation_deletion_webhook_revokes_dashboard_access_with_stale_cache(db):
+async def test_installation_deletion_webhook_revokes_dashboard_access_with_stale_cache(
+    db,
+):
     router = WebhookRouter(MagicMock(), MagicMock())
 
     user = User(github_user_id=9902, github_login="deletion-test-user")
@@ -299,15 +394,19 @@ async def test_installation_deletion_webhook_revokes_dashboard_access_with_stale
     await db.commit()
     await db.refresh(account)
 
-    db.add(AccountUser(
-        account_id=account.id,
-        user_id=user.id,
-        authorized=True,
-    ))
-    db.add(AccountRepo(
-        account_id=account.id,
-        repo_name="private-repo",
-    ))
+    db.add(
+        AccountUser(
+            account_id=account.id,
+            user_id=user.id,
+            authorized=True,
+        )
+    )
+    db.add(
+        AccountRepo(
+            account_id=account.id,
+            repo_name="private-repo",
+        )
+    )
     await db.commit()
 
     # Populate the authorization cache before installation deletion.
@@ -333,3 +432,251 @@ async def test_installation_deletion_webhook_revokes_dashboard_access_with_stale
 
     assert access.owners == set()
     assert access.repos == {}
+
+
+@pytest.mark.asyncio
+async def test_repository_addition_is_persisted_after_session_closes(tmp_path):
+    database_path = tmp_path / "repository-persistence.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path}",
+    )
+
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+        async with AsyncSession(
+            engine,
+            expire_on_commit=False,
+        ) as setup_session:
+            account = Account(
+                github_installation_id=29999,
+                org_login="persistedorg",
+                plan_tier="free",
+            )
+            setup_session.add(account)
+            await setup_session.commit()
+            await setup_session.refresh(account)
+
+        payload = {
+            "action": "added",
+            "installation": {"id": 29999},
+            "repositories_added": [{"name": "persisted-repo"}],
+        }
+
+        async with AsyncSession(
+            engine,
+            expire_on_commit=False,
+        ) as session:
+            result = await router._handle_installation_repositories(
+                payload,
+                session,
+            )
+
+            assert result == {"ok": True, "action": "added"}
+
+        async with AsyncSession(engine) as verification_session:
+            account = await verification_session.scalar(
+                select(Account).where(
+                    Account.github_installation_id == 29999
+                )
+            )
+            assert account is not None
+
+            repo = await verification_session.scalar(
+                select(AccountRepo).where(
+                    AccountRepo.account_id == account.id,
+                    AccountRepo.repo_name == "persisted-repo",
+                )
+            )
+
+            assert repo is not None
+
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_installation_creation_supports_active_transaction(db):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    payload = {
+        "action": "created",
+        "installation": {
+            "id": 18888,
+            "account": {
+                "id": 17777,
+                "login": "activeorg",
+                "type": "Organization",
+            },
+        },
+        "repositories": [{"name": "active-repo"}],
+    }
+
+    async with db.begin():
+        result = await router._handle_installation(payload, db)
+
+        assert result == {"ok": True, "action": "created"}
+        assert db.in_transaction()
+
+        account = await db.scalar(
+            select(Account).where(Account.github_installation_id == 18888)
+        )
+        assert account is not None
+
+        repo = await db.scalar(
+            select(AccountRepo).where(
+                AccountRepo.account_id == account.id,
+                AccountRepo.repo_name == "active-repo",
+            )
+        )
+        assert repo is not None
+
+
+@pytest.mark.asyncio
+async def test_repository_addition_does_not_commit_outer_transaction(db):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    account = Account(
+        github_installation_id=19999,
+        org_login="transactionorg",
+        plan_tier="free",
+    )
+    db.add(account)
+    await db.commit()
+    await db.refresh(account)
+
+    account_id = account.id
+
+    payload = {
+        "action": "added",
+        "installation": {"id": 19999},
+        "repositories_added": [{"name": "transaction-repo"}],
+    }
+
+    outer_transaction = await db.begin_nested()
+
+    result = await router._handle_installation_repositories(payload, db)
+
+    assert result == {"ok": True, "action": "added"}
+
+    repo = await db.scalar(
+        select(AccountRepo).where(
+            AccountRepo.account_id == account_id,
+            AccountRepo.repo_name == "transaction-repo",
+        )
+    )
+    assert repo is not None
+
+    await outer_transaction.rollback()
+    await db.rollback()
+
+    repo = await db.scalar(
+        select(AccountRepo).where(
+            AccountRepo.account_id == account_id,
+            AccountRepo.repo_name == "transaction-repo",
+        )
+    )
+    assert repo is None
+
+
+@pytest.mark.asyncio
+async def test_installation_creation_preserves_external_transaction(tmp_path):
+    database_path = tmp_path / "external-transaction.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path}",
+    )
+
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    payload = {
+        "action": "created",
+        "installation": {
+            "id": 38888,
+            "account": {
+                "id": 37777,
+                "login": "externaltransactionorg",
+                "type": "Organization",
+            },
+        },
+        "repositories": [{"name": "external-transaction-repo"}],
+    }
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+        async with engine.connect() as connection:
+            outer_transaction = await connection.begin()
+
+            async with AsyncSession(
+                bind=connection,
+                expire_on_commit=False,
+                join_transaction_mode="create_savepoint",
+            ) as session:
+                await session.execute(select(1))
+
+                assert session.in_transaction()
+                assert outer_transaction.is_active
+
+                result = await router._handle_installation(payload, session)
+
+                assert result == {"ok": True, "action": "created"}
+                assert outer_transaction.is_active
+
+                account = await session.scalar(
+                    select(Account).where(
+                        Account.github_installation_id == 38888
+                    )
+                )
+                assert account is not None
+
+                repo = await session.scalar(
+                    select(AccountRepo).where(
+                        AccountRepo.account_id == account.id,
+                        AccountRepo.repo_name == "external-transaction-repo",
+                    )
+                )
+                assert repo is not None
+
+            assert outer_transaction.is_active
+
+            await outer_transaction.rollback()
+
+        async with AsyncSession(engine) as verification_session:
+            account = await verification_session.scalar(
+                select(Account).where(
+                    Account.github_installation_id == 38888
+                )
+            )
+
+            assert account is None
+
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_installation_creation_rejects_invalid_payload(db):
+    router = WebhookRouter(MagicMock(), MagicMock())
+
+    payload = {
+        "action": "created",
+        "installation": {
+            "id": 48888,
+            "account": {
+                "id": 47777,
+                "login": "invalidorg",
+                "type": "Organization",
+            },
+        },
+        "repositories": [{"name": ""}],
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router._handle_installation(payload, db)
+
+    assert exc_info.value.status_code == 400
+    assert "repository name is empty or too long" in exc_info.value.detail
