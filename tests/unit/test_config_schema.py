@@ -211,20 +211,20 @@ def test_invalid_ai_focus_area():
         )
 
 
-def test_stale_order_validator():
-    """close_stale_after_days must be less than stale_issue_days."""
-    with pytest.raises(ValidationError, match="close_stale_after_days"):
-        RepoConfig.model_validate(
-            {
-                "repo": "hiero/x",
-                "workflows": {
-                    "issue_management": {
-                        "stale_issue_days": 7,
-                        "close_stale_after_days": 60,
-                    }
-                },
-            }
-        )
+def test_close_stale_period_can_exceed_stale_threshold():
+    """The close period is additional time after an issue becomes stale."""
+    cfg = RepoConfig.model_validate(
+        {
+            "repo": "hiero/x",
+            "workflows": {
+                "issue_management": {
+                    "stale_issue_days": 7,
+                    "close_stale_after_days": 60,
+                }
+            },
+        }
+    )
+    assert cfg.workflows.issue_management.close_stale_after_days == 60
 
 
 def test_mentor_strategy_validated():
@@ -526,6 +526,9 @@ def test_every_schema_field_has_a_runtime_reader():
     schema_paths = collect_field_paths(RepoConfig)
 
     indirect_reader_contracts = {
+        "workflows.issue_management.close_stale_after_days": [
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.close_stale_after_days"),
+        ],
         "workflows.issue_management.exempt_labels": [
             ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.exempt_labels"),
         ],

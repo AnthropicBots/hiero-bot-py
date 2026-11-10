@@ -93,19 +93,19 @@ def test_out_of_range_values_are_rejected(workflows):
         )
 
 
-def test_contradictory_stale_windows_are_rejected():
-    with pytest.raises(ValidationError):
-        RepoConfig.model_validate(
-            {
-                "repo": "hiero/sdk-js",
-                "workflows": {
-                    "issue_management": {
-                        "stale_issue_days": 5,
-                        "close_stale_after_days": 10,
-                    }
-                },
-            }
-        )
+def test_close_period_can_exceed_stale_threshold():
+    cfg = RepoConfig.model_validate(
+        {
+            "repo": "hiero/sdk-js",
+            "workflows": {
+                "issue_management": {
+                    "stale_issue_days": 5,
+                    "close_stale_after_days": 10,
+                }
+            },
+        }
+    )
+    assert cfg.workflows.issue_management.close_stale_after_days == 10
 
 
 def test_unknown_focus_area_is_rejected():
