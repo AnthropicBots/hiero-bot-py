@@ -36,6 +36,36 @@ async def test_marks_stale_after_cutoff(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
+async def test_marks_stale_with_github_zulu_timestamp(mock_gh, ctx):
+    issue = make_issue()
+    issue["updated_at"] = "2024-01-01T00:00:00Z"
+    now = datetime(2024, 3, 6, tzinfo=UTC)
+
+    mock_gh.list_issues = AsyncMock(return_value=[issue])
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=now)
+
+    assert counts["errors"] == 0
+    assert counts["stale_marked"] == 1
+    mock_gh.add_label.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_marks_stale_with_naive_timestamp(mock_gh, ctx):
+    issue = make_issue()
+    issue["updated_at"] = "2024-01-01T00:00:00"
+    now = datetime(2024, 3, 6, tzinfo=UTC)
+
+    mock_gh.list_issues = AsyncMock(return_value=[issue])
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=now)
+
+    assert counts["errors"] == 0
+    assert counts["stale_marked"] == 1
+    mock_gh.add_label.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_closes_a_stale_issue_after_the_close_period(mock_gh, ctx):
     mock_gh.list_issues = AsyncMock(return_value=[
         make_issue(updated_days_ago=68, labels=["stale"])
