@@ -91,6 +91,8 @@ class IssueManagementWorkflow:
             return
 
         updated = datetime.fromisoformat(issue["updated_at"])
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=UTC)
         is_stale = cfg.stale_label.casefold() in labels
 
         days_inactive = (now - updated).days
