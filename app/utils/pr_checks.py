@@ -22,6 +22,19 @@ SIGNED_OFF_RE = re.compile(
     r"^Signed-off-by:\s+\S.*<[^<>\s]+@[^<>\s]+>\s*$", re.IGNORECASE | re.MULTILINE
 )
 
+# Linked-issue keywords GitHub closes on. Owner/repo parts are bounded to
+# GitHub limits (39/100) so a crafted body cannot force backtracking.
+LINKED_ISSUE_RE = re.compile(
+    r"\b(?:clos(?:e|es|ed|ing)?|fix(?:es|ed)?|resolv(?:e|es|ed|ing)?)"
+    r"\s*:?\s+(?:[A-Za-z0-9_.\-]{1,39}/[A-Za-z0-9_.\-]{1,100})?#\d+",
+    re.IGNORECASE,
+)
+
+
+def has_linked_issue(body: str) -> bool:
+    """True when the PR body contains a closing keyword with an issue number."""
+    return bool(LINKED_ISSUE_RE.search(body or ""))
+
 
 def is_test_file(filename: str) -> bool:
     """True if `filename` (a repo-relative path) looks like a test file."""
