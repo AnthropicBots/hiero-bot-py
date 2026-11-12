@@ -274,7 +274,12 @@ class PullRequestWorkflow:
         if gates.require_changelog_entry:
             files = await get_files()
             has_cl = any(
-                re.search(r"(?:^|/)(CHANGELOG|CHANGES|HISTORY)", f["filename"], re.IGNORECASE)
+                re.search(
+                    r"(?:^|/)(?:CHANGELOG|CHANGES|HISTORY)(?:\.(?:md|rst|txt))?$"
+                    r"|(?:^|/)(?:CHANGELOG|CHANGES|HISTORY)/.+$",
+                    f["filename"],
+                    re.IGNORECASE,
+                )
                 for f in files
             )
             checks.append(
