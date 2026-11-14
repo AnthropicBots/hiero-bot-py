@@ -32,8 +32,11 @@ from app.db.models import Account, AccountRepo, AccountUser
 
 @router.get("/login")
 async def github_oauth_login(request: Request, db: AsyncSession = Depends(get_db)):
-    # Local dev fallback when client_id is not configured or set to mock in non-production
-    if not settings.is_production and (not settings.github_oauth_client_id or "mock" in settings.github_oauth_client_id):
+    # Local dev fallback, explicitly opted in. Never active on staging or
+    # preview unless the operator sets ALLOW_DEV_LOGIN=true.
+    if settings.allow_dev_login and settings.environment == "development" and (
+        not settings.github_oauth_client_id or "mock" in settings.github_oauth_client_id
+    ):
         log.info("Mock or unconfigured OAuth client ID detected — initiating local dev login...")
         
         # Upsert dev user
