@@ -9,7 +9,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.models import AuditLog
 from app.github.client import GitHubClient
@@ -301,7 +301,7 @@ class OnboardingWorkflow:
                 .where(
                     AuditLog.owner == ctx["owner"],
                     AuditLog.repo == ctx["repo"],
-                    AuditLog.target_login == login,
+                    func.lower(AuditLog.target_login) == login.lower(),
                     AuditLog.action == "contributor.welcomed",
                 )
                 .limit(1)
