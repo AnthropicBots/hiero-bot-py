@@ -18,6 +18,8 @@ MATCH_TIMEOUT_SECONDS = 0.05
 
 def validate_pattern(pattern: str) -> str:
     """Return ``pattern`` if it is usable, otherwise raise ``ValueError``."""
+    if not pattern.strip():
+        raise ValueError("pattern must not be empty")
     if len(pattern) > MAX_PATTERN_LENGTH:
         raise ValueError(f"pattern is longer than {MAX_PATTERN_LENGTH} characters")
     try:
