@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,3 +28,14 @@ async def is_replay(db: AsyncSession, delivery_id: str) -> bool:
     # on PostgreSQL and the delivery id is never recorded, so replays pass.
     await db.commit()
     return False
+
+
+async def release_delivery(db: AsyncSession, delivery_id: str) -> None:
+    """Release a delivery claim so a retryable webhook can be processed again."""
+    if not delivery_id:
+        return
+
+    await db.execute(
+        delete(WebhookDelivery).where(WebhookDelivery.id == delivery_id)
+    )
+    await db.commit()
