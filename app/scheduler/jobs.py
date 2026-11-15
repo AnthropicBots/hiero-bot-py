@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import delete
 
 from app.auth.session import purge_expired_sessions
 from app.config.loader import ConfigLoader
 from app.db.database import AsyncSessionLocal
+from app.db.models import WebhookDelivery
 from app.github.client import GitHubClient
 from app.utils.logger import get_logger
 from app.workflows.issuemanagement import IssueManagementWorkflow
@@ -84,6 +87,15 @@ class BotScheduler:
             CronTrigger(hour=3, minute=0, timezone="UTC"),
             id="session_gc",
             name="Daily expired session garbage collection",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        self._scheduler.add_job(
+            self.run_webhook_delivery_gc,
+            CronTrigger(hour=4, minute=0, timezone="UTC"),
+            id="webhook_delivery_gc",
+            name="Daily webhook delivery cleanup",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -182,3 +194,15 @@ class BotScheduler:
             purged = await purge_expired_sessions(db)
             log.info("Session GC completed: purged %d expired session(s)", purged)
             return purged
+
+    async def run_webhook_delivery_gc(self) -> int:
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                delete(WebhookDelivery).where(WebhookDelivery.received_at < cutoff)
+            )
+            await db.commit()
+
+        purged = result.rowcount or 0
+        log.info("Webhook delivery cleanup removed %d record(s)", purged)
+        return purged

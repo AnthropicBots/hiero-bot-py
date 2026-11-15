@@ -1,9 +1,12 @@
 # tests/unit/test_scheduler.py — scheduled stale scan
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
+from app.db.models import WebhookDelivery
 from app.scheduler.jobs import BotScheduler, ScanSummary
 
 
@@ -176,7 +179,7 @@ def test_start_registers_scheduler_jobs():
     ):
         scheduler.start()
 
-    assert mock_add_job.call_count == 3
+    assert mock_add_job.call_count == 4
     mock_start.assert_called_once()
 
     stale_job = mock_add_job.call_args_list[0].kwargs
@@ -213,6 +216,40 @@ def test_start_registers_scheduler_jobs():
     assert stale_fields["hour"].expressions[0].first == 2
     assert stale_fields["minute"].expressions[0].first == 0
     assert str(stale_trigger.timezone) == "UTC"
+
+    delivery_gc_call = mock_add_job.call_args_list[3]
+    assert delivery_gc_call.kwargs["id"] == "webhook_delivery_gc"
+    assert delivery_gc_call.kwargs["coalesce"] is True
+    assert delivery_gc_call.kwargs["max_instances"] == 1
+    assert delivery_gc_call.args[0] == scheduler.run_webhook_delivery_gc
+    delivery_trigger = delivery_gc_call.args[1]
+    assert str(delivery_trigger) == "cron[hour='4', minute='0']"
+    assert str(delivery_trigger.timezone) == "UTC"
+
+
+async def test_webhook_delivery_gc_removes_only_expired_records(db):
+    scheduler = BotScheduler(AsyncMock(), make_loader(None))
+    now = datetime(2026, 1, 20, tzinfo=UTC)
+    cutoff = now - timedelta(days=7)
+    db.add_all(
+        [
+            WebhookDelivery(id="expired", received_at=cutoff - timedelta(microseconds=1)),
+            WebhookDelivery(id="boundary", received_at=cutoff),
+            WebhookDelivery(id="recent", event="issues", received_at=now),
+        ]
+    )
+    await db.commit()
+
+    with (
+        patch("app.scheduler.jobs.AsyncSessionLocal", return_value=db),
+        patch("app.scheduler.jobs.datetime") as clock,
+    ):
+        clock.now.return_value = now
+        assert await scheduler.run_webhook_delivery_gc() == 1
+        assert await scheduler.run_webhook_delivery_gc() == 0
+
+    remaining = await db.scalars(select(WebhookDelivery.id))
+    assert set(remaining) == {"boundary", "recent"}
 
 
 def test_summary_reports_errors():

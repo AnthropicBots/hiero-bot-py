@@ -159,6 +159,7 @@ class WebhookDelivery(Base):
     __tablename__ = "webhook_deliveries"
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event: Mapped[str | None] = mapped_column(Text)
     received_at: Mapped[datetime] = mapped_column(
         UTCDateTime,
         default=lambda: datetime.now(UTC),
