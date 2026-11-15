@@ -269,7 +269,7 @@ class WebhookRouter:
     #  Slash commands
 
     async def _handle_slash_command(self, body: str, payload: dict, ctx: dict) -> None:
-        parts = body.strip().split()
+        parts = body.strip().split(maxsplit=1)
         command = parts[0].lower()
         issue_number = (payload.get("issue") or {}).get("number")
         commenter = (payload.get("comment") or {}).get("user", {}).get("login")
@@ -314,7 +314,7 @@ class WebhookRouter:
                 )
 
         elif command == "/label":
-            raw_args = body.strip()[len(parts[0]):].strip()
+            raw_args = parts[1].strip() if len(parts) > 1 else ""
             if raw_args:
                 await self._handle_label_command(raw_args, payload, ctx)
 

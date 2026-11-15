@@ -80,6 +80,21 @@ def _normalize_private_key(raw: str) -> str:
     )
 
 
+def _is_label_already_exists(exc: httpx.HTTPStatusError) -> bool:
+    """Return whether GitHub rejected label creation because it already exists."""
+    if exc.response.status_code != 422:
+        return False
+    try:
+        payload = exc.response.json()
+    except (ValueError, TypeError):
+        return False
+    errors = payload.get("errors", []) if isinstance(payload, dict) else []
+    return any(
+        isinstance(error, dict) and error.get("code") == "already_exists"
+        for error in errors
+    )
+
+
 class GitHubClient:
     """Async GitHub App client. Generates installation tokens on demand."""
 
@@ -173,9 +188,14 @@ class GitHubClient:
         installation_id: int,
         **kwargs: Any,
     ) -> Any:
+        method = method.upper()
         headers = await self._inst_headers(installation_id)
         max_retries = 3
+        max_total_wait = 30.0
+        total_wait = 0.0
         backoff = 1.0
+        token_refresh_attempted = False
+        retryable_method = method in {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
 
         for attempt in range(max_retries + 1):
             try:
@@ -185,16 +205,47 @@ class GitHubClient:
                         "Not found", request=resp.request, response=resp
                     )
 
-                # Retry on rate limiting (429) or transient gateway errors (502, 503, 504)
-                if resp.status_code in (429, 502, 503, 504) and attempt < max_retries:
-                    retry_after = resp.headers.get("Retry-After")
-                    sleep_time = float(retry_after) if retry_after else backoff
+                if resp.status_code == 401 and not token_refresh_attempted:
+                    self._installation_tokens.pop(installation_id, None)
+                    headers = await self._inst_headers(installation_id)
+                    token_refresh_attempted = True
+                    continue
+
+                response_text = resp.text.lower()
+                secondary_limit = (
+                    "secondary rate limit" in response_text
+                    or "secondary-rate-limit" in response_text
+                )
+                retry_after = resp.headers.get("Retry-After")
+                should_retry_rate_limit = resp.status_code == 429 or (
+                    resp.status_code == 403
+                    and (retry_after is not None or secondary_limit)
+                )
+                should_retry_gateway = resp.status_code in (502, 503, 504)
+
+                retryable_response = should_retry_rate_limit or (
+                    retryable_method and should_retry_gateway
+                )
+                if (
+                    attempt < max_retries
+                    and retryable_response
+                    and total_wait < max_total_wait
+                ):
+                    try:
+                        requested_wait = float(retry_after) if retry_after else backoff
+                    except (TypeError, ValueError):
+                        requested_wait = backoff
+                    sleep_time = min(
+                        max(0.0, requested_wait), max_total_wait - total_wait
+                    )
                     log.warning(
-                        "GitHub API %s %s returned status %d. Retrying in %.1fs (attempt %d/%d)",
+                        "GitHub API %s %s returned status %d. Retrying in %.1fs "
+                        "(attempt %d/%d)",
                         method, path, resp.status_code, sleep_time, attempt + 1, max_retries,
                     )
                     await asyncio.sleep(sleep_time)
-                    backoff *= 2.0
+                    total_wait += sleep_time
+                    backoff = min(backoff * 2.0, max_total_wait)
                     continue
 
                 resp.raise_for_status()
@@ -202,16 +253,36 @@ class GitHubClient:
                     return resp.json()
                 return {}
 
+            except httpx.ReadTimeout:
+                # A POST may already have been processed; replaying it risks duplicates.
+                if (
+                    not retryable_method
+                    or attempt >= max_retries
+                    or total_wait >= max_total_wait
+                ):
+                    raise
+                sleep_time = min(backoff, max_total_wait - total_wait)
+                await asyncio.sleep(sleep_time)
+                total_wait += sleep_time
+                backoff = min(backoff * 2.0, max_total_wait)
+                continue
+
             except httpx.RequestError as exc:
-                if attempt < max_retries:
-                    log.warning(
-                        "GitHub API request network error on %s %s: %s. Retrying in %.1fs...",
-                        method, path, exc, backoff,
-                    )
-                    await asyncio.sleep(backoff)
-                    backoff *= 2.0
-                    continue
-                raise
+                if (
+                    not retryable_method
+                    or attempt >= max_retries
+                    or total_wait >= max_total_wait
+                ):
+                    raise
+                sleep_time = min(backoff, max_total_wait - total_wait)
+                log.warning(
+                    "GitHub API request network error on %s %s: %s. Retrying in %.1fs...",
+                    method, path, exc, sleep_time,
+                )
+                await asyncio.sleep(sleep_time)
+                total_wait += sleep_time
+                backoff = min(backoff * 2.0, max_total_wait)
+                continue
 
     async def get(self, path: str, installation_id: int, **kwargs: Any) -> Any:
         return await self.request("GET", path, installation_id, **kwargs)
@@ -516,11 +587,15 @@ class GitHubClient:
                 )
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 404:
-                    await self.post(
-                        f"/repos/{owner}/{repo}/labels",
-                        installation_id,
-                        json={"name": label, "color": "ededed"},
-                    )
+                    try:
+                        await self.post(
+                            f"/repos/{owner}/{repo}/labels",
+                            installation_id,
+                            json={"name": label, "color": "ededed"},
+                        )
+                    except httpx.HTTPStatusError as create_exc:
+                        if not _is_label_already_exists(create_exc):
+                            raise
                 else:
                     raise
         await self.post(
@@ -535,7 +610,8 @@ class GitHubClient:
         """Remove a label from an issue/PR, tolerating it already being absent."""
         try:
             await self.delete(
-                f"/repos/{owner}/{repo}/issues/{number}/labels/{label}",
+                f"/repos/{owner}/{repo}/issues/{number}/labels/"
+                f"{urllib.parse.quote(label, safe='')}",
                 installation_id,
             )
         except httpx.HTTPStatusError:

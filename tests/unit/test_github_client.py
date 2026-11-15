@@ -737,7 +737,7 @@ async def test_remove_label_deletes_the_issue_label():
         )
 
     mock_delete.assert_awaited_once_with(
-        "/repos/hiero/sdk-js/issues/7/labels/health: 🔧 needs work",
+        "/repos/hiero/sdk-js/issues/7/labels/health%3A%20%F0%9F%94%A7%20needs%20work",
         123,
     )
 
@@ -888,4 +888,202 @@ async def test_add_label_create_if_missing_false_never_creates():
         json={"labels": ["action: merge"]},
     )
 
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_label_url_encodes_slashes():
+    client = GitHubClient()
+    with patch.object(client, "delete", new=AsyncMock(return_value={})) as mock_delete:
+        await client.remove_label("hiero", "sdk-js", 7, "kind/bug", 123)
+    mock_delete.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/issues/7/labels/kind%2Fbug", 123
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_add_label_treats_already_exists_as_success():
+    client = GitHubClient()
+    exists_error = httpx.HTTPStatusError(
+        "Unprocessable Entity",
+        request=Mock(),
+        response=httpx.Response(
+            422,
+            json={
+                "message": "Validation Failed",
+                "errors": [{"code": "already_exists"}],
+            },
+            request=httpx.Request(
+                "POST", "https://api.github.com/repos/hiero/sdk-js/labels"
+            ),
+        ),
+    )
+    with (
+        patch.object(
+            client,
+            "get",
+            new=AsyncMock(
+                side_effect=httpx.HTTPStatusError(
+                    "Not found", request=Mock(), response=Mock(status_code=404)
+                )
+            ),
+        ),
+        patch.object(
+            client, "post", new=AsyncMock(side_effect=[exists_error, {}])
+        ) as mock_post,
+    ):
+        await client.add_label("hiero", "sdk-js", 7, "kind/bug", 123)
+    assert mock_post.await_count == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_retries_secondary_rate_limit_403_with_bounded_wait():
+    client = GitHubClient()
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    responses = [
+        httpx.Response(
+            403,
+            headers={"Retry-After": "999"},
+            json={"message": "secondary rate limit"},
+            request=request,
+        ),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(return_value={"Authorization": "token"}),
+        ),
+        patch.object(client._http, "request", new=AsyncMock(side_effect=responses)),
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        result = await client.request("GET", "/repos/hiero/sdk-js", 123)
+    assert result == {"ok": True}
+    sleep.assert_awaited_once_with(30.0)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_does_not_retry_post_after_read_timeout():
+    client = GitHubClient()
+    request_error = httpx.ReadTimeout("timed out")
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(return_value={"Authorization": "token"}),
+        ),
+        patch.object(
+            client._http, "request", new=AsyncMock(side_effect=request_error)
+        ) as request,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(httpx.ReadTimeout),
+    ):
+        await client.request(
+            "POST",
+            "/repos/hiero/sdk-js/issues/1/comments",
+            123,
+            json={"body": "hello"},
+        )
+    request.assert_awaited_once()
+    sleep.assert_not_awaited()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_invalidates_revoked_installation_token_and_retries_once():
+    client = GitHubClient()
+    client._installation_tokens[123] = ("revoked-token", time.time() + 3600)
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    responses = [
+        httpx.Response(401, json={"message": "Bad credentials"}, request=request),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(
+                side_effect=[
+                    {"Authorization": "token revoked-token"},
+                    {"Authorization": "token refreshed"},
+                ]
+            ),
+        ) as headers,
+        patch.object(
+            client._http, "request", new=AsyncMock(side_effect=responses)
+        ) as request_mock,
+    ):
+        result = await client.request("GET", "/repos/hiero/sdk-js", 123)
+    assert result == {"ok": True}
+    assert 123 not in client._installation_tokens
+    assert headers.await_count == 2
+    assert request_mock.await_count == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_does_not_retry_post_after_server_error():
+    client = GitHubClient()
+    request = httpx.Request(
+        "POST", "https://api.github.com/repos/hiero/sdk-js/issues/1/labels"
+    )
+    response = httpx.Response(502, json={"message": "bad gateway"}, request=request)
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(return_value={"Authorization": "token"}),
+        ),
+        patch.object(client._http, "request", new=AsyncMock(return_value=response)) as request_mock,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await client.request(
+            "POST",
+            "/repos/hiero/sdk-js/issues/1/labels",
+            123,
+            json={"labels": ["bug"]},
+        )
+    request_mock.assert_awaited_once()
+    sleep.assert_not_awaited()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_retries_post_after_explicit_secondary_rate_limit():
+    client = GitHubClient()
+    request = httpx.Request(
+        "POST", "https://api.github.com/repos/hiero/sdk-js/issues/1/comments"
+    )
+    responses = [
+        httpx.Response(
+            403,
+            json={"message": "You have exceeded a secondary rate limit"},
+            request=request,
+        ),
+        httpx.Response(200, json={"id": 42}, request=request),
+    ]
+    with (
+        patch.object(
+            client, "_inst_headers",
+            new=AsyncMock(return_value={"Authorization": "token"}),
+        ),
+        patch.object(
+            client._http, "request", new=AsyncMock(side_effect=responses)
+        ) as request_mock,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        result = await client.request(
+            "POST",
+            "/repos/hiero/sdk-js/issues/1/comments",
+            123,
+            json={"body": "hello"},
+        )
+    assert result == {"id": 42}
+    assert request_mock.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
     await client.close()

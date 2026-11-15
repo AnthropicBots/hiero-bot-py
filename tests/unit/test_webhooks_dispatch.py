@@ -513,3 +513,22 @@ async def test_handle_installation_repositories_unknown_account_is_skipped(db):
         {"action": "added", "installation": {"id": 424242}, "repositories_added": []}, db
     )
     assert result == {"ok": True, "skipped": "account not found"}
+
+
+def test_parse_label_names_keeps_unquoted_multiword_label_together():
+    from app.github.webhooks import _parse_label_names
+
+    assert _parse_label_names("good first issue") == ["good first issue"]
+
+
+@pytest.mark.asyncio
+async def test_slash_label_passes_multiword_label_as_one_argument(ctx):
+    router, _gh, _ = make_router()
+    router._handle_label_command = AsyncMock()
+    payload = slash_payload("/label good first issue")
+
+    await router._handle_slash_command("/label good first issue", payload, ctx)
+
+    router._handle_label_command.assert_awaited_once_with(
+        "good first issue", payload, ctx
+    )
