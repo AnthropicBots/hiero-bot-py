@@ -109,7 +109,9 @@ async def test_health_comment_updated_when_pr_becomes_healthy(mock_gh, ctx):
 
     comments = _health_comments(thread)
     assert len(comments) == 1  # edited, not added
-    assert "now above" in comments[0]["body"]
+    assert "reached or exceeded" in comments[0]["body"]
+    assert "40/100" in comments[0]["body"]
+    assert "comment threshold" in comments[0]["body"]
 
 
 @pytest.mark.asyncio
