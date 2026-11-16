@@ -39,5 +39,16 @@ def test_validate_pattern_rejects_empty_patterns():
     with pytest.raises(ValueError, match="pattern must not be empty"):
         validate_pattern("")
 
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "   ",
+        "\t",
+        "\n",
+        " \t\n ",
+    ],
+)
+def test_validate_pattern_rejects_whitespace_only_patterns(pattern):
     with pytest.raises(ValueError, match="pattern must not be empty"):
-        validate_pattern("   ")
+        validate_pattern(pattern)
