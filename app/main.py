@@ -83,7 +83,15 @@ app.add_middleware(
 # Swagger UI and ReDoc load assets from a CDN and use inline scripts and
 # styles without nonces, so they need a looser policy than the rest of the
 # app. These pages are disabled in production (see docs_url/redoc_url above).
-DOCS_PATHS = ("/docs", "/redoc")
+DOCS_PATHS = tuple(
+    path
+    for path in (
+        app.docs_url,
+        app.redoc_url,
+        app.swagger_ui_oauth2_redirect_url,
+    )
+    if path is not None
+)
 DOCS_CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "

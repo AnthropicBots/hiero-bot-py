@@ -178,7 +178,15 @@ async def test_chartjs_script_tag_has_integrity_and_is_not_the_dynamic_min_build
     assert 'crossorigin="anonymous"' in tag
 
 
-DOCS_PATHS = ["/docs", "/redoc"]
+DOCS_PATHS = [
+    path
+    for path in (
+        app.docs_url,
+        app.redoc_url,
+        app.swagger_ui_oauth2_redirect_url,
+    )
+    if path is not None
+]
 
 
 def parse_directives(csp: str) -> dict[str, str]:
@@ -188,8 +196,14 @@ def parse_directives(csp: str) -> dict[str, str]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", DOCS_PATHS)
 async def test_docs_pages_get_the_relaxed_docs_csp(client, path):
-    r = await client.get(path)
-    directives = parse_directives(r.headers["content-security-policy"])
+    response = await client.get(path)
+
+    assert response.status_code == 200
+    assert "content-security-policy" in response.headers
+    assert response.text
+
+    directives = parse_directives(response.headers["content-security-policy"])
+
     assert "'unsafe-inline'" in directives["script-src"]
     assert "'unsafe-inline'" in directives["style-src"]
     assert "https://cdn.jsdelivr.net" in directives["style-src"]
@@ -226,3 +240,24 @@ async def test_other_pages_keep_the_strict_csp(client, path):
     assert "'unsafe-inline'" not in csp
     assert "worker-src" not in csp
     assert "'nonce-" in directives["script-src"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", DOCS_PATHS)
+async def test_docs_routes_keep_strict_csp_in_production(client, monkeypatch, path):
+    monkeypatch.setattr(
+        "app.main.settings.environment",
+        "production",
+    )
+
+    response = await client.get(path)
+
+    assert response.status_code == 200
+
+    csp = response.headers["content-security-policy"]
+    directives = parse_directives(csp)
+
+    assert "'unsafe-inline'" not in csp
+    assert "'nonce-" in directives["script-src"]
+    assert "'nonce-" in directives["style-src"]
+    assert "worker-src" not in directives
