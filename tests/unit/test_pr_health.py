@@ -105,7 +105,7 @@ async def test_no_comment_above_threshold(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
-async def test_needs_work_label_posts_comment_for_boundary_score(mock_gh, ctx):
+async def test_needs_work_label_without_comment_between_thresholds(mock_gh, ctx):
     """
     Boundary behavior after decoupling comment and label thresholds: a PR
     scoring between comment_threshold and label_healthy_above gets the
