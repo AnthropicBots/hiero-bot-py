@@ -5,6 +5,7 @@ import asyncio
 import time
 import urllib.parse
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -181,6 +182,50 @@ class GitHubClient:
 
     # Raw request
 
+    @staticmethod
+    def _token_from_headers(headers: dict[str, str]) -> str | None:
+        _, separator, token = headers.get("Authorization", "").partition(" ")
+        return token if separator and token else None
+
+    @staticmethod
+    def _rate_limit_wait(
+        resp: httpx.Response, *, secondary_limit: bool
+    ) -> float | None:
+        waits = []
+
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                waits.append(max(0.0, float(retry_after)))
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(retry_after).timestamp()
+                    waits.append(max(0.0, retry_at - time.time()))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+        reset = resp.headers.get("X-RateLimit-Reset")
+        reset_wait = None
+        if reset:
+            try:
+                reset_wait = max(0.0, float(reset) - time.time())
+                if resp.headers.get("X-RateLimit-Remaining") == "0":
+                    waits.append(reset_wait)
+            except ValueError:
+                pass
+
+        if secondary_limit:
+            # GitHub requires at least one minute for secondary limits
+            # when Retry-After is absent.
+            waits.append(60.0)
+            if reset_wait is not None:
+                waits.append(reset_wait)
+
+        if resp.status_code == 429 and not waits:
+            waits.append(60.0)
+
+        return max(waits) if waits else None
+
     async def request(
         self,
         method: str,
@@ -191,13 +236,13 @@ class GitHubClient:
         method = method.upper()
         headers = await self._inst_headers(installation_id)
         max_retries = 3
-        max_total_wait = 30.0
-        total_wait = 0.0
         backoff = 1.0
         token_refresh_attempted = False
         retryable_method = method in {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
 
-        for attempt in range(max_retries + 1):
+        # One extra iteration guarantees a request with a refreshed token,
+        # even if the 401 arrives on the final normal retry.
+        for attempt in range(max_retries + 2):
             try:
                 resp = await self._http.request(method, path, headers=headers, **kwargs)
                 if resp.status_code == 404:
@@ -206,7 +251,15 @@ class GitHubClient:
                     )
 
                 if resp.status_code == 401 and not token_refresh_attempted:
-                    self._installation_tokens.pop(installation_id, None)
+                    failed_token = self._token_from_headers(headers)
+                    cached_token = self._installation_tokens.get(
+                        installation_id, ("", 0.0)
+                    )[0]
+
+                    # Never remove a token refreshed by another concurrent request.
+                    if failed_token and cached_token == failed_token:
+                        self._installation_tokens.pop(installation_id, None)
+
                     headers = await self._inst_headers(installation_id)
                     token_refresh_attempted = True
                     continue
@@ -216,36 +269,39 @@ class GitHubClient:
                     "secondary rate limit" in response_text
                     or "secondary-rate-limit" in response_text
                 )
-                retry_after = resp.headers.get("Retry-After")
-                should_retry_rate_limit = resp.status_code == 429 or (
-                    resp.status_code == 403
-                    and (retry_after is not None or secondary_limit)
-                )
-                should_retry_gateway = resp.status_code in (502, 503, 504)
-
-                retryable_response = should_retry_rate_limit or (
-                    retryable_method and should_retry_gateway
-                )
-                if (
-                    attempt < max_retries
-                    and retryable_response
-                    and total_wait < max_total_wait
-                ):
-                    try:
-                        requested_wait = float(retry_after) if retry_after else backoff
-                    except (TypeError, ValueError):
-                        requested_wait = backoff
-                    sleep_time = min(
-                        max(0.0, requested_wait), max_total_wait - total_wait
+                rate_limited = (
+                    resp.status_code == 429
+                    or (
+                        resp.status_code == 403
+                        and (
+                            "Retry-After" in resp.headers
+                            or secondary_limit
+                            or resp.headers.get("X-RateLimit-Remaining") == "0"
+                        )
                     )
+                )
+                gateway_error = resp.status_code in (502, 503, 504)
+                retryable_response = rate_limited or (
+                    retryable_method and gateway_error
+                )
+
+                if attempt < max_retries and retryable_response:
+                    if rate_limited:
+                        wait = self._rate_limit_wait(
+                            resp, secondary_limit=secondary_limit
+                        )
+                        sleep_time = wait if wait is not None else backoff
+                    else:
+                        sleep_time = backoff
+
                     log.warning(
                         "GitHub API %s %s returned status %d. Retrying in %.1fs "
                         "(attempt %d/%d)",
-                        method, path, resp.status_code, sleep_time, attempt + 1, max_retries,
+                        method, path, resp.status_code, sleep_time,
+                        attempt + 1, max_retries,
                     )
                     await asyncio.sleep(sleep_time)
-                    total_wait += sleep_time
-                    backoff = min(backoff * 2.0, max_total_wait)
+                    backoff = min(backoff * 2.0, 30.0)
                     continue
 
                 resp.raise_for_status()
@@ -254,35 +310,20 @@ class GitHubClient:
                 return {}
 
             except httpx.ReadTimeout:
-                # A POST may already have been processed; replaying it risks duplicates.
-                if (
-                    not retryable_method
-                    or attempt >= max_retries
-                    or total_wait >= max_total_wait
-                ):
+                if not retryable_method or attempt >= max_retries:
                     raise
-                sleep_time = min(backoff, max_total_wait - total_wait)
-                await asyncio.sleep(sleep_time)
-                total_wait += sleep_time
-                backoff = min(backoff * 2.0, max_total_wait)
-                continue
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
 
             except httpx.RequestError as exc:
-                if (
-                    not retryable_method
-                    or attempt >= max_retries
-                    or total_wait >= max_total_wait
-                ):
+                if not retryable_method or attempt >= max_retries:
                     raise
-                sleep_time = min(backoff, max_total_wait - total_wait)
                 log.warning(
                     "GitHub API request network error on %s %s: %s. Retrying in %.1fs...",
-                    method, path, exc, sleep_time,
+                    method, path, exc, backoff,
                 )
-                await asyncio.sleep(sleep_time)
-                total_wait += sleep_time
-                backoff = min(backoff * 2.0, max_total_wait)
-                continue
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
 
     async def get(self, path: str, installation_id: int, **kwargs: Any) -> Any:
         return await self.request("GET", path, installation_id, **kwargs)

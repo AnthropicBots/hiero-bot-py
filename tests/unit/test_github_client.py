@@ -939,7 +939,7 @@ async def test_add_label_treats_already_exists_as_success():
 
 
 @pytest.mark.asyncio
-async def test_request_retries_secondary_rate_limit_403_with_bounded_wait():
+async def test_request_respects_retry_after_without_capping_wait():
     client = GitHubClient()
     request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
     responses = [
@@ -962,7 +962,7 @@ async def test_request_retries_secondary_rate_limit_403_with_bounded_wait():
     ):
         result = await client.request("GET", "/repos/hiero/sdk-js", 123)
     assert result == {"ok": True}
-    sleep.assert_awaited_once_with(30.0)
+    sleep.assert_awaited_once_with(999.0)
     await client.close()
 
 
@@ -1085,5 +1085,161 @@ async def test_request_retries_post_after_explicit_secondary_rate_limit():
         )
     assert result == {"id": 42}
     assert request_mock.await_count == 2
-    sleep.assert_awaited_once_with(1.0)
+    sleep.assert_awaited_once_with(60.0)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_secondary_rate_limit_without_retry_after_waits_at_least_one_minute():
+    client = GitHubClient()
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    responses = [
+        httpx.Response(
+            403, json={"message": "secondary rate limit"}, request=request
+        ),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+    with (
+        patch.object(client, "_inst_headers",
+                     new=AsyncMock(return_value={"Authorization": "Bearer token"})),
+        patch.object(client._http, "request",
+                     new=AsyncMock(side_effect=responses)),
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        result = await client.request("GET", "/repos/hiero/sdk-js", 123)
+    assert result == {"ok": True}
+    sleep.assert_awaited_once_with(60.0)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_primary_rate_limit_waits_until_reset():
+    client = GitHubClient()
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    reset_at = time.time() + 120
+    responses = [
+        httpx.Response(
+            403,
+            headers={
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(reset_at),
+            },
+            json={"message": "API rate limit exceeded"},
+            request=request,
+        ),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+    with (
+        patch.object(client, "_inst_headers",
+                     new=AsyncMock(return_value={"Authorization": "Bearer token"})),
+        patch.object(client._http, "request",
+                     new=AsyncMock(side_effect=responses)),
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        patch("app.github.client.time.time", return_value=reset_at - 120),
+    ):
+        result = await client.request("GET", "/repos/hiero/sdk-js", 123)
+    assert result == {"ok": True}
+    sleep.assert_awaited_once_with(pytest.approx(120.0))
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_401_on_last_retry_still_sends_request_with_refreshed_token():
+    client = GitHubClient()
+    client._installation_tokens[123] = ("old-token", time.time() + 3600)
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    responses = [
+        httpx.Response(503, request=request),
+        httpx.Response(503, request=request),
+        httpx.Response(503, request=request),
+        httpx.Response(401, json={"message": "Bad credentials"}, request=request),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+    with (
+        patch.object(client, "_inst_headers", new=AsyncMock(side_effect=[
+            {"Authorization": "Bearer old-token"},
+            {"Authorization": "Bearer new-token"},
+        ])),
+        patch.object(client._http, "request",
+                     new=AsyncMock(side_effect=responses)) as api_request,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()),
+    ):
+        result = await client.request("GET", "/repos/hiero/sdk-js", 123)
+    assert result == {"ok": True}
+    assert api_request.await_count == 5
+    assert api_request.await_args_list[-1].kwargs["headers"] == {
+        "Authorization": "Bearer new-token"
+    }
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_401_does_not_remove_a_newer_concurrently_refreshed_token():
+    client = GitHubClient()
+    client._installation_tokens[123] = ("new-token", time.time() + 3600)
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    responses = [
+        httpx.Response(401, json={"message": "Bad credentials"}, request=request),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+    with (
+        patch.object(client, "_inst_headers", new=AsyncMock(side_effect=[
+            {"Authorization": "Bearer old-token"},
+            {"Authorization": "Bearer new-token"},
+        ])),
+        patch.object(client._http, "request",
+                     new=AsyncMock(side_effect=responses)),
+    ):
+        result = await client.request("GET", "/repos/hiero/sdk-js", 123)
+    assert result == {"ok": True}
+    assert client._installation_tokens[123][0] == "new-token"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_401_refresh_fetches_and_reuses_real_installation_token_cache():
+    client = GitHubClient()
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    token_request = httpx.Request(
+        "POST", "https://api.github.com/app/installations/123/access_tokens"
+    )
+    token_response = httpx.Response(
+        201,
+        json={
+            "token": "fresh-installation-token",
+            "expires_at": "2030-01-01T00:00:00Z",
+        },
+        request=token_request,
+    )
+    api_responses = [
+        httpx.Response(401, json={"message": "Bad credentials"}, request=request),
+        httpx.Response(200, json={"ok": True}, request=request),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+    with (
+        patch.object(client, "_make_jwt", return_value="test-app-jwt"),
+        patch.object(client._http, "post",
+                     new=AsyncMock(return_value=token_response)) as token_post,
+        patch.object(client._http, "request",
+                     new=AsyncMock(side_effect=api_responses)) as api_request,
+    ):
+        client._installation_tokens[123] = (
+            "revoked-token", time.time() + 3600
+        )
+        first = await client.request("GET", "/repos/hiero/sdk-js", 123)
+        second = await client.request("GET", "/repos/hiero/sdk-js", 123)
+
+    assert first == {"ok": True}
+    assert second == {"ok": True}
+    token_post.assert_awaited_once_with(
+        "/app/installations/123/access_tokens",
+        headers={"Authorization": "Bearer test-app-jwt"},
+    )
+    assert client._installation_tokens[123][0] == "fresh-installation-token"
+    assert api_request.await_args_list[1].kwargs["headers"] == {
+        "Authorization": "Bearer fresh-installation-token"
+    }
+    assert api_request.await_args_list[2].kwargs["headers"] == {
+        "Authorization": "Bearer fresh-installation-token"
+    }
     await client.close()
