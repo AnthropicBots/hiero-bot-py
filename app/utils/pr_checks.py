@@ -22,11 +22,12 @@ SIGNED_OFF_RE = re.compile(
     r"^Signed-off-by:\s+\S.*<[^<>\s]+@[^<>\s]+>\s*$", re.IGNORECASE | re.MULTILINE
 )
 
-# Linked-issue keywords GitHub closes on. Owner/repo parts are bounded to
-# GitHub limits (39/100) so a crafted body cannot force backtracking.
+# Supported GitHub closing references:
+# Resolve #123, Resolves #123, Fix #123, Fixes: #123,
+# Closes #123, and Close #123.
 LINKED_ISSUE_RE = re.compile(
-    r"\b(?:clos(?:e|es|ed|ing)?|fix(?:es|ed)?|resolv(?:e|es|ed|ing)?)"
-    r"\s*:?\s+(?:[A-Za-z0-9_.\-]{1,39}/[A-Za-z0-9_.\-]{1,100})?#\d+",
+    r"\b(?:resolve|resolves|fix|close|closes)\s+#\d+"
+    r"|\bfixes:\s+#\d+",
     re.IGNORECASE,
 )
 

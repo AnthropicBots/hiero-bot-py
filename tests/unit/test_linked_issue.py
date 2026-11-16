@@ -1,15 +1,38 @@
+import pytest
+
 from app.utils.pr_checks import has_linked_issue
 
 
-def test_closes_variants_match():
-    assert has_linked_issue("Closes #12")
-    assert has_linked_issue("Fixed #34")
-    assert has_linked_issue("Resolve: #7")
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "Resolve #123",
+        "Resolves #123",
+        "Fix #123",
+        "Fixes: #123",
+        "Closes #123",
+        "Close #123",
+    ],
+)
+def test_closes_variants_match(reference):
+    assert has_linked_issue(reference)
 
 
-def test_cross_repo_reference_matches():
-    assert has_linked_issue("Fixes owner/repo#45")
+@pytest.mark.parametrize(
+    "body",
+    [
+        "#123",
+        "See #123 for context",
+        "This PR mentions issue #123",
+        "Fixed #34",
+        "Resolve: #7",
+        "Fixes owner/repo#45",
+    ],
+)
+def test_unsupported_references_do_not_match(body):
+    assert not has_linked_issue(body)
 
 
-def test_bare_number_without_keyword_does_not_match():
-    assert not has_linked_issue("See #123 for context")
+def test_linked_issue_matching_is_case_insensitive():
+    assert has_linked_issue("RESOLVES #123")
+    assert has_linked_issue("fIxEs: #123")
