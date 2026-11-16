@@ -204,11 +204,26 @@ async def test_docs_pages_get_the_relaxed_docs_csp(client, path):
 
     directives = parse_directives(response.headers["content-security-policy"])
 
+    assert "'self'" in directives["script-src"]
     assert "'unsafe-inline'" in directives["script-src"]
+    assert "https://cdn.jsdelivr.net" in directives["script-src"]
+
+    assert "'self'" in directives["style-src"]
     assert "'unsafe-inline'" in directives["style-src"]
     assert "https://cdn.jsdelivr.net" in directives["style-src"]
+    assert "https://fonts.googleapis.com" in directives["style-src"]
+
+    assert "'self'" in directives["font-src"]
+    assert "https://fonts.gstatic.com" in directives["font-src"]
+
+    assert "'self'" in directives["img-src"]
+    assert "data:" in directives["img-src"]
     assert "https://fastapi.tiangolo.com" in directives["img-src"]
     assert "https://cdn.redoc.ly" in directives["img-src"]
+
+    assert "'self'" in directives["connect-src"]
+
+    assert "'self'" in directives["worker-src"]
     assert "blob:" in directives["worker-src"]
 
 
@@ -244,7 +259,9 @@ async def test_other_pages_keep_the_strict_csp(client, path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", DOCS_PATHS)
-async def test_docs_routes_keep_strict_csp_in_production(client, monkeypatch, path):
+async def test_docs_paths_get_strict_csp_when_environment_is_production(
+    client, monkeypatch, path
+):
     monkeypatch.setattr(
         "app.main.settings.environment",
         "production",
