@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 
 import httpx
@@ -15,7 +14,7 @@ from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.comments import find_bot_comment
 from app.utils.logger import get_logger
-from app.utils.pr_checks import commits_have_signoff, is_test_file
+from app.utils.pr_checks import commits_have_signoff, has_linked_issue, is_test_file
 
 log = get_logger("workflow.prhealth")
 
@@ -188,9 +187,7 @@ class PRHealthWorkflow:
 
         return {
             "has_tests": any(is_test_file(f["filename"]) for f in files),
-            "has_linked_issue": bool(
-                re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.IGNORECASE)
-            ),
+            "has_linked_issue": has_linked_issue(body),
             "has_description": len(body.strip()) >= 50,
             "dco_signed": dco_ok,
             "review_count": len(approvers),
