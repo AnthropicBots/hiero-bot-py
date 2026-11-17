@@ -402,14 +402,16 @@ def test_find_unknown_keys_is_empty_for_a_valid_config():
 
 @pytest.mark.parametrize("path", ["templates/hiero-bot.yml", ".github/hiero-bot.yml"])
 def test_shipped_configs_use_only_known_keys(path):
-    import pathlib
-
     import yaml
 
     root = pathlib.Path(__file__).resolve().parents[2]
     data = yaml.safe_load((root / path).read_text(encoding="utf-8"))
 
     assert find_unknown_keys(data, RepoConfig) == []
+
+    config = RepoConfig.model_validate(data)
+
+    assert config.workflows.reviewer_assignment.notify_comment == "off"
 
 
 def test_every_schema_field_has_a_runtime_reader():
