@@ -208,7 +208,9 @@ class PRHealthWorkflow:
         return min(max(score, 0), 100)
 
     @staticmethod
-    def _build_health_comment(score: float, signals: dict, comment_threshold: int) -> str:
+    def _build_health_comment(
+        score: float, signals: dict, comment_threshold: int
+    ) -> str:
         emoji = "🔴" if score < 50 else "🟡"
         rows = []
         labels = {
@@ -230,7 +232,7 @@ class PRHealthWorkflow:
         table = "\n".join(rows)
         return f"""## {emoji} PR Health Score: {score:.0f}/100
 
-This PR's health score is below the configured comment threshold of **{comment_threshold}/100**.
+This PR's health score is below the **{comment_threshold}/100** comment threshold.
 
 | Status | Signal |
 |--------|--------|

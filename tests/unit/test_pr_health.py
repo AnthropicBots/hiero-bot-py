@@ -151,7 +151,6 @@ async def test_needs_work_label_without_comment_between_thresholds(mock_gh, ctx)
     mock_gh.post_comment.assert_not_awaited()
 
 
-
 @pytest.mark.asyncio
 async def test_skips_when_disabled(mock_gh, ctx):
     ctx["config"].workflows.pr_health.enabled = False
