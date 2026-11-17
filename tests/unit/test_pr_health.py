@@ -156,6 +156,12 @@ async def test_needs_work_label_posts_comment_for_boundary_score(mock_gh, ctx):
     assert label == LABEL_NEEDS_WORK
     mock_gh.post_comment.assert_awaited_once()
 
+    comment_body = mock_gh.post_comment.call_args[0][3]
+    assert (
+        f"configured comment threshold of **{cfg.comment_threshold}/100**"
+        in comment_body
+    )
+
 
 @pytest.mark.asyncio
 async def test_skips_when_disabled(mock_gh, ctx):

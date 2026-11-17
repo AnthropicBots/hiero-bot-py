@@ -102,7 +102,7 @@ class PRHealthWorkflow:
 
         if due:
             body = f"{HEALTH_MARKER}\n" + self._build_health_comment(
-                score, signals, cfg.label_healthy_above
+                score, signals, cfg.comment_threshold
             )
         elif existing:
             # The PR improved: replace the stale "below threshold" text.
@@ -209,7 +209,7 @@ class PRHealthWorkflow:
         return min(max(score, 0), 100)
 
     @staticmethod
-    def _build_health_comment(score: float, signals: dict, healthy_threshold: int) -> str:
+    def _build_health_comment(score: float, signals: dict, comment_threshold: int) -> str:
         emoji = "🔴" if score < 50 else "🟡"
         rows = []
         labels = {
@@ -231,7 +231,7 @@ class PRHealthWorkflow:
         table = "\n".join(rows)
         return f"""## {emoji} PR Health Score: {score:.0f}/100
 
-This PR's health score is below the **{healthy_threshold}/100** threshold for a healthy label.
+This PR's health score is below the configured comment threshold of **{comment_threshold}/100**.
 
 | Status | Signal |
 |--------|--------|
