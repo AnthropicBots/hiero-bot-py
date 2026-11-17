@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 from datetime import datetime
+from io import StringIO
 
 import pytest
 
@@ -112,6 +113,122 @@ def test_json_formatter_non_serializable_extra():
     assert data["custom"] == "CustomObjRepr"
 
 
+def test_json_formatter_circular_references():
+    formatter = JSONLogFormatter()
+    record = logging.LogRecord(
+        name="hiero.circular",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=60,
+        msg="Circular ref test",
+        args=(),
+        exc_info=None,
+    )
+
+    circular_dict: dict = {"key": "value"}
+    circular_dict["self"] = circular_dict
+    record.circular = circular_dict  # type: ignore[attr-defined]
+
+    formatted = formatter.format(record)
+    data = json.loads(formatted)
+    assert data["circular"]["self"] == "<circular reference>"
+
+
+def test_json_formatter_nested_non_serializable():
+    formatter = JSONLogFormatter()
+    record = logging.LogRecord(
+        name="hiero.nested",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=70,
+        msg="Nested objects",
+        args=(),
+        exc_info=None,
+    )
+
+    class InnerObj:
+        def __str__(self):
+            return "InnerVal"
+
+    record.nested = {"list": [1, {"obj": InnerObj()}]}  # type: ignore[attr-defined]
+
+    formatted = formatter.format(record)
+    data = json.loads(formatted)
+    assert data["nested"]["list"][1]["obj"] == "InnerVal"
+
+
+def test_json_formatter_non_finite_floats():
+    formatter = JSONLogFormatter()
+    record = logging.LogRecord(
+        name="hiero.float",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=80,
+        msg="Float tests",
+        args=(),
+        exc_info=None,
+    )
+    record.nan_val = float("nan")  # type: ignore[attr-defined]
+    record.inf_val = float("inf")  # type: ignore[attr-defined]
+
+    formatted = formatter.format(record)
+    data = json.loads(formatted)
+    assert data["nan_val"] == "nan"
+    assert data["inf_val"] == "inf"
+
+
+def test_json_formatter_conversion_failure_handling():
+    formatter = JSONLogFormatter()
+    record = logging.LogRecord(
+        name="hiero.fail",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=90,
+        msg="Failed str conversion",
+        args=(),
+        exc_info=None,
+    )
+
+    class BrokenStrObj:
+        def __str__(self):
+            raise RuntimeError("explode")
+
+        def __repr__(self):
+            raise RuntimeError("explode repr")
+
+    record.broken = BrokenStrObj()  # type: ignore[attr-defined]
+
+    formatted = formatter.format(record)
+    data = json.loads(formatted)
+    assert "<unserializable BrokenStrObj>" in data["broken"]
+
+
+def test_json_formatter_reserved_field_protection():
+    formatter = JSONLogFormatter()
+    record = logging.LogRecord(
+        name="hiero.core",
+        level=logging.WARNING,
+        pathname="test.py",
+        lineno=100,
+        msg="Real message",
+        args=(),
+        exc_info=None,
+    )
+    # Attempt to overwrite core reserved fields via extra
+    record.message = "Forged message"  # type: ignore[attr-defined]
+    record.level = "FAKE_LEVEL"  # type: ignore[attr-defined]
+    record.logger = "fake_logger"  # type: ignore[attr-defined]
+    record.timestamp = "fake_timestamp"  # type: ignore[attr-defined]
+
+    formatted = formatter.format(record)
+    data = json.loads(formatted)
+
+    assert data["message"] == "Real message"
+    assert data["level"] == "WARNING"
+    assert data["logger"] == "hiero.core"
+    assert data["timestamp"] != "fake_timestamp"
+
+
 def test_is_json_logging_explicit(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "environment", "development")
     monkeypatch.setattr(settings, "log_format", "json")
@@ -121,6 +238,16 @@ def test_is_json_logging_explicit(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "log_format", "text")
     assert is_json_logging() is False
     assert is_json_logging("text") is False
+
+
+def test_is_json_logging_invalid():
+    with pytest.raises(ValueError, match="Invalid log_format 'invalid'"):
+        is_json_logging("invalid")
+
+
+def test_setup_logging_invalid():
+    with pytest.raises(ValueError, match="Invalid log_format 'unknown'"):
+        setup_logging(log_format="unknown")
 
 
 def test_is_json_logging_auto(monkeypatch: pytest.MonkeyPatch):
@@ -160,4 +287,93 @@ def test_setup_logging(monkeypatch: pytest.MonkeyPatch):
 def test_get_logger_naming():
     log = get_logger("unit_test")
     assert log.name == "hiero.unit_test"
-    assert len(log.handlers) >= 1
+    # Child logger must not install its own handlers and must propagate
+    assert len(log.handlers) == 0
+    assert log.propagate is True
+
+
+def test_duplicate_prevention_and_propagation():
+    # Setup hiero logger with a string buffer handler
+    stream = StringIO()
+    custom_handler = logging.StreamHandler(stream)
+    custom_handler.setFormatter(JSONLogFormatter())
+
+    hiero_logger = logging.getLogger("hiero")
+    hiero_logger.handlers.clear()
+    hiero_logger.addHandler(custom_handler)
+    hiero_logger.setLevel(logging.INFO)
+
+    child_logger = get_logger("propagation_test")
+    assert len(child_logger.handlers) == 0
+
+    child_logger.info("Test message for propagation")
+
+    output = stream.getvalue().strip()
+    lines = [line for line in output.split("\n") if line.strip()]
+
+    # Exactly one log record should have been emitted
+    assert len(lines) == 1
+    record_data = json.loads(lines[0])
+    assert record_data["message"] == "Test message for propagation"
+    assert record_data["logger"] == "hiero.propagation_test"
+
+
+def test_logger_exception_emission():
+    stream = StringIO()
+    custom_handler = logging.StreamHandler(stream)
+    custom_handler.setFormatter(JSONLogFormatter())
+
+    hiero_logger = logging.getLogger("hiero")
+    hiero_logger.handlers.clear()
+    hiero_logger.addHandler(custom_handler)
+    hiero_logger.setLevel(logging.INFO)
+
+    log = get_logger("exception_test")
+
+    try:
+        raise ZeroDivisionError("division by zero test")
+    except ZeroDivisionError:
+        log.exception("Caught an exception")
+
+    output = stream.getvalue().strip()
+    data = json.loads(output)
+
+    assert data["level"] == "ERROR"
+    assert data["message"] == "Caught an exception"
+    assert "exception" in data
+    assert "ZeroDivisionError: division by zero test" in data["exception"]
+
+
+def test_production_and_development_output_format(monkeypatch: pytest.MonkeyPatch):
+    stream = StringIO()
+    handler = logging.StreamHandler(stream)
+
+    hiero_logger = logging.getLogger("hiero")
+    hiero_logger.handlers.clear()
+    hiero_logger.addHandler(handler)
+
+    # 1. Production output test (JSON)
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "log_format", "auto")
+    setup_logging(level="INFO", log_format="auto")
+    hiero_logger.handlers[0].setStream(stream)
+
+    log = get_logger("prod_test")
+    log.info("Production event")
+
+    prod_out = stream.getvalue().strip().split("\n")[-1]
+    prod_data = json.loads(prod_out)
+    assert prod_data["message"] == "Production event"
+    assert prod_data["level"] == "INFO"
+
+    # 2. Development output test (text)
+    stream.truncate(0)
+    stream.seek(0)
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "log_format", "auto")
+    setup_logging(level="INFO", log_format="auto")
+    hiero_logger.handlers[0].setStream(stream)
+
+    log.info("Development event")
+    dev_out = stream.getvalue().strip().split("\n")[-1]
+    assert "[INFO] hiero.prod_test — Development event" in dev_out

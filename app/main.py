@@ -19,10 +19,11 @@ from app.db.database import get_db, init_db
 from app.github.client import GitHubClient
 from app.github.webhooks import WebhookRouter
 from app.scheduler.jobs import BotScheduler
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, setup_logging
 from app.utils.ratelimit import RateLimitMiddleware
 from app.utils.settings import settings
 
+setup_logging(level=settings.log_level, log_format=settings.log_format)
 log = get_logger("main")
 
 # Singletons
