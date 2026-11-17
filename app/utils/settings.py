@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # GitHub OAuth & Session Security
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
+    # Explicit opt-in for mock authentication during local development.
+    # Must never be enabled outside the development environment.
+    allow_dev_login: bool = False
     session_secret_key: str = (
         "dev-secret-key-32-bytes-minimum-length-change-in-prod"
     )
