@@ -32,8 +32,15 @@ from app.db.models import Account, AccountRepo, AccountUser
 
 @router.get("/login")
 async def github_oauth_login(request: Request, db: AsyncSession = Depends(get_db)):
-    # Local dev fallback when client_id is not configured or set to mock in non-production
-    if not settings.is_production and (not settings.github_oauth_client_id or "mock" in settings.github_oauth_client_id):
+    # Mock authentication is permitted only with explicit opt-in in development.
+    if (
+        settings.allow_dev_login
+        and settings.environment == "development"
+        and (
+            not settings.github_oauth_client_id
+            or "mock" in settings.github_oauth_client_id.lower()
+        )
+    ):
         log.info("Mock or unconfigured OAuth client ID detected — initiating local dev login...")
         
         # Upsert dev user
@@ -91,8 +98,12 @@ async def github_oauth_login(request: Request, db: AsyncSession = Depends(get_db
         )
         return response
 
-    if not settings.github_oauth_client_id:
-        log.warning("GITHUB_OAUTH_CLIENT_ID not set. OAuth login cannot proceed.")
+    # Reject missing or mock OAuth client IDs outside the development flow.
+    if (
+        not settings.github_oauth_client_id
+        or "mock" in settings.github_oauth_client_id.lower()
+    ):
+        log.warning("GITHUB_OAUTH_CLIENT_ID is missing or contains a mock value. OAuth login cannot proceed.")
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail="GitHub OAuth Client ID is not configured on this server.",
