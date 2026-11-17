@@ -111,7 +111,7 @@ workflows:
     # Whether to post a comment mentioning the selected reviewers.
     # off     → only create the GitHub review request
     # mention → create the review request and mention reviewers in a comment
-    notify_comment: off
+    notify_comment: "off"
 
     # Create .github/reviewers.yml with:
     #
