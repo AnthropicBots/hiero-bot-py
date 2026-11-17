@@ -150,11 +150,6 @@ async def test_needs_work_label_without_comment_between_thresholds(mock_gh, ctx)
     assert label == LABEL_NEEDS_WORK
     mock_gh.post_comment.assert_not_awaited()
 
-    comment_body = mock_gh.post_comment.call_args[0][3]
-    assert (
-        f"configured comment threshold of **{cfg.comment_threshold}/100**"
-        in comment_body
-    )
 
 
 @pytest.mark.asyncio

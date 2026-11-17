@@ -45,8 +45,7 @@ async def test_healthy_label_can_coexist_with_comment_when_comment_threshold_is_
 
     comment_body = mock_gh.post_comment.call_args.args[3]
     assert HEALTH_MARKER in comment_body
-    assert "85/100" in comment_body
-    assert "comment threshold" in comment_body
+    assert "configured comment threshold of **85/100**" in comment_body
 
 
 @pytest.mark.asyncio
