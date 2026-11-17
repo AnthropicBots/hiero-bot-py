@@ -1,4 +1,4 @@
-# app/config/schema.py — Pydantic v2 config schema & validation
+# app/config/schema.py
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from app.utils.safe_regex import validate_pattern
 
 log = get_logger("config.schema")
 
+# Literal Types
 FocusArea = Literal["security", "performance", "style", "logic", "tests"]
 AIProvider = Literal["auto", "anthropic", "openai", "ollama"]
 MentorStrategy = Literal["round-robin", "least-busy", "expertise-match"]
@@ -18,17 +19,14 @@ ReviewerAssignmentStrategy = Literal["round-robin", "random"]
 ReviewerNotifyComment = Literal["off", "mention"]
 Verdict = Literal["approve", "request_changes", "comment"]
 
-
-#  Role requirements 
-
+# Role Requirements
 class RoleRequirements(BaseModel):
     min_merged_prs: int = Field(ge=0)
     min_reviews_given: int = Field(ge=0)
     min_months_active: int = Field(ge=0)
 
 
-#  Onboarding 
-
+# Onboarding
 class OnboardingConfig(BaseModel):
     enabled: bool = True
 
@@ -58,8 +56,7 @@ class OnboardingConfig(BaseModel):
     onboarding_checklist: list[str] = []
 
 
-#  Pull Request
-
+# Pull Request - AI Review
 class AIReviewConfig(BaseModel):
     enabled: bool = False
     model: str = "claude-sonnet-4-20250514"
@@ -79,6 +76,7 @@ class AIReviewConfig(BaseModel):
     timeout_seconds: int = Field(default=60, ge=5, le=600)
 
 
+# Quality Gates
 class QualityGatesConfig(BaseModel):
     require_tests: bool = True
     require_dco: bool = True
@@ -88,14 +86,18 @@ class QualityGatesConfig(BaseModel):
     require_linked_issue: bool = False
     allowed_branch_pattern: str | None = None
 
+    # Matched against branch names chosen by PR authors on the event loop
+    # shared by every repository, so reject what cannot be matched safely.
     @field_validator("allowed_branch_pattern")
     @classmethod
-    def _branch_pattern_must_be_usable(cls, pattern: str | None) -> str | None:
-        # Matched against branch names chosen by PR authors on the event loop
-        # shared by every repository, so reject what cannot be matched safely.
+    def _branch_pattern_must_be_usable(
+        cls,
+        pattern: str | None,
+    ) -> str | None:
         return None if pattern is None else validate_pattern(pattern)
 
 
+# Pull Request Configuration
 class PullRequestConfig(BaseModel):
     enabled: bool = True
     ai_review: AIReviewConfig = Field(default_factory=AIReviewConfig)
@@ -104,8 +106,7 @@ class PullRequestConfig(BaseModel):
     reviewer_recommendation: bool = True  # NEW
 
 
-#  Progression
-
+# Progression
 class ProgressionConfig(BaseModel):
     enabled: bool = True
     recommend_issues_after_merge: bool = True
@@ -128,8 +129,7 @@ class ProgressionConfig(BaseModel):
     celebrate_milestones: bool = True
 
 
-# Issue Management 
-
+# Issue Management
 class LabelEscalationRule(BaseModel):
     label: str
     notify_team: str
@@ -147,9 +147,7 @@ class IssueManagementConfig(BaseModel):
     label_escalation_rules: list[LabelEscalationRule] = []
 
 
-#  PR Health 
-
-# The signals the health score is computed from (see prhealth._compute_signals).
+# PR Health
 HEALTH_SIGNALS = frozenset({
     "has_tests",
     "has_linked_issue",
@@ -160,7 +158,7 @@ HEALTH_SIGNALS = frozenset({
 })
 
 
-class PRHealthConfig(BaseModel):          # NEW workflow
+class PRHealthConfig(BaseModel):
     enabled: bool = True
     score_weights: dict[str, float] = {
         "has_tests": 0.25,
@@ -196,23 +194,19 @@ class PRHealthConfig(BaseModel):          # NEW workflow
             )
         return {name: w / total for name, w in known.items()}
 
+
+# Reviewer Assignment
 class ReviewerAssignmentConfig(BaseModel):
     enabled: bool = False
-
     availability_file: str = ".github/reviewers.yml"
-
     reviewers_count: int = Field(default=1, ge=1)
-
     strategy: ReviewerAssignmentStrategy = "round-robin"
-
     exclude_pr_author: bool = True
-
     fallback_to_all_if_none_available: bool = True
-
     notify_comment: ReviewerNotifyComment = "off"
 
-# Teams & Labels 
 
+# Teams and Labels
 class TeamsConfig(BaseModel):
     mentors: str = "mentors"
 
@@ -221,8 +215,7 @@ class DifficultyLabels(BaseModel):
     intermediate: str = "intermediate"
 
 
-#  Root 
-
+# Root Workflow Configuration
 class WorkflowsConfig(BaseModel):
     onboarding: OnboardingConfig = Field(default_factory=OnboardingConfig)
     pull_request: PullRequestConfig = Field(default_factory=PullRequestConfig)
@@ -248,8 +241,7 @@ class RepoConfig(BaseModel):
         return self
 
 
-#  Unknown-key detection
-
+# Unknown-Key Detection
 def _model_types(annotation: object) -> list[type[BaseModel]]:
     """Every pydantic model mentioned in a type annotation (Optional, list, ...)."""
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):

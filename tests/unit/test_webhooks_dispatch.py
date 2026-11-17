@@ -9,8 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 
-from app.db.models import Account
+from app.db.models import Account, AccountRepo
 from app.github.webhooks import WebhookRouter
 
 
@@ -465,10 +466,17 @@ async def test_label_command_without_issue_number_returns_early(ctx):
 # ── Installation event edge cases ───────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_handle_installation_without_id_is_skipped(db):
+async def test_handle_installation_without_id_returns_bad_request(db):
     router, _, _ = make_router()
-    result = await router._handle_installation({"action": "created", "installation": {}}, db)
-    assert result == {"ok": True, "skipped": "no installation id"}
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router._handle_installation(
+            {"action": "created", "installation": {}},
+            db,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "installation ID is missing" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
@@ -489,7 +497,6 @@ async def test_handle_installation_unsuspended_updates_existing_account(db):
     result = await router._handle_installation(payload, db)
     assert result == {"ok": True, "action": "unsuspended"}
 
-    from sqlalchemy import select
     row = (
         await db.execute(select(Account).where(Account.github_installation_id == 5555))
     ).scalar_one()
@@ -498,18 +505,210 @@ async def test_handle_installation_unsuspended_updates_existing_account(db):
 
 
 @pytest.mark.asyncio
-async def test_handle_installation_repositories_without_id_is_skipped(db):
+async def test_handle_installation_repositories_without_id_returns_bad_request(db):
     router, _, _ = make_router()
-    result = await router._handle_installation_repositories(
-        {"action": "added", "installation": {}}, db
-    )
-    assert result == {"ok": True, "skipped": "no installation id"}
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router._handle_installation_repositories(
+            {"action": "added", "installation": {}},
+            db,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "installation ID is missing" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
-async def test_handle_installation_repositories_unknown_account_is_skipped(db):
+async def test_handle_installation_repositories_unknown_account_returns_retryable_error(db):
     router, _, _ = make_router()
-    result = await router._handle_installation_repositories(
-        {"action": "added", "installation": {"id": 424242}, "repositories_added": []}, db
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router._handle_installation_repositories(
+            {
+                "action": "added",
+                "installation": {"id": 424242},
+                "repositories_added": [{"name": "test-repo"}],
+            },
+            db,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "Installation account not found" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_handle_installation_repositories_adds_repositories(db):
+
+    router, _, _ = make_router()
+    account = Account(
+        github_installation_id=6001,
+        org_login="test-org",
+        plan_tier="free",
     )
-    assert result == {"ok": True, "skipped": "account not found"}
+    db.add(account)
+    await db.commit()
+    await db.refresh(account)
+
+    result = await router._handle_installation_repositories(
+        {
+            "action": "added",
+            "installation": {"id": 6001},
+            "repositories_added": [
+                {"name": "repo-one"},
+                {"name": "repo-two"},
+            ],
+        },
+        db,
+    )
+
+    assert result == {"ok": True, "action": "added"}
+
+    repos = (
+        await db.execute(
+            select(AccountRepo).where(AccountRepo.account_id == account.id)
+        )
+    ).scalars().all()
+
+    assert {repo.repo_name for repo in repos} == {"repo-one", "repo-two"}
+
+
+@pytest.mark.asyncio
+async def test_handle_installation_repositories_duplicate_addition_is_idempotent(db):
+
+    router, _, _ = make_router()
+    account = Account(
+        github_installation_id=6002,
+        org_login="test-org",
+        plan_tier="free",
+    )
+    db.add(account)
+    await db.commit()
+    await db.refresh(account)
+
+    payload = {
+        "action": "added",
+        "installation": {"id": 6002},
+        "repositories_added": [{"name": "repo-one"}],
+    }
+
+    first = await router._handle_installation_repositories(payload, db)
+    second = await router._handle_installation_repositories(payload, db)
+
+    assert first == {"ok": True, "action": "added"}
+    assert second == {"ok": True, "action": "added"}
+
+    repos = (
+        await db.execute(
+            select(AccountRepo).where(
+                AccountRepo.account_id == account.id,
+                AccountRepo.repo_name == "repo-one",
+            )
+        )
+    ).scalars().all()
+
+    assert len(repos) == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_installation_repositories_removes_repositories(db):
+
+    router, _, _ = make_router()
+    account = Account(
+        github_installation_id=6003,
+        org_login="test-org",
+        plan_tier="free",
+    )
+    db.add(account)
+    await db.commit()
+    await db.refresh(account)
+
+    db.add_all(
+        [
+            AccountRepo(account_id=account.id, repo_name="repo-one"),
+            AccountRepo(account_id=account.id, repo_name="repo-two"),
+        ]
+    )
+    await db.commit()
+
+    result = await router._handle_installation_repositories(
+        {
+            "action": "removed",
+            "installation": {"id": 6003},
+            "repositories_removed": [{"name": "repo-one"}],
+        },
+        db,
+    )
+
+    assert result == {"ok": True, "action": "removed"}
+
+    repos = (
+        await db.execute(
+            select(AccountRepo).where(AccountRepo.account_id == account.id)
+        )
+    ).scalars().all()
+
+    assert {repo.repo_name for repo in repos} == {"repo-two"}
+
+
+@pytest.mark.asyncio
+async def test_handle_installation_repositories_rejects_invalid_payload(db):
+    router, _, _ = make_router()
+    account = Account(
+        github_installation_id=6004,
+        org_login="test-org",
+        plan_tier="free",
+    )
+    db.add(account)
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router._handle_installation_repositories(
+            {
+                "action": "added",
+                "installation": {"id": 6004},
+                "repositories_added": [{"name": ""}],
+            },
+            db,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "repository name is empty or too long" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_handle_installation_repositories_invalid_entry_does_not_partially_add(
+    db,
+):
+
+    router, _, _ = make_router()
+    account = Account(
+        github_installation_id=6005,
+        org_login="test-org",
+        plan_tier="free",
+    )
+    db.add(account)
+    await db.commit()
+    await db.refresh(account)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await router._handle_installation_repositories(
+            {
+                "action": "added",
+                "installation": {"id": 6005},
+                "repositories_added": [
+                    {"name": "valid-repo"},
+                    {"name": ""},
+                ],
+            },
+            db,
+        )
+
+    assert exc_info.value.status_code == 400
+
+    repos = (
+        await db.execute(
+            select(AccountRepo).where(AccountRepo.account_id == account.id)
+        )
+    ).scalars().all()
+
+    assert repos == []

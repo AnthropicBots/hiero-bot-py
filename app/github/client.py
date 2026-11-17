@@ -453,27 +453,10 @@ class GitHubClient:
         number: int,
         installation_id: int,
     ) -> list[dict]:
-        comments: list[dict] = []
-        page = 1
-
-        while True:
-            result = await self.get(
-                f"/repos/{owner}/{repo}/issues/{number}/comments",
-                installation_id,
-                params={"per_page": 100, "page": page},
-            )
-
-            if not isinstance(result, list):
-                break
-
-            comments.extend(result)
-
-            if len(result) < 100:
-                break
-
-            page += 1
-
-        return comments
+        return await self.paginate(
+            f"/repos/{owner}/{repo}/issues/{number}/comments",
+            installation_id,
+        )
 
     async def update_comment(
         self,
@@ -610,29 +593,17 @@ class GitHubClient:
     async def list_pr_files(
         self, owner: str, repo: str, pr_number: int, installation_id: int
     ) -> list[dict]:
-        files = []
-        page = 1
-        while True:
-            data = await self.get(
-                f"/repos/{owner}/{repo}/pulls/{pr_number}/files",
-                installation_id,
-                params={"per_page": 100, "page": page},
-            )
-            if not data:
-                break
-            files.extend(data)
-            if len(data) < 100:
-                break
-            page += 1
-        return files
+        return await self.paginate(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/files",
+            installation_id,
+        )
 
     async def list_pr_commits(
         self, owner: str, repo: str, pr_number: int, installation_id: int
     ) -> list[dict]:
-        return await self.get(
+        return await self.paginate(
             f"/repos/{owner}/{repo}/pulls/{pr_number}/commits",
             installation_id,
-            params={"per_page": 100},
         )
 
     async def list_pr_reviews(
