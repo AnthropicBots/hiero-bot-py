@@ -22,6 +22,20 @@ SIGNED_OFF_RE = re.compile(
     r"^Signed-off-by:\s+\S.*<[^<>\s]+@[^<>\s]+>\s*$", re.IGNORECASE | re.MULTILINE
 )
 
+# Supported GitHub closing references:
+# Resolve #123, Resolves #123, Fix #123, Fixes: #123,
+# Closes #123, and Close #123.
+LINKED_ISSUE_RE = re.compile(
+    r"\b(?:resolve|resolves|fix|close|closes)\s+#\d+"
+    r"|\bfixes:\s+#\d+",
+    re.IGNORECASE,
+)
+
+
+def has_linked_issue(body: str) -> bool:
+    """True when the PR body contains a closing keyword with an issue number."""
+    return bool(LINKED_ISSUE_RE.search(body or ""))
+
 
 def is_test_file(filename: str) -> bool:
     """True if `filename` (a repo-relative path) looks like a test file."""

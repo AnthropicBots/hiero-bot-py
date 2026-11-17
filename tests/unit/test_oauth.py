@@ -1,7 +1,7 @@
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +28,11 @@ from app.db.models import (
     UserOAuthToken,
 )
 from app.main import app
-from app.utils.settings import settings
+from app.utils.settings import Settings, settings
+
+
+def test_dev_login_defaults_to_disabled():
+    assert Settings().allow_dev_login is False
 
 
 def make_request(
@@ -65,6 +69,7 @@ def set_dev_environment(
 ) -> None:
     monkeypatch.setattr(settings, "environment", "development")
     monkeypatch.setattr(settings, "github_oauth_client_id", client_id)
+    monkeypatch.setattr(settings, "allow_dev_login", True)
 
 
 def set_production_environment(
@@ -78,6 +83,70 @@ def set_production_environment(
         "github_oauth_client_secret",
         "test-client-secret",
     )
+
+
+@pytest.mark.parametrize(
+    "environment,client_id",
+    [
+        ("staging", None),
+        ("preview", None),
+        ("test", None),
+        ("staging", "mock-client-id"),
+        ("preview", "mock-client-id"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_oauth_login_rejects_mock_login_outside_development(
+    db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    environment: str,
+    client_id: str | None,
+):
+    monkeypatch.setattr(settings, "environment", environment)
+    monkeypatch.setattr(settings, "github_oauth_client_id", client_id)
+    monkeypatch.setattr(settings, "allow_dev_login", True)
+
+    request = make_request(path="/auth/login")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await github_oauth_login(request, db)
+
+    assert exc_info.value.status_code == 501
+
+    users = (await db.execute(select(User))).scalars().all()
+    accounts = (await db.execute(select(Account))).scalars().all()
+    sessions = (await db.execute(select(Session))).scalars().all()
+    memberships = (await db.execute(select(AccountUser))).scalars().all()
+    repos = (await db.execute(select(AccountRepo))).scalars().all()
+
+    assert users == []
+    assert accounts == []
+    assert sessions == []
+    assert memberships == []
+    assert repos == []
+
+
+@pytest.mark.asyncio
+async def test_oauth_login_rejects_mock_login_when_dev_login_disabled(
+    db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "github_oauth_client_id", None)
+    monkeypatch.setattr(settings, "allow_dev_login", False)
+
+    request = make_request(path="/auth/login")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await github_oauth_login(request, db)
+
+    assert exc_info.value.status_code == 501
+
+    users = (await db.execute(select(User))).scalars().all()
+    sessions = (await db.execute(select(Session))).scalars().all()
+
+    assert users == []
+    assert sessions == []
 
 
 @pytest.mark.asyncio

@@ -238,6 +238,76 @@ async def test_require_changelog_detects_entry_from_second_page(mock_gh, ctx):
     assert changelog_check.detail == "CHANGELOG entry included ✅"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        # Root-level changelog files
+        ("CHANGELOG.md", True),
+        ("CHANGES.rst", True),
+        ("HISTORY.txt", True),
+        ("CHANGELOG", True),
+
+        # Nested changelog files
+        ("docs/CHANGELOG.md", True),
+        ("packages/foo/CHANGES.md", True),
+        ("docs/HISTORY.rst", True),
+        ("docs/CHANGELOG", True),
+
+        # Changelog directories containing release notes
+        ("changelog/v1.2.0.md", True),
+        ("CHANGELOG/2026/entry.md", True),
+        ("docs/CHANGELOG/2026/entry.md", True),
+
+        # Invalid or unrelated filenames
+        ("docs/CHANGELOGUE.md", False),
+        ("docs/CHANGELOG-old.md", False),
+        ("docs/CHANGES_BACKUP.md", False),
+        ("docs/HISTORY_OLD.txt", False),
+        ("docs/CHANGELOG.json", False),
+        ("CHANGELOG.md/extra.txt", False),
+        ("docs/README.md", False),
+        ("src/app.py", False),
+    ],
+)
+async def test_changelog_gate_matches_supported_paths(
+    mock_gh,
+    ctx,
+    filename,
+    expected,
+):
+    cfg = ctx["config"].workflows.pull_request.quality_gates
+    cfg.require_linked_issue = False
+    cfg.require_tests = False
+    cfg.require_dco = False
+    cfg.require_gpg_signature = False
+    cfg.max_files_changed = None
+    cfg.allowed_branch_pattern = None
+    cfg.require_changelog_entry = True
+
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=[{"filename": filename}]
+    )
+
+    wf = PullRequestWorkflow(mock_gh)
+
+    checks = await wf._run_quality_checks(
+        ctx,
+        make_pr(),
+    )
+
+    changelog_check = next(
+        check for check in checks if check.name == "Changelog"
+    )
+
+    assert changelog_check.passed is expected
+    assert changelog_check.detail == (
+        "CHANGELOG entry included ✅"
+        if expected
+        else "Please add a CHANGELOG entry ❌"
+    )
+
+
 # ── Issue #64: stale opposite quality-gate label must be removed ───────────
 
 @pytest.mark.asyncio

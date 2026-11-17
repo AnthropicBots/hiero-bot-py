@@ -108,6 +108,15 @@ def test_pr_author_is_excluded():
     assert "alice" not in scores
 
 
+def test_pr_author_is_excluded_case_insensitively():
+    scores = _score_candidates(
+        [commits("alice", "bob")],
+        exclude="Alice",
+    )
+
+    assert scores == {"bob": 1}
+    
+
 def test_bot_committers_are_excluded():
     scores = _score_candidates(
         [commits("dependabot[bot]", "bob")], exclude="alice"
@@ -287,6 +296,45 @@ async def test_no_comment_when_nobody_qualifies(mock_gh, ctx):
     await wf._recommend_reviewers(ctx, pr(author="alice"))
 
     assert suggestion_bodies(mock_gh) == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_case_pr_author_is_never_recommended(
+    mock_gh,
+    ctx,
+    db,
+):
+    mock_gh.list_pr_files = AsyncMock(
+        return_value=files("app/workflows/pullrequest.py")
+    )
+    mock_gh.list_commits = AsyncMock(
+        return_value=commits("alice", "bob", "bob")
+    )
+
+    wf = PullRequestWorkflow(mock_gh)
+
+    await wf._recommend_reviewers(
+        ctx,
+        pr(number=190, author="Alice"),
+    )
+    await db.commit()
+
+    rows = (
+        await db.execute(
+            select(ReviewerRecommendation).where(
+                ReviewerRecommendation.pr_number == 190
+            )
+        )
+    ).scalars().all()
+
+    assert {
+        row.recommended_reviewer for row in rows
+    } == {"bob"}
+
+    body = suggestion_bodies(mock_gh)[0]
+    assert "@bob" in body
+    assert "@alice" not in body
+    assert "@Alice" not in body
 
 
 @pytest.mark.asyncio

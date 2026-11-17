@@ -15,7 +15,7 @@ from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.comments import find_bot_comment
 from app.utils.logger import get_logger
-from app.utils.pr_checks import commits_have_signoff, is_test_file
+from app.utils.pr_checks import commits_have_signoff, has_linked_issue, is_test_file
 from app.utils.safe_regex import bounded_match
 
 log = get_logger("workflow.pullrequest")
@@ -172,9 +172,7 @@ class PullRequestWorkflow:
         # Linked issue
         if gates.require_linked_issue:
             body = pr.get("body") or ""
-            linked = bool(
-                re.search(r"(?:closes|fixes|resolves)\s+#\d+", body, re.IGNORECASE)
-            )
+            linked = has_linked_issue(body)
             checks.append(
                 QualityCheck(
                     "Linked Issue",
@@ -274,7 +272,12 @@ class PullRequestWorkflow:
         if gates.require_changelog_entry:
             files = await get_files()
             has_cl = any(
-                re.match(r"CHANGELOG|CHANGES|HISTORY", f["filename"], re.IGNORECASE)
+                re.search(
+                    r"(?:^|/)(?:CHANGELOG|CHANGES|HISTORY)(?:\.(?:md|rst|txt))?$"
+                    r"|(?:^|/)(?:CHANGELOG|CHANGES|HISTORY)/.+$",
+                    f["filename"],
+                    re.IGNORECASE,
+                )
                 for f in files
             )
             checks.append(
@@ -612,7 +615,7 @@ def _score_candidates(histories: list, exclude: str) -> dict[str, int]:
                 seen_shas.add(sha)
 
             login = ((commit.get("author") or {}).get("login") or "").strip()
-            if not login or login == exclude:
+            if not login or login.lower() == (exclude or "").lower():
                 continue
             if login.lower().endswith("[bot]"):
                 continue
