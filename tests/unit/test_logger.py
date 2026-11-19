@@ -7,10 +7,12 @@ import logging
 import sys
 from datetime import datetime
 from io import StringIO
+from typing import Any
 
 import pytest
 
 from app.utils.logger import (
+    MAX_SERIALIZATION_DEPTH,
     JSONLogFormatter,
     get_formatter,
     get_logger,
@@ -18,6 +20,28 @@ from app.utils.logger import (
     setup_logging,
 )
 from app.utils.settings import settings
+
+
+@pytest.fixture(autouse=True)
+def restore_hiero_logger():
+    """Restore global hiero logger state (handlers, level, propagate) after each test."""
+    hiero_logger = logging.getLogger("hiero")
+    original_handlers = list(hiero_logger.handlers)
+    original_level = hiero_logger.level
+    original_propagate = hiero_logger.propagate
+
+    yield
+
+    for handler in hiero_logger.handlers:
+        if handler not in original_handlers:
+            try:
+                handler.close()
+            except Exception:
+                pass
+
+    hiero_logger.handlers = original_handlers
+    hiero_logger.setLevel(original_level)
+    hiero_logger.propagate = original_propagate
 
 
 def test_json_formatter_basic():
@@ -377,3 +401,69 @@ def test_production_and_development_output_format(monkeypatch: pytest.MonkeyPatc
     log.info("Development event")
     dev_out = stream.getvalue().strip().split("\n")[-1]
     assert "[INFO] hiero.prod_test — Development event" in dev_out
+
+
+def test_json_formatter_deeply_nested_dict_recursion_prevention():
+    formatter = JSONLogFormatter()
+    # Build a 1200-deep nested dictionary (exceeds default sys.getrecursionlimit() = 1000)
+    nested: dict[str, Any] = {"leaf": "deep_value"}
+    for _ in range(1200):
+        nested = {"inner": nested}
+
+    record = logging.LogRecord(
+        name="hiero.test",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=10,
+        msg="Deeply nested dict test",
+        args=(),
+        exc_info=None,
+    )
+    record.nested = nested  # type: ignore[attr-defined]
+
+    # Must format cleanly without raising RecursionError
+    formatted = formatter.format(record)
+    data = json.loads(formatted)
+    assert data["message"] == "Deeply nested dict test"
+
+    # Verify traversal hits "<max depth exceeded>" at MAX_SERIALIZATION_DEPTH
+    curr = data["nested"]
+    depth = 0
+    while isinstance(curr, dict) and "inner" in curr:
+        curr = curr["inner"]
+        depth += 1
+    assert curr == "<max depth exceeded>"
+    assert depth == MAX_SERIALIZATION_DEPTH
+
+
+def test_json_formatter_deeply_nested_list_recursion_prevention():
+    formatter = JSONLogFormatter()
+    # Build a 1200-deep nested list (exceeds default sys.getrecursionlimit() = 1000)
+    nested: list[Any] = ["bottom_item"]
+    for _ in range(1200):
+        nested = [nested]
+
+    record = logging.LogRecord(
+        name="hiero.test",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=10,
+        msg="Deeply nested list test",
+        args=(),
+        exc_info=None,
+    )
+    record.nested = nested  # type: ignore[attr-defined]
+
+    # Must format cleanly without raising RecursionError
+    formatted = formatter.format(record)
+    data = json.loads(formatted)
+    assert data["message"] == "Deeply nested list test"
+
+    # Verify traversal hits "<max depth exceeded>" at MAX_SERIALIZATION_DEPTH
+    curr = data["nested"]
+    depth = 0
+    while isinstance(curr, list) and len(curr) == 1 and isinstance(curr[0], list):
+        curr = curr[0]
+        depth += 1
+    assert curr == ["<max depth exceeded>"]
+    assert depth == MAX_SERIALIZATION_DEPTH - 1

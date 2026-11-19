@@ -42,6 +42,7 @@ VALID_LOG_FORMATS = frozenset({"auto", "json", "text"})
 RESERVED_JSON_FIELDS = frozenset(
     {"timestamp", "level", "logger", "message", "exception"}
 )
+MAX_SERIALIZATION_DEPTH = 10
 
 
 def _safe_str(val: Any) -> str:
@@ -54,10 +55,12 @@ def _safe_str(val: Any) -> str:
             return "<unserializable>"
 
 
-def _safe_json_value(val: Any, seen: set[int] | None = None) -> Any:
-    if seen is None:
-        seen = set()
-
+def _safe_json_value(
+    val: Any,
+    seen: set[int] | None = None,
+    depth: int = 0,
+    max_depth: int = MAX_SERIALIZATION_DEPTH,
+) -> Any:
     if val is None or isinstance(val, (bool, int, str)):
         return val
 
@@ -66,6 +69,12 @@ def _safe_json_value(val: Any, seen: set[int] | None = None) -> Any:
             return str(val)
         return val
 
+    if depth >= max_depth:
+        return "<max depth exceeded>"
+
+    if seen is None:
+        seen = set()
+
     val_id = id(val)
     if val_id in seen:
         return "<circular reference>"
@@ -73,14 +82,22 @@ def _safe_json_value(val: Any, seen: set[int] | None = None) -> Any:
     if isinstance(val, dict):
         seen.add(val_id)
         try:
-            return {_safe_str(k): _safe_json_value(v, seen) for k, v in val.items()}
+            return {
+                _safe_str(k): _safe_json_value(
+                    v, seen, depth=depth + 1, max_depth=max_depth
+                )
+                for k, v in val.items()
+            }
         finally:
             seen.remove(val_id)
 
     if isinstance(val, (list, tuple, set, frozenset)):
         seen.add(val_id)
         try:
-            return [_safe_json_value(item, seen) for item in val]
+            return [
+                _safe_json_value(item, seen, depth=depth + 1, max_depth=max_depth)
+                for item in val
+            ]
         finally:
             seen.remove(val_id)
 
