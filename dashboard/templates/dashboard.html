@@ -995,36 +995,6 @@ function switchTab(tabId, btn) {
   });
 }
 
-// Fallback demo data for immediate visual fidelity
-const DEMO_STATS = { total_stale_marked: 12, total_stale_closed: 3, total_auto_unassigned: 5, total_contributors_welcomed: 24, total_prs_scored: 76 };
-const DEMO_HEALTH_STATS = { avg_score: 88.5 };
-
-const DEMO_PRS = [
-  { pr_number: 142, pr_author: 'octocat', score: 94, has_tests: true, has_linked_issue: true, dco_signed: true, review_count: 3, files_changed: 4, label_applied: 'health: 💚 healthy', created_at: new Date(Date.now() - 1000*60*15).toISOString() },
-  { pr_number: 139, pr_author: 'alex_dev', score: 82, has_tests: true, has_linked_issue: true, dco_signed: true, review_count: 2, files_changed: 8, label_applied: 'health: 💚 healthy', created_at: new Date(Date.now() - 1000*60*120).toISOString() },
-  { pr_number: 137, pr_author: 'sam_c', score: 58, has_tests: false, has_linked_issue: true, dco_signed: false, review_count: 1, files_changed: 14, label_applied: 'health: 🔧 needs work', created_at: new Date(Date.now() - 1000*60*450).toISOString() },
-  { pr_number: 135, pr_author: 'sarah_m', score: 91, has_tests: true, has_linked_issue: true, dco_signed: true, review_count: 4, files_changed: 2, label_applied: 'health: 💚 healthy', created_at: new Date(Date.now() - 1000*60*1400).toISOString() },
-];
-
-const DEMO_AUDIT = [
-  { timestamp: new Date(Date.now() - 1000*60*12).toISOString(), action: 'pr.health_scored', owner: 'AnthropicBots', repo: 'hiero-bot-py', target_number: 142, target_login: 'octocat', reason: 'Health evaluation score: 94/100' },
-  { timestamp: new Date(Date.now() - 1000*60*45).toISOString(), action: 'contributor.welcomed', owner: 'AnthropicBots', repo: 'hiero-bot-py', target_number: 142, target_login: 'octocat', reason: 'First-time contributor welcomed' },
-  { timestamp: new Date(Date.now() - 1000*60*180).toISOString(), action: 'pr.reviewer_recommended', owner: 'AnthropicBots', repo: 'hiero-bot-py', target_number: 139, target_login: 'alex_dev', reason: 'Suggested reviewers based on CODEOWNERS' },
-  { timestamp: new Date(Date.now() - 1000*60*600).toISOString(), action: 'issue.stale_marked', owner: 'AnthropicBots', repo: 'hiero-bot-py', target_number: 98, target_login: null, reason: 'Inactive for 30+ days' },
-];
-
-const DEMO_PROGRESSION = [
-  { login: 'octocat', repo: 'hiero-bot-py', merged_prs: 18, reviews_given: 24, months_active: 6, eligible_for: 'Maintainer', recorded_at: new Date(Date.now() - 1000*60*60).toISOString() },
-  { login: 'sarah_m', repo: 'hiero-bot-py', merged_prs: 12, reviews_given: 15, months_active: 4, eligible_for: 'Reviewer', recorded_at: new Date(Date.now() - 1000*60*120).toISOString() },
-  { login: 'alex_dev', repo: 'hiero-bot-py', merged_prs: 7, reviews_given: 8, months_active: 3, eligible_for: 'Contributor', recorded_at: new Date(Date.now() - 1000*60*300).toISOString() },
-];
-
-const DEMO_STALE = [
-  { occurred_at: new Date(Date.now() - 1000*60*90).toISOString(), action: 'marked_stale', repo: 'hiero-bot-py', issue_number: 98, days_inactive: 64 },
-  { occurred_at: new Date(Date.now() - 1000*60*360).toISOString(), action: 'unassigned', repo: 'hiero-bot-py', issue_number: 84, days_inactive: 21 },
-  { occurred_at: new Date(Date.now() - 1000*60*900).toISOString(), action: 'closed', repo: 'hiero-bot-py', issue_number: 72, days_inactive: 71 },
-];
-
 async function loadStats() {
   const o = owner(), r = repo();
   let stats = null, healthStats = null;
@@ -1036,20 +1006,30 @@ async function loadStats() {
     ]);
   }
 
-  const s = (stats && stats.total_prs_scored > 0) ? stats : DEMO_STATS;
-  const h = (healthStats && healthStats.avg_score > 0) ? healthStats : DEMO_HEALTH_STATS;
-
-  document.getElementById('staleMarked').textContent = s.total_stale_marked;
-  document.getElementById('autoUnassigned').textContent = s.total_auto_unassigned + s.total_stale_closed;
-  document.getElementById('totalPRs').textContent = s.total_prs_scored;
-  document.getElementById('avgScore').textContent = h.avg_score.toFixed(0);
+  document.getElementById('staleMarked').textContent = stats ? stats.total_stale_marked : '—';
+  document.getElementById('autoUnassigned').textContent = stats ? (stats.total_auto_unassigned + stats.total_stale_closed) : '—';
+  document.getElementById('totalPRs').textContent = stats ? stats.total_prs_scored : '—';
+  document.getElementById('avgScore').textContent = (healthStats && typeof healthStats.avg_score === 'number' && healthStats.avg_score > 0) ? healthStats.avg_score.toFixed(0) : '—';
 }
 
 async function loadPRHealth() {
-  let rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 50})}`);
-  if (!rows || !rows.length) rows = DEMO_PRS;
-
   const tbody = document.getElementById('prHealthTable');
+  const o = owner(), r = repo();
+  if (!o || !r) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:32px; color:var(--text-muted);">Select an organization and repository to view PR health</td></tr>';
+    return;
+  }
+
+  const rows = await api(`/pr-health${qs({owner: o, repo: r, limit: 50})}`);
+  if (rows === null) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:32px; color:var(--text-muted);">Could not load PR health data</td></tr>';
+    return;
+  }
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:32px; color:var(--text-muted);">No pull requests found</td></tr>';
+    return;
+  }
+
   tbody.innerHTML = rows.map(r => `
     <tr>
       <td class="mono"><span class="copyable" data-copy="#${esc(r.pr_number)}" style="font-weight:700; color:#60a5fa;">#${esc(r.pr_number)}</span></td>
@@ -1066,11 +1046,12 @@ async function loadPRHealth() {
 }
 
 async function loadCharts() {
-  let rows = await api(`/pr-health${qs({owner: owner(), repo: repo(), limit: 100})}`);
-  if (!rows || !rows.length) rows = DEMO_PRS;
+  const o = owner(), r = repo();
+  const rows = (o && r) ? (await api(`/pr-health${qs({owner: o, repo: r, limit: 100})}`)) : null;
+  const list = rows || [];
 
   const buckets = {'<60': 0, '60-75': 0, '75-90': 0, '90-100': 0};
-  rows.forEach(r => {
+  list.forEach(r => {
     if (r.score < 60) buckets['<60']++;
     else if (r.score < 75) buckets['60-75']++;
     else if (r.score < 90) buckets['75-90']++;
@@ -1120,12 +1101,12 @@ async function loadCharts() {
     options: chartOpts
   });
 
-  const total = rows.length || 1;
+  const total = list.length;
   const signals = {
-    'Tests': Math.round(rows.filter(r => r.has_tests).length / total * 100),
-    'Linked Issue': Math.round(rows.filter(r => r.has_linked_issue).length / total * 100),
-    'DCO Signed': Math.round(rows.filter(r => r.dco_signed).length / total * 100),
-    'Reviewed': Math.round(rows.filter(r => r.review_count > 0).length / total * 100),
+    'Tests': total ? Math.round(list.filter(r => r.has_tests).length / total * 100) : 0,
+    'Linked Issue': total ? Math.round(list.filter(r => r.has_linked_issue).length / total * 100) : 0,
+    'DCO Signed': total ? Math.round(list.filter(r => r.dco_signed).length / total * 100) : 0,
+    'Reviewed': total ? Math.round(list.filter(r => r.review_count > 0).length / total * 100) : 0,
   };
 
   if (signalsChart) signalsChart.destroy();
@@ -1154,10 +1135,23 @@ async function loadCharts() {
 }
 
 async function loadAudit() {
-  let rows = await api(`/audit${qs({owner: owner(), repo: repo(), limit: 30})}`);
-  if (!rows || !rows.length) rows = DEMO_AUDIT;
-
   const tbody = document.getElementById('auditTable');
+  const o = owner(), r = repo();
+  if (!o || !r) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text-muted);">Select an organization and repository to view audit logs</td></tr>';
+    return;
+  }
+
+  const rows = await api(`/audit${qs({owner: o, repo: r, limit: 30})}`);
+  if (rows === null) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text-muted);">Could not load audit log</td></tr>';
+    return;
+  }
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text-muted);">No audit events found</td></tr>';
+    return;
+  }
+
   tbody.innerHTML = rows.map(r => `
     <tr>
       <td class="mono" style="color:var(--text-muted)">${relativeTime(r.timestamp)}</td>
@@ -1170,10 +1164,23 @@ async function loadAudit() {
 }
 
 async function loadProgression() {
-  let rows = await api(`/contributors${qs({owner: owner(), repo: repo(), limit: 30})}`);
-  if (!rows || !rows.length) rows = DEMO_PROGRESSION;
-
   const tbody = document.getElementById('progressTable');
+  const o = owner(), r = repo();
+  if (!o || !r) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:32px; color:var(--text-muted);">Select an organization and repository to view contributor progression</td></tr>';
+    return;
+  }
+
+  const rows = await api(`/contributors${qs({owner: o, repo: r, limit: 30})}`);
+  if (rows === null) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:32px; color:var(--text-muted);">Could not load contributor progression data</td></tr>';
+    return;
+  }
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:32px; color:var(--text-muted);">No contributor progression recorded</td></tr>';
+    return;
+  }
+
   tbody.innerHTML = rows.map(r => `
     <tr>
       <td style="font-weight:600; color:var(--text-primary);">@${esc(r.login)}</td>
@@ -1188,10 +1195,23 @@ async function loadProgression() {
 }
 
 async function loadStale() {
-  let rows = await api(`/stale-log${qs({owner: owner(), repo: repo(), limit: 30})}`);
-  if (!rows || !rows.length) rows = DEMO_STALE;
-
   const tbody = document.getElementById('staleTable');
+  const o = owner(), r = repo();
+  if (!o || !r) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text-muted);">Select an organization and repository to view stale issues</td></tr>';
+    return;
+  }
+
+  const rows = await api(`/stale-log${qs({owner: o, repo: r, limit: 30})}`);
+  if (rows === null) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text-muted);">Could not load stale issue log</td></tr>';
+    return;
+  }
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text-muted);">No stale issues logged</td></tr>';
+    return;
+  }
+
   tbody.innerHTML = rows.map(r => `
     <tr>
       <td class="mono" style="color:var(--text-muted)">${relativeTime(r.occurred_at)}</td>
@@ -1254,8 +1274,9 @@ async function populateRepoDropdowns() {
     });
     onOwnerChange();
   } else {
-    oSel.innerHTML = `<option value="AnthropicBots">AnthropicBots</option>`;
-    rSel.innerHTML = `<option value="hiero-bot-py">hiero-bot-py</option>`;
+    oSel.innerHTML = `<option value="">No organizations available</option>`;
+    rSel.innerHTML = `<option value="">No repositories available</option>`;
+    onOwnerChange();
   }
 }
 
@@ -1269,8 +1290,10 @@ function onOwnerChange() {
     account.repos.forEach(repoName => {
       rSel.innerHTML += `<option value="${esc(repoName)}">${esc(repoName)}</option>`;
     });
-  } else {
+  } else if (selectedOrg) {
     rSel.innerHTML = `<option value="">All Repositories</option>`;
+  } else {
+    rSel.innerHTML = `<option value="">No repositories available</option>`;
   }
 
   const upsellBanner = document.getElementById('premiumUpsellBanner');

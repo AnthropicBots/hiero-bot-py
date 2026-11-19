@@ -680,3 +680,62 @@ async def test_installation_creation_rejects_invalid_payload(db):
 
     assert exc_info.value.status_code == 400
     assert "repository name is empty or too long" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_handle_installation_suspend_and_unsuspend(db):
+    gh = MagicMock()
+    config_loader = MagicMock()
+    router = WebhookRouter(gh, config_loader)
+
+    # 1. Created installation
+    created_payload = {
+        "action": "created",
+        "installation": {
+            "id": 12345,
+            "account": {
+                "id": 54321,
+                "login": "suspension-org",
+                "type": "Organization",
+            },
+        },
+        "repositories": [{"name": "repo1"}],
+    }
+    res_created = await router._handle_installation(created_payload, db)
+    assert res_created == {"ok": True, "action": "created"}
+
+    acc = await db.scalar(
+        select(Account).where(Account.github_installation_id == 12345)
+    )
+    assert acc is not None
+    assert acc.suspended_at is None
+
+    # 2. Suspend action sets suspended_at timestamp
+    suspend_payload = {
+        "action": "suspend",
+        "installation": {"id": 12345},
+    }
+    res_suspend = await router._handle_installation(suspend_payload, db)
+    assert res_suspend == {"ok": True, "action": "suspend"}
+
+    await db.refresh(acc)
+    assert acc.suspended_at is not None
+
+    # 3. GitHub's official 'unsuspend' action clears suspended_at
+    unsuspend_payload = {
+        "action": "unsuspend",
+        "installation": {
+            "id": 12345,
+            "account": {
+                "id": 54321,
+                "login": "suspension-org",
+                "type": "Organization",
+            },
+        },
+        "repositories": [{"name": "repo1"}],
+    }
+    res_unsuspend = await router._handle_installation(unsuspend_payload, db)
+    assert res_unsuspend == {"ok": True, "action": "unsuspend"}
+
+    await db.refresh(acc)
+    assert acc.suspended_at is None
