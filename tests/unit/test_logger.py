@@ -27,6 +27,9 @@ def restore_hiero_logger():
     """Restore global hiero logger state (handlers, level, propagate) after each test."""
     hiero_logger = logging.getLogger("hiero")
     original_handlers = list(hiero_logger.handlers)
+    original_formatters = [
+        (handler, handler.formatter) for handler in original_handlers
+    ]
     original_level = hiero_logger.level
     original_propagate = hiero_logger.propagate
 
@@ -40,6 +43,10 @@ def restore_hiero_logger():
                 pass
 
     hiero_logger.handlers = original_handlers
+
+    for handler, formatter in original_formatters:
+        handler.setFormatter(formatter)
+
     hiero_logger.setLevel(original_level)
     hiero_logger.propagate = original_propagate
 
@@ -317,29 +324,48 @@ def test_get_logger_naming():
 
 
 def test_duplicate_prevention_and_propagation():
-    # Setup hiero logger with a string buffer handler
     stream = StringIO()
+    root_stream = StringIO()
+
     custom_handler = logging.StreamHandler(stream)
-    custom_handler.setFormatter(JSONLogFormatter())
+    root_handler = logging.StreamHandler(root_stream)
 
     hiero_logger = logging.getLogger("hiero")
+    root_logger = logging.getLogger()
+
     hiero_logger.handlers.clear()
     hiero_logger.addHandler(custom_handler)
     hiero_logger.setLevel(logging.INFO)
 
-    child_logger = get_logger("propagation_test")
-    assert len(child_logger.handlers) == 0
+    root_logger.addHandler(root_handler)
 
-    child_logger.info("Test message for propagation")
+    try:
+        setup_logging(level="INFO", log_format="json")
 
-    output = stream.getvalue().strip()
-    lines = [line for line in output.split("\n") if line.strip()]
+        child_logger = get_logger("propagation_test")
 
-    # Exactly one log record should have been emitted
-    assert len(lines) == 1
-    record_data = json.loads(lines[0])
-    assert record_data["message"] == "Test message for propagation"
-    assert record_data["logger"] == "hiero.propagation_test"
+        assert len(child_logger.handlers) == 0
+        assert child_logger.propagate is True
+        assert hiero_logger.propagate is False
+
+        child_logger.info("Test message for propagation")
+
+        lines = [
+            line for line in stream.getvalue().splitlines()
+            if line.strip()
+        ]
+
+        assert len(lines) == 1
+
+        record_data = json.loads(lines[0])
+        assert record_data["message"] == "Test message for propagation"
+        assert record_data["logger"] == "hiero.propagation_test"
+
+        assert root_stream.getvalue() == ""
+
+    finally:
+        root_logger.removeHandler(root_handler)
+        root_handler.close()
 
 
 def test_logger_exception_emission():

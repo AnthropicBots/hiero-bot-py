@@ -181,6 +181,7 @@ def setup_logging(level: str = "INFO", log_format: str = "auto") -> None:
         )
 
     hiero_logger = logging.getLogger("hiero")
+    hiero_logger.propagate = False
     resolved_level = getattr(logging, level.upper(), logging.INFO)
     hiero_logger.setLevel(resolved_level)
 
