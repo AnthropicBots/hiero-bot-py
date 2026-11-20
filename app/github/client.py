@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 import urllib.parse
 from datetime import datetime
@@ -198,33 +199,44 @@ class GitHubClient:
         retry_after = resp.headers.get("Retry-After")
         if retry_after:
             try:
-                waits.append(max(0.0, float(retry_after)))
+                retry_after_seconds = float(retry_after)
+                if (
+                    not math.isfinite(retry_after_seconds)
+                    or retry_after_seconds < 0
+                ):
+                    raise ValueError("Invalid Retry-After value")
+
+                waits.append(retry_after_seconds)
                 valid_retry_after = True
-            except ValueError:
+            except (ValueError, OverflowError):
                 try:
                     retry_at = parsedate_to_datetime(retry_after).timestamp()
-                    waits.append(max(0.0, retry_at - time.time()))
-                    valid_retry_after = True
+                    retry_wait = retry_at - time.time()
+
+                    if math.isfinite(retry_wait):
+                        waits.append(max(0.0, retry_wait))
+                        valid_retry_after = True
                 except (TypeError, ValueError, OverflowError):
                     pass
 
         reset = resp.headers.get("X-RateLimit-Reset")
-        reset_wait = None
+
         if reset:
             try:
-                reset_wait = max(0.0, float(reset) - time.time())
-                if resp.headers.get("X-RateLimit-Remaining") == "0":
-                    waits.append(reset_wait)
-            except ValueError:
+                reset_timestamp = float(reset)
+
+                if (
+                    math.isfinite(reset_timestamp)
+                    and resp.headers.get("X-RateLimit-Remaining") == "0"
+                ):
+                    waits.append(max(0.0, reset_timestamp - time.time()))
+            except (ValueError, OverflowError):
                 pass
 
-        if secondary_limit:
+        if secondary_limit and not valid_retry_after:
             # GitHub recommends waiting at least 60 seconds when a
             # secondary rate-limit response has no valid Retry-After.
-            if not valid_retry_after:
-                waits.append(60.0)
-            if reset_wait is not None:
-                waits.append(reset_wait)
+            waits.append(60.0)
 
         # Never fall back to ordinary transient-error backoff for a
         # recognized rate-limit response with unusable timing headers.

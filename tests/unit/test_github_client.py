@@ -1341,13 +1341,68 @@ async def test_primary_rate_limit_waits_until_reset():
         ),
         (
             403,
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "NaN",
+            },
+            "API rate limit exceeded",
+            60.0,
+        ),
+        (
+            403,
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "inf",
+            },
+            "API rate limit exceeded",
+            60.0,
+        ),
+        (
+            403,
             {"Retry-After": "not-a-duration"},
             "You have exceeded a secondary rate limit",
             60.0,
         ),
         (
             403,
+            {"Retry-After": "NaN"},
+            "You have exceeded a secondary rate limit",
+            60.0,
+        ),
+        (
+            403,
+            {"Retry-After": "inf"},
+            "You have exceeded a secondary rate limit",
+            60.0,
+        ),
+        (
+            403,
+            {"Retry-After": "-inf"},
+            "You have exceeded a secondary rate limit",
+            60.0,
+        ),
+        (
+            403,
             {"X-RateLimit-Reset": "1"},
+            "You have exceeded a secondary rate limit",
+            60.0,
+        ),
+        (
+            403,
+            {
+                "Retry-After": "60",
+                "X-RateLimit-Remaining": "5000",
+                "X-RateLimit-Reset": "8200",
+            },
+            "You have exceeded a secondary rate limit",
+            60.0,
+        ),
+        (
+            403,
+            {
+                "X-RateLimit-Remaining": "5000",
+                "X-RateLimit-Reset": "8200",
+            },
             "You have exceeded a secondary rate limit",
             60.0,
         ),
@@ -1385,6 +1440,7 @@ async def test_request_uses_fallback_for_invalid_rate_limit_headers(
             new=AsyncMock(side_effect=responses),
         ) as request_mock,
         patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        patch("app.github.client.time.time", return_value=1000.0),
     ):
         result = await client.request(
             "GET", "/repos/hiero/sdk-js", 123
