@@ -802,12 +802,14 @@ async def test_remove_label_propagates_non_404_errors():
         response=Mock(status_code=403),
     )
 
-    with patch.object(
-        client,
-        "delete",
-        new=AsyncMock(side_effect=forbidden_error),
-    ):
-        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+    with (
+            patch.object(
+                client,
+                "delete",
+                new=AsyncMock(side_effect=forbidden_error),
+            ),
+            pytest.raises(httpx.HTTPStatusError) as exc_info,
+        ):
             await client.remove_label(
                 "hiero", "sdk-js", 7, "quality: passed", 123
             )
