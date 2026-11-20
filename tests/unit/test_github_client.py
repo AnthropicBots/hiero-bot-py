@@ -588,6 +588,33 @@ async def test_list_installations_paginates_with_app_auth():
 
 
 @pytest.mark.asyncio
+async def test_list_installations_retries_secondary_limit_with_wait_cap():
+    client = GitHubClient()
+    request = httpx.Request("GET", "https://api.github.com/app/installations")
+    responses = [
+        httpx.Response(
+            403,
+            headers={"Retry-After": "2000"},
+            json={"message": "secondary rate limit"},
+            request=request,
+        )
+        for _ in range(2)
+    ]
+    with (
+        patch.object(client, "_make_jwt", return_value="fake_jwt"),
+        patch.object(
+            client._http, "get", new=AsyncMock(side_effect=responses)
+        ) as app_get,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await client.list_installations()
+    assert app_get.await_count == 2
+    sleep.assert_awaited_once_with(2000.0)
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_search_issues_passes_query_pagination_and_sort_params():
     client = GitHubClient()
 
@@ -765,6 +792,32 @@ async def test_remove_label_tolerates_label_already_absent():
 
 
 @pytest.mark.asyncio
+async def test_remove_label_propagates_non_404_errors():
+    """403 and other errors must not be silently ignored."""
+    client = GitHubClient()
+
+    forbidden_error = httpx.HTTPStatusError(
+        "Forbidden",
+        request=Mock(),
+        response=Mock(status_code=403),
+    )
+
+    with patch.object(
+        client,
+        "delete",
+        new=AsyncMock(side_effect=forbidden_error),
+    ):
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await client.remove_label(
+                "hiero", "sdk-js", 7, "quality: passed", 123
+            )
+
+    assert exc_info.value.response.status_code == 403
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_list_labels_paginates():
     client = GitHubClient()
 
@@ -928,12 +981,15 @@ async def test_add_label_treats_already_exists_as_success():
                     "Not found", request=Mock(), response=Mock(status_code=404)
                 )
             ),
-        ),
+        ) as mock_get,
         patch.object(
             client, "post", new=AsyncMock(side_effect=[exists_error, {}])
         ) as mock_post,
     ):
         await client.add_label("hiero", "sdk-js", 7, "kind/bug", 123)
+    mock_get.assert_awaited_once_with(
+        "/repos/hiero/sdk-js/labels/kind%2Fbug", 123
+    )
     assert mock_post.await_count == 2
     await client.close()
 
@@ -994,6 +1050,96 @@ async def test_request_does_not_retry_post_after_read_timeout():
 
 
 @pytest.mark.asyncio
+async def test_request_does_not_retry_post_after_network_error():
+    client = GitHubClient()
+    request_error = httpx.ConnectError("network unavailable")
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(return_value={"Authorization": "token"}),
+        ),
+        patch.object(
+            client._http, "request", new=AsyncMock(side_effect=request_error)
+        ) as request,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(httpx.ConnectError),
+    ):
+        await client.request(
+            "POST",
+            "/repos/hiero/sdk-js/issues/1/comments",
+            123,
+            json={"body": "hello"},
+        )
+    request.assert_awaited_once()
+    sleep.assert_not_awaited()
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_wait"),
+    [(429, 60.0), (502, 1.0), (503, 1.0), (504, 1.0)],
+)
+@pytest.mark.asyncio
+async def test_request_retries_rate_limit_and_gateway_statuses(
+    status_code, expected_wait
+):
+    client = GitHubClient()
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    responses = [
+        httpx.Response(status_code, request=request),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(return_value={"Authorization": "token"}),
+        ),
+        patch.object(
+            client._http, "request", new=AsyncMock(side_effect=responses)
+        ) as request_mock,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        result = await client.request("GET", "/repos/hiero/sdk-js", 123)
+    assert result == {"ok": True}
+    assert request_mock.await_count == 2
+    sleep.assert_awaited_once_with(expected_wait)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_caps_total_retry_wait_without_retrying_early():
+    client = GitHubClient()
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    responses = [
+        httpx.Response(
+            403,
+            headers={"Retry-After": "2000"},
+            json={"message": "secondary rate limit"},
+            request=request,
+        )
+        for _ in range(2)
+    ]
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(return_value={"Authorization": "token"}),
+        ),
+        patch.object(
+            client._http, "request", new=AsyncMock(side_effect=responses)
+        ) as request_mock,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await client.request("GET", "/repos/hiero/sdk-js", 123)
+    assert request_mock.await_count == 2
+    sleep.assert_awaited_once_with(2000.0)
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_request_invalidates_revoked_installation_token_and_retries_once():
     client = GitHubClient()
     client._installation_tokens[123] = ("revoked-token", time.time() + 3600)
@@ -1020,6 +1166,36 @@ async def test_request_invalidates_revoked_installation_token_and_retries_once()
         result = await client.request("GET", "/repos/hiero/sdk-js", 123)
     assert result == {"ok": True}
     assert 123 not in client._installation_tokens
+    assert headers.await_count == 2
+    assert request_mock.await_count == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_does_not_refresh_token_more_than_once():
+    client = GitHubClient()
+    request = httpx.Request("GET", "https://api.github.com/repos/hiero/sdk-js")
+    responses = [
+        httpx.Response(401, json={"message": "Bad credentials"}, request=request),
+        httpx.Response(401, json={"message": "Bad credentials"}, request=request),
+    ]
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(
+                side_effect=[
+                    {"Authorization": "Bearer old-token"},
+                    {"Authorization": "Bearer fresh-token"},
+                ]
+            ),
+        ) as headers,
+        patch.object(
+            client._http, "request", new=AsyncMock(side_effect=responses)
+        ) as request_mock,
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await client.request("GET", "/repos/hiero/sdk-js", 123)
     assert headers.await_count == 2
     assert request_mock.await_count == 2
     await client.close()
@@ -1193,6 +1369,32 @@ async def test_401_does_not_remove_a_newer_concurrently_refreshed_token():
         result = await client.request("GET", "/repos/hiero/sdk-js", 123)
     assert result == {"ok": True}
     assert client._installation_tokens[123][0] == "new-token"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_token_invalidation_waits_for_refresh_lock():
+    client = GitHubClient()
+    installation_id = 123
+    lock = client._refresh_locks.setdefault(installation_id, asyncio.Lock())
+    client._installation_tokens[installation_id] = (
+        "failed-token", time.time() + 3600
+    )
+
+    async with lock:
+        invalidation = asyncio.create_task(
+            client._invalidate_installation_token(
+                installation_id, "failed-token"
+            )
+        )
+        await asyncio.sleep(0)
+        assert not invalidation.done()
+        client._installation_tokens[installation_id] = (
+            "fresh-token", time.time() + 3600
+        )
+
+    await invalidation
+    assert client._installation_tokens[installation_id][0] == "fresh-token"
     await client.close()
 
 

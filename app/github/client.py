@@ -22,6 +22,7 @@ GITHUB_API = "https://api.github.com"
 # Large enough for any realistic repository, small enough that a runaway loop
 # can't burn an installation's whole rate-limit budget.
 MAX_PAGES = 50
+MAX_RETRY_WAIT_SECONDS = 3600.0
 
 _PEM_MARKERS = [
     (
@@ -215,9 +216,8 @@ class GitHubClient:
                 pass
 
         if secondary_limit:
-            # GitHub requires at least one minute for secondary limits
-            # when Retry-After is absent.
-            waits.append(60.0)
+            if not retry_after:
+                waits.append(60.0)
             if reset_wait is not None:
                 waits.append(reset_wait)
 
@@ -225,6 +225,20 @@ class GitHubClient:
             waits.append(60.0)
 
         return max(waits) if waits else None
+
+    async def _invalidate_installation_token(
+        self, installation_id: int, failed_token: str | None
+    ) -> None:
+        if not failed_token:
+            return
+
+        lock = self._refresh_locks.setdefault(installation_id, asyncio.Lock())
+        async with lock:
+            cached_token = self._installation_tokens.get(
+                installation_id, ("", 0.0)
+            )[0]
+            if cached_token == failed_token:
+                self._installation_tokens.pop(installation_id, None)
 
     async def request(
         self,
@@ -237,6 +251,7 @@ class GitHubClient:
         headers = await self._inst_headers(installation_id)
         max_retries = 3
         backoff = 1.0
+        total_retry_wait = 0.0
         token_refresh_attempted = False
         retryable_method = method in {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
 
@@ -252,23 +267,20 @@ class GitHubClient:
 
                 if resp.status_code == 401 and not token_refresh_attempted:
                     failed_token = self._token_from_headers(headers)
-                    cached_token = self._installation_tokens.get(
-                        installation_id, ("", 0.0)
-                    )[0]
-
-                    # Never remove a token refreshed by another concurrent request.
-                    if failed_token and cached_token == failed_token:
-                        self._installation_tokens.pop(installation_id, None)
-
+                    await self._invalidate_installation_token(
+                        installation_id, failed_token
+                    )
                     headers = await self._inst_headers(installation_id)
                     token_refresh_attempted = True
                     continue
 
-                response_text = resp.text.lower()
-                secondary_limit = (
-                    "secondary rate limit" in response_text
-                    or "secondary-rate-limit" in response_text
-                )
+                secondary_limit = False
+                if resp.status_code == 403:
+                    response_text = resp.text.lower()
+                    secondary_limit = (
+                        "secondary rate limit" in response_text
+                        or "secondary-rate-limit" in response_text
+                    )
                 rate_limited = (
                     resp.status_code == 429
                     or (
@@ -294,15 +306,17 @@ class GitHubClient:
                     else:
                         sleep_time = backoff
 
-                    log.warning(
-                        "GitHub API %s %s returned status %d. Retrying in %.1fs "
-                        "(attempt %d/%d)",
-                        method, path, resp.status_code, sleep_time,
-                        attempt + 1, max_retries,
-                    )
-                    await asyncio.sleep(sleep_time)
-                    backoff = min(backoff * 2.0, 30.0)
-                    continue
+                    if total_retry_wait + sleep_time <= MAX_RETRY_WAIT_SECONDS:
+                        log.warning(
+                            "GitHub API %s %s returned status %d. Retrying in %.1fs "
+                            "(attempt %d/%d)",
+                            method, path, resp.status_code, sleep_time,
+                            attempt + 1, max_retries,
+                        )
+                        await asyncio.sleep(sleep_time)
+                        total_retry_wait += sleep_time
+                        backoff = min(backoff * 2.0, 30.0)
+                        continue
 
                 resp.raise_for_status()
                 if resp.content:
@@ -310,19 +324,29 @@ class GitHubClient:
                 return {}
 
             except httpx.ReadTimeout:
-                if not retryable_method or attempt >= max_retries:
+                if (
+                    not retryable_method
+                    or attempt >= max_retries
+                    or total_retry_wait + backoff > MAX_RETRY_WAIT_SECONDS
+                ):
                     raise
                 await asyncio.sleep(backoff)
+                total_retry_wait += backoff
                 backoff = min(backoff * 2.0, 30.0)
 
             except httpx.RequestError as exc:
-                if not retryable_method or attempt >= max_retries:
+                if (
+                    not retryable_method
+                    or attempt >= max_retries
+                    or total_retry_wait + backoff > MAX_RETRY_WAIT_SECONDS
+                ):
                     raise
                 log.warning(
                     "GitHub API request network error on %s %s: %s. Retrying in %.1fs...",
                     method, path, exc, backoff,
                 )
                 await asyncio.sleep(backoff)
+                total_retry_wait += backoff
                 backoff = min(backoff * 2.0, 30.0)
 
     async def get(self, path: str, installation_id: int, **kwargs: Any) -> Any:
@@ -431,6 +455,7 @@ class GitHubClient:
 
         while page <= max_pages:
             backoff = 1.0
+            total_retry_wait = 0.0
 
             for attempt in range(max_retries + 1):
                 try:
@@ -444,34 +469,59 @@ class GitHubClient:
                         },
                     )
 
-                    if (
-                        resp.status_code in (429, 502, 503, 504)
-                        and attempt < max_retries
-                    ):
-                        retry_after = resp.headers.get("Retry-After")
-                        sleep_time = (
-                            float(retry_after) if retry_after else backoff
+                    secondary_limit = False
+                    if resp.status_code == 403:
+                        response_text = resp.text.lower()
+                        secondary_limit = (
+                            "secondary rate limit" in response_text
+                            or "secondary-rate-limit" in response_text
                         )
-                        log.warning(
-                            "GitHub App API %s page %d returned status %d. "
-                            "Retrying in %.1fs (attempt %d/%d)",
-                            path,
-                            page,
-                            resp.status_code,
-                            sleep_time,
-                            attempt + 1,
-                            max_retries,
+                    rate_limited = (
+                        resp.status_code == 429
+                        or (
+                            resp.status_code == 403
+                            and (
+                                "Retry-After" in resp.headers
+                                or secondary_limit
+                                or resp.headers.get("X-RateLimit-Remaining") == "0"
+                            )
                         )
-                        await asyncio.sleep(sleep_time)
-                        backoff *= 2.0
-                        continue
+                    )
+                    gateway_error = resp.status_code in (502, 503, 504)
+                    if attempt < max_retries and (rate_limited or gateway_error):
+                        if rate_limited:
+                            wait = self._rate_limit_wait(
+                                resp, secondary_limit=secondary_limit
+                            )
+                            sleep_time = wait if wait is not None else backoff
+                        else:
+                            sleep_time = backoff
+
+                        if total_retry_wait + sleep_time <= MAX_RETRY_WAIT_SECONDS:
+                            log.warning(
+                                "GitHub App API %s page %d returned status %d. "
+                                "Retrying in %.1fs (attempt %d/%d)",
+                                path,
+                                page,
+                                resp.status_code,
+                                sleep_time,
+                                attempt + 1,
+                                max_retries,
+                            )
+                            await asyncio.sleep(sleep_time)
+                            total_retry_wait += sleep_time
+                            backoff = min(backoff * 2.0, 30.0)
+                            continue
 
                     resp.raise_for_status()
                     batch = resp.json()
                     break
 
                 except httpx.RequestError as exc:
-                    if attempt >= max_retries:
+                    if (
+                        attempt >= max_retries
+                        or total_retry_wait + backoff > MAX_RETRY_WAIT_SECONDS
+                    ):
                         raise
 
                     log.warning(
@@ -483,7 +533,8 @@ class GitHubClient:
                         backoff,
                     )
                     await asyncio.sleep(backoff)
-                    backoff *= 2.0
+                    total_retry_wait += backoff
+                    backoff = min(backoff * 2.0, 30.0)
             else:
                 raise RuntimeError(
                     f"Unable to fetch paginated GitHub App endpoint: {path}"
@@ -638,9 +689,9 @@ class GitHubClient:
                 f"{urllib.parse.quote(label, safe='')}",
                 installation_id,
             )
-        except httpx.HTTPStatusError:
-            # Label wasn't applied (404) or was already removed — nothing to do.
-            pass
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
 
     async def add_assignees(
         self,
