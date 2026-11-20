@@ -1321,6 +1321,82 @@ async def test_primary_rate_limit_waits_until_reset():
     await client.close()
 
 
+@pytest.mark.parametrize(
+    ("status_code", "headers", "message", "expected_wait"),
+    [
+        (
+            403,
+            {"X-RateLimit-Remaining": "0"},
+            "API rate limit exceeded",
+            60.0,
+        ),
+        (
+            403,
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "not-a-timestamp",
+            },
+            "API rate limit exceeded",
+            60.0,
+        ),
+        (
+            403,
+            {"Retry-After": "not-a-duration"},
+            "You have exceeded a secondary rate limit",
+            60.0,
+        ),
+        (
+            403,
+            {"X-RateLimit-Reset": "1"},
+            "You have exceeded a secondary rate limit",
+            60.0,
+        ),
+    ],
+)
+
+
+@pytest.mark.asyncio
+async def test_request_uses_fallback_for_invalid_rate_limit_headers(
+    status_code, headers, message, expected_wait
+):
+    client = GitHubClient()
+    request = httpx.Request(
+        "GET", "https://api.github.com/repos/hiero/sdk-js"
+    )
+    responses = [
+        httpx.Response(
+            status_code,
+            headers=headers,
+            json={"message": message},
+            request=request,
+        ),
+        httpx.Response(200, json={"ok": True}, request=request),
+    ]
+
+    with (
+        patch.object(
+            client,
+            "_inst_headers",
+            new=AsyncMock(return_value={"Authorization": "Bearer token"}),
+        ),
+        patch.object(
+            client._http,
+            "request",
+            new=AsyncMock(side_effect=responses),
+        ) as request_mock,
+        patch("app.github.client.asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        result = await client.request(
+            "GET", "/repos/hiero/sdk-js", 123
+        )
+
+    assert result == {"ok": True}
+    assert request_mock.await_count == 2
+    sleep.assert_awaited_once_with(expected_wait)
+
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_401_on_last_retry_still_sends_request_with_refreshed_token():
     client = GitHubClient()

@@ -193,15 +193,18 @@ class GitHubClient:
         resp: httpx.Response, *, secondary_limit: bool
     ) -> float | None:
         waits = []
+        valid_retry_after = False
 
         retry_after = resp.headers.get("Retry-After")
         if retry_after:
             try:
                 waits.append(max(0.0, float(retry_after)))
+                valid_retry_after = True
             except ValueError:
                 try:
                     retry_at = parsedate_to_datetime(retry_after).timestamp()
                     waits.append(max(0.0, retry_at - time.time()))
+                    valid_retry_after = True
                 except (TypeError, ValueError, OverflowError):
                     pass
 
@@ -216,12 +219,16 @@ class GitHubClient:
                 pass
 
         if secondary_limit:
-            if not retry_after:
+            # GitHub recommends waiting at least 60 seconds when a
+            # secondary rate-limit response has no valid Retry-After.
+            if not valid_retry_after:
                 waits.append(60.0)
             if reset_wait is not None:
                 waits.append(reset_wait)
 
-        if resp.status_code == 429 and not waits:
+        # Never fall back to ordinary transient-error backoff for a
+        # recognized rate-limit response with unusable timing headers.
+        if resp.status_code in (403, 429) and not waits:
             waits.append(60.0)
 
         return max(waits) if waits else None
