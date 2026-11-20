@@ -64,7 +64,7 @@ The following are generally out of scope unless they demonstrate a concrete secu
 The current security controls include:
 
 - **HMAC webhook verification:** GitHub webhook signatures are verified using HMAC-SHA256 with constant-time comparison.
-- **Replay protection:** GitHub delivery IDs are tracked for a limited TTL so previously processed deliveries are rejected.
+- **Replay protection:** GitHub webhook requests require a non-blank `X-GitHub-Delivery` header (HTTP 400 when absent or blank). A previously claimed delivery returns HTTP 200 with `{"status": "duplicate"}` and skips dispatch. Daily cleanup removes delivery records older than seven days.
 - **Dual-secret rotation:** A current webhook secret and optional previous secret can be accepted simultaneously during zero-downtime rotation.
 - **Dashboard authentication:** Dashboard/API access can be protected with HTTP Basic Authentication using constant-time credential comparison.
 - **Rate limiting:** Webhook and API requests have separate configurable rate limits.

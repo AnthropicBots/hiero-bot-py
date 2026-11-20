@@ -1,33 +1,27 @@
 from __future__ import annotations
 
-from sqlalchemy import delete, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import WebhookDelivery
 
 
-async def is_replay(db: AsyncSession, delivery_id: str) -> bool:
-    if not delivery_id:
-        return False
+async def is_replay(db: AsyncSession, delivery_id: str, event: str) -> bool:
+    # A single insert lets the primary key arbitrate concurrent claims.
+    insert = sqlite_insert if db.get_bind().dialect.name == "sqlite" else postgresql_insert
+    stmt = (
+        insert(WebhookDelivery)
+        .values(id=delivery_id, event=event)
+        .on_conflict_do_nothing(index_elements=[WebhookDelivery.id])
+    )
+    result = await db.execute(stmt)
 
-    try:
-        async with db.begin_nested():
-            db.add(WebhookDelivery(id=delivery_id))
-            await db.flush()
-    except IntegrityError:
-        existing = await db.scalar(
-            select(WebhookDelivery.id).where(WebhookDelivery.id == delivery_id)
-        )
-        if existing:
-            return True
-        raise
-
-    # Persist the claim immediately. Without this, events that write nothing
-    # else (ping, skipped/no-config, unknown commands) roll back at request end
-    # on PostgreSQL and the delivery id is never recorded, so replays pass.
+    # Persist the claim even if dispatch makes no database writes. Close the
+    # transaction before dispatch so workflow I/O never holds the claim lock.
     await db.commit()
-    return False
+    return result.rowcount == 0
 
 
 async def release_delivery(db: AsyncSession, delivery_id: str) -> None:

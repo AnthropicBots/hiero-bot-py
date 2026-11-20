@@ -206,6 +206,7 @@ async def test_config_change_invalidates_cache_before_loading(db):
     router._verify_signature = MagicMock()
     request.headers = {
         "X-GitHub-Event": "push",
+        "X-GitHub-Delivery": "config-change",
     }
     request.json = AsyncMock(return_value=payload)
 
@@ -246,10 +247,13 @@ async def test_invalid_config_is_acknowledged_without_retrying(db, monkeypatch):
     request = MagicMock()
     request.body = AsyncMock(return_value=b"")
     router._verify_signature = MagicMock()
-    request.headers = {"X-GitHub-Event": "pull_request"}
     request.json = AsyncMock(return_value=payload)
 
-    for _ in range(3):
+    for index in range(3):
+        request.headers = {
+            "X-GitHub-Event": "pull_request",
+            "X-GitHub-Delivery": f"invalid-config-{index}",
+        }
         result = await router.handle(request, db)
         assert result == {"ok": True, "skipped": "invalid config"}
 
@@ -298,7 +302,10 @@ async def test_push_config_change_invalidates_real_invalid_config_cache(db):
 
     request = MagicMock()
     request.body = AsyncMock(return_value=b"")
-    request.headers = {"X-GitHub-Event": "push"}
+    request.headers = {
+        "X-GitHub-Event": "push",
+        "X-GitHub-Delivery": "recover-invalid-config",
+    }
     request.json = AsyncMock(return_value=payload)
     router._verify_signature = MagicMock()
 
