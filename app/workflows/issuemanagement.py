@@ -26,7 +26,7 @@ log = get_logger("workflow.issuemanagement")
 # text (an issue title in the label-escalation comment), and a marker smuggled in
 # through that text is never at the end.
 _MARKER_RE = re.compile(
-    r"<!--\s*hiero-bot:lifecycle:(?P<action>[a-z_]+)\s+"
+    r"<!--\s*hiero-bot:lifecycle:(?P<action>stale|unassigned|closed)\s+"
     r"last_activity=(?P<last_activity>\S+?)\s*-->\s*\Z"
 )
 

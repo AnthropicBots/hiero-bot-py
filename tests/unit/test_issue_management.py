@@ -787,6 +787,25 @@ async def test_failed_close_posts_no_notice_until_it_succeeds(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
+async def test_marker_with_an_unknown_action_is_ignored(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=0, assignees=[])
+    _wire(mock_gh, issue)
+    issue.comments.append({
+        "body": "Note\n\n<!-- hiero-bot:lifecycle:bogus last_activity=2000-01-01T00:00:00+00:00 -->",
+        "created_at": clock["now"].isoformat(),
+        "user": {"login": "hiero-bot[bot]", "type": "Bot"},
+    })
+    issue.touch()
+    wf = IssueManagementWorkflow(mock_gh)
+
+    counts = await wf.run_stale_scan(ctx, now=clock["now"] + timedelta(days=1))
+
+    assert counts["stale_marked"] == 0
+
+
+@pytest.mark.asyncio
 async def test_marker_from_another_app_is_ignored(mock_gh, ctx, monkeypatch):
     monkeypatch.setattr("app.workflows.issuemanagement.settings.github_app_id", "12345")
     _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
