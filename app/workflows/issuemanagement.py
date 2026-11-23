@@ -256,11 +256,20 @@ class IssueManagementWorkflow:
         ]
 
         # Auto-unassign
+        # A failure here must not stop the stale decision below: the two actions
+        # are independent and both are judged from the same pre-scan activity.
         if assignees and last_activity < unassign_cutoff:
-            await self._unassign_inactive(
-                ctx, issue, assignees, days_inactive, last_activity
-            )
-            counts["unassigned"] += len(assignees)
+            try:
+                await self._unassign_inactive(
+                    ctx, issue, assignees, days_inactive, last_activity
+                )
+                counts["unassigned"] += len(assignees)
+            except Exception as exc:
+                counts["errors"] += 1
+                log.warning(
+                    "Stale scan %s/%s: could not unassign on #%s: %s",
+                    ctx["owner"], ctx["repo"], issue["number"], exc,
+                )
 
         # Close stale: the close period runs from the stale marking, and is
         # pushed back by any genuine activity since.
@@ -374,13 +383,21 @@ class IssueManagementWorkflow:
         # Remove first, comment last (see _mark_stale). A failed removal posts
         # nothing, so retries on later scans cannot pile up duplicate notices.
         await self._gh.remove_assignees(owner, repo, number, assignees, inst)
-        await self._gh.post_comment(
-            owner, repo, number,
-            f"⏰ {mentions} — auto-unassigned due to inactivity. "
-            f"Re-assign yourself with `/assign` if you're still working on this!"
-            + _marker("unassigned", last_activity),
-            inst,
-        )
+        try:
+            await self._gh.post_comment(
+                owner, repo, number,
+                f"⏰ {mentions} — auto-unassigned due to inactivity. "
+                f"Re-assign yourself with `/assign` if you're still working on this!"
+                + _marker("unassigned", last_activity),
+                inst,
+            )
+        except Exception as exc:
+            # The unassignment happened and must be recorded; only the notice is
+            # lost. Do not retry: the issue has no assignee left to scan again.
+            log.warning(
+                "Unassigned %s on %s/%s#%s but the notice failed: %s",
+                mentions, owner, repo, number, exc,
+            )
         await self._log_stale(ctx, number, "unassigned", days_inactive)
         for login in assignees:
             await audit.record(

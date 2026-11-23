@@ -692,6 +692,52 @@ async def test_edit_shortly_after_a_bot_action_still_counts_as_activity(
 
 
 @pytest.mark.asyncio
+async def test_failed_unassign_notice_does_not_block_stale_marking(mock_gh, ctx):
+    # Past both thresholds: the removal works, its notice fails. Stale marking is
+    # an independent decision from the same pre-scan activity, so it still runs
+    # in this scan and carries the original baseline into the close countdown.
+    _configure(ctx, stale_issue_days=20, close_stale_after_days=5, auto_unassign_inactive_days=9)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=25, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    real_post_comment = mock_gh.post_comment.side_effect
+    attempts = {"count": 0}
+
+    async def fails_once(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("GitHub returned 503")
+        return await real_post_comment(*args, **kwargs)
+
+    mock_gh.post_comment.side_effect = fails_once
+
+    marked, closed = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=12
+    )
+
+    assert issue.assignees == []
+    assert marked == 0
+    assert closed == 5
+
+
+@pytest.mark.asyncio
+async def test_failed_removal_does_not_block_stale_marking(mock_gh, ctx):
+    _configure(ctx, stale_issue_days=20, close_stale_after_days=5, auto_unassign_inactive_days=9)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=25, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+    mock_gh.remove_assignees.side_effect = RuntimeError("GitHub returned 502")
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=3
+    )
+
+    assert marked == 0
+    assert issue.assignees == ["sleepy-dev"]
+
+
+@pytest.mark.asyncio
 async def test_failed_stale_notice_still_closes_on_the_right_day(mock_gh, ctx):
     # The label lands, the notice fails. The issue is stale from that scan on, and
     # the close period runs from it -- not from an older event, so not early.
