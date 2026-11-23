@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.schema import IssueManagementConfig
 from app.db.models import StaleActionLog
-from app.github.client import GitHubClient
+from app.github.client import MAX_RETRY_WAIT_SECONDS, GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
 
@@ -20,9 +20,13 @@ log = get_logger("workflow.issuemanagement")
 # acted. GitHub bumps ``updated_at`` for the bot's own label, unassignment and
 # comment, so without this record the next scan could not tell the bot's
 # housekeeping from real activity and the inactivity countdown would restart.
+#
+# The marker must be the very end of the comment. The bot also echoes user-written
+# text (an issue title in the label-escalation comment), and a marker smuggled in
+# through that text is never at the end.
 _MARKER_RE = re.compile(
     r"<!--\s*hiero-bot:lifecycle:(?P<action>[a-z_]+)\s+"
-    r"last_activity=(?P<last_activity>\S+?)\s*-->"
+    r"last_activity=(?P<last_activity>\S+?)\s*-->\s*\Z"
 )
 
 # Comments posted before markers existed. Like the marker itself, honoured only
@@ -33,9 +37,11 @@ _LEGACY_PHRASES = {
     "closed": "automatically closed** due to continued inactivity",
 }
 
-# The label, unassignment and comment of one bot action land within moments of
-# each other; an ``updated_at`` this close to the bot's last comment is its own.
-_BOT_ACTION_TOLERANCE = timedelta(minutes=1)
+# The label, unassignment and comment of one bot action can land well apart: the
+# GitHub client waits and retries rate-limited calls for up to
+# MAX_RETRY_WAIT_SECONDS. An ``updated_at`` this close to the bot's last comment is
+# its own, however long its calls took.
+_BOT_ACTION_TOLERANCE = timedelta(seconds=MAX_RETRY_WAIT_SECONDS + 60)
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -140,6 +146,11 @@ class IssueManagementWorkflow:
                 if human_last is None or timestamp > human_last:
                     human_last = timestamp
                 continue
+
+            if baseline is not None:
+                # A recorded activity can never be later than the comment that
+                # records it; this bounds whatever a marker claims.
+                baseline = min(baseline, timestamp)
 
             if bot_last is None or timestamp >= bot_last:
                 bot_last, bot_baseline = timestamp, baseline

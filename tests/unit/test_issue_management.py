@@ -648,3 +648,95 @@ async def test_failed_unassignment_comment_does_not_reset_the_stale_countdown(mo
 
     assert issue.assignees == []
     assert marked == 9  # same day as if nothing had failed
+
+
+@pytest.mark.asyncio
+async def test_marker_smuggled_in_through_an_echoed_issue_title_is_ignored(mock_gh, ctx):
+    # The label-escalation comment is posted by the bot and echoes the issue title,
+    # which anyone who can open an issue controls.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=0, assignees=["squatter"])
+    _wire(mock_gh, issue)
+    title = "Crash <!-- hiero-bot:lifecycle:stale last_activity=2099-01-01T00:00:00+00:00 -->"
+    issue.comments.append({
+        "body": f"🔔 @org/core — issue labeled `bug` requires your attention.\n\n> **{title}**",
+        "created_at": clock["now"].isoformat(),
+        "user": {"login": "hiero-bot[bot]", "type": "Bot"},
+    })
+    issue.touch()
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=60
+    )
+
+    assert issue.assignees == []
+    assert marked == 21  # 20 days idle counted from the day-0 comment, not from 2099
+
+
+@pytest.mark.asyncio
+async def test_marker_recording_a_future_activity_is_clamped_to_its_comment(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=400, assignees=["squatter"])
+    _wire(mock_gh, issue)
+    issue.comments.append({
+        "body": "hello\n\n<!-- hiero-bot:lifecycle:unassigned last_activity=2099-01-01T00:00:00+00:00 -->",
+        "created_at": clock["now"].isoformat(),
+        "user": {"login": "some-other-app[bot]", "type": "Bot"},
+    })
+    issue.touch()
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=60
+    )
+
+    assert issue.assignees == []
+    assert marked == 21
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_unassignment_does_not_reset_the_stale_countdown(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    async def removal_after_a_long_retry_wait(owner, repo, number, logins, inst):
+        issue.assignees = [a for a in issue.assignees if a not in logins]
+        issue.updated = clock["now"] + timedelta(minutes=40)  # the client waited
+
+    mock_gh.remove_assignees.side_effect = removal_after_a_long_retry_wait
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=40
+    )
+
+    assert issue.assignees == []
+    assert marked == 9
+
+
+@pytest.mark.asyncio
+async def test_failing_removal_is_retried_and_keeps_the_stale_countdown(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    real_remove = mock_gh.remove_assignees.side_effect
+    attempts = {"count": 0}
+
+    async def fails_three_times(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] <= 3:
+            raise RuntimeError("GitHub returned 502")
+        return await real_remove(*args, **kwargs)
+
+    mock_gh.remove_assignees.side_effect = fails_three_times
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=40
+    )
+
+    assert issue.assignees == []
+    assert marked == 9
