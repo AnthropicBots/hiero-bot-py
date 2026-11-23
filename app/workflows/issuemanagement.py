@@ -25,8 +25,8 @@ _MARKER_RE = re.compile(
     r"last_activity=(?P<last_activity>\S+?)\s*-->"
 )
 
-# Comments posted before markers existed. Honoured only when written by a bot, so
-# a contributor quoting the text still counts as activity.
+# Comments posted before markers existed. Like the marker itself, honoured only
+# when written by a bot, so a contributor quoting the text still counts as activity.
 _LEGACY_PHRASES = {
     "stale": "marked **stale** due to inactivity",
     "unassigned": "auto-unassigned due to inactivity",
@@ -162,7 +162,15 @@ class IssueManagementWorkflow:
     @staticmethod
     def _classify_comment(comment: dict) -> tuple[str | None, datetime | None]:
         """Return ``(action, recorded_activity)`` for a bot lifecycle comment,
-        or ``(None, None)`` for anything else (which counts as activity)."""
+        or ``(None, None)`` for anything else (which counts as activity).
+
+        Only comments written by a bot are trusted: the marker is plain text, so
+        honouring it from anyone could let a contributor forge a far-future
+        ``last_activity`` and keep an issue from ever going stale.
+        """
+        if not _is_bot(comment.get("user")):
+            return None, None
+
         body = comment.get("body") or ""
 
         match = _MARKER_RE.search(body)
@@ -173,11 +181,10 @@ class IssueManagementWorkflow:
                 recorded = None
             return match["action"], recorded
 
-        if _is_bot(comment.get("user")):
-            folded = body.casefold()
-            for action, phrase in _LEGACY_PHRASES.items():
-                if phrase in folded:
-                    return action, None
+        folded = body.casefold()
+        for action, phrase in _LEGACY_PHRASES.items():
+            if phrase in folded:
+                return action, None
         return None, None
 
     async def _scan_issue(
@@ -332,7 +339,10 @@ class IssueManagementWorkflow:
         number = issue["number"]
         mentions = " ".join(f"@{a}" for a in assignees)
 
-        await self._gh.remove_assignees(owner, repo, number, assignees, inst)
+        # Comment first: it carries the marker that preserves the issue's real
+        # activity. If the comment fails nothing has changed yet and the next scan
+        # retries; removing the assignees first would bump updated_at with no
+        # marker to explain it, restarting the stale countdown.
         await self._gh.post_comment(
             owner, repo, number,
             f"⏰ {mentions} — auto-unassigned due to inactivity. "
@@ -340,6 +350,7 @@ class IssueManagementWorkflow:
             + _marker("unassigned", last_activity),
             inst,
         )
+        await self._gh.remove_assignees(owner, repo, number, assignees, inst)
         await self._log_stale(ctx, number, "unassigned", days_inactive)
         for login in assignees:
             await audit.record(

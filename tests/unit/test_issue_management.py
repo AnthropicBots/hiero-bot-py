@@ -386,6 +386,12 @@ async def test_recently_marked_stale_issue_is_not_closed_yet(mock_gh, ctx):
         make_issue(updated_days_ago=3, labels=["stale"])
     ])
 
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+
+    assert counts["closed"] == 0
+    mock_gh.close_issue.assert_not_awaited()
+
+
 # Configurable lifecycle: every threshold below is a deliberately non-default
 # value, so these tests fail if the workflow falls back to hardcoded policy.
 
@@ -596,3 +602,49 @@ async def test_naive_comment_timestamps_do_not_break_the_scan(mock_gh, ctx):
 
     assert counts["errors"] == 0
     assert counts["stale_marked"] == 1
+
+
+@pytest.mark.asyncio
+async def test_marker_forged_by_a_contributor_is_ignored(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=400, assignees=["squatter"])
+    _wire(mock_gh, issue)
+    # A contributor pastes the hidden marker with a far-future "last activity" to
+    # try to keep the issue from ever going stale.
+    issue.human_comment(
+        "hi <!-- hiero-bot:lifecycle:unassigned last_activity=2099-01-01T00:00:00+00:00 -->"
+    )
+
+    clock["now"] += timedelta(days=365)
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    assert counts["unassigned"] == 1
+    assert counts["stale_marked"] == 1
+    assert issue.assignees == []
+
+
+@pytest.mark.asyncio
+async def test_failed_unassignment_comment_does_not_reset_the_stale_countdown(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    real_post_comment = mock_gh.post_comment.side_effect
+    attempts = {"count": 0}
+
+    async def fails_once(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("GitHub returned 503")
+        return await real_post_comment(*args, **kwargs)
+
+    mock_gh.post_comment.side_effect = fails_once
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=40
+    )
+
+    assert issue.assignees == []
+    assert marked == 9  # same day as if nothing had failed

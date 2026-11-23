@@ -208,7 +208,7 @@ The issue-management workflow is configured per repository under `workflows.issu
 | `close_stale_after_days` | Close a stale issue this many *additional* days after it was marked stale. Independent of `stale_issue_days`. |
 | `stale_label`, `exempt_labels` | The label applied to stale issues, and labels that exempt an issue entirely (case-insensitive). |
 
-Inactivity is measured from the last genuine activity (comments, edits, labels and assignments by people). The bot's own unassign, stale and close comments never restart a countdown: each one carries a hidden marker recording the activity it acted on. An issue past both the unassignment and stale thresholds is unassigned and marked stale in the same scan, and new contributor activity restarts the countdowns.
+Inactivity is measured from the last genuine activity (comments, edits, labels and assignments by people). The bot's own unassign, stale and close comments never restart a countdown: each one carries a hidden marker recording the activity it acted on. An issue past both the unassignment and stale thresholds is unassigned and marked stale in the same scan, and new contributor activity restarts the inactivity countdowns. On an issue that is already stale, activity only postpones the close by `close_stale_after_days`; the stale label stays until a maintainer removes it.
 
 ### Environment variables
 
