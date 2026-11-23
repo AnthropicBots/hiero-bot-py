@@ -625,7 +625,10 @@ async def test_marker_forged_by_a_contributor_is_ignored(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
-async def test_failed_unassignment_comment_does_not_reset_the_stale_countdown(mock_gh, ctx):
+async def test_failed_unassignment_comment_never_makes_marking_earlier(mock_gh, ctx):
+    # The comment is the last write of an action. If it fails, the removal's bump
+    # has no marker to explain it and counts as activity: marking is delayed,
+    # never brought forward and never skipped.
     _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
     clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
     issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
@@ -647,7 +650,115 @@ async def test_failed_unassignment_comment_does_not_reset_the_stale_countdown(mo
     )
 
     assert issue.assignees == []
-    assert marked == 9  # same day as if nothing had failed
+    assert marked is not None and marked >= 9
+
+
+@pytest.mark.asyncio
+async def test_failing_removal_posts_no_notice_until_it_succeeds(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+    mock_gh.remove_assignees.side_effect = RuntimeError("GitHub returned 502")
+
+    await _run_daily(IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=3)
+
+    assert mock_gh.post_comment.await_count == 0
+
+
+@pytest.mark.parametrize("minutes", [5, 20, 45])
+@pytest.mark.asyncio
+async def test_edit_shortly_after_a_bot_action_still_counts_as_activity(
+    mock_gh, ctx, minutes
+):
+    # A person editing, re-assigning or reopening soon after the bot acted only
+    # bumps updated_at. It must not be mistaken for the bot's own bump.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+    wf = IssueManagementWorkflow(mock_gh)
+
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    assert issue.assignees == []
+
+    edited = clock["now"] + timedelta(minutes=minutes)
+    issue.updated = edited  # an edit: bumps updated_at, adds no comment
+
+    marked, _ = await _run_daily(wf, ctx, clock, issue, days=40)
+    # The countdown restarts from the edit (20 full days later), not from day 12's
+    # activity, which would mark it on day 9.
+    assert marked == 21
+
+
+@pytest.mark.asyncio
+async def test_failed_stale_notice_still_closes_on_the_right_day(mock_gh, ctx):
+    # The label lands, the notice fails. The issue is stale from that scan on, and
+    # the close period runs from it -- not from an older event, so not early.
+    _configure(ctx, stale_issue_days=20, close_stale_after_days=5, auto_unassign_inactive_days=9)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=25)
+    _wire(mock_gh, issue)
+
+    real_post_comment = mock_gh.post_comment.side_effect
+    attempts = {"count": 0}
+
+    async def fails_once(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("GitHub returned 502")
+        return await real_post_comment(*args, **kwargs)
+
+    mock_gh.post_comment.side_effect = fails_once
+
+    _, closed = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=20
+    )
+
+    assert "stale" in issue.labels
+    # Day 0 labelled the issue; the close period (5 days) runs from there.
+    assert closed is not None and closed >= 5
+
+
+@pytest.mark.asyncio
+async def test_failed_close_posts_no_notice_until_it_succeeds(mock_gh, ctx):
+    _configure(ctx, stale_issue_days=20, close_stale_after_days=5, auto_unassign_inactive_days=9)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=40)
+    issue.labels.append("stale")
+    issue.comments.append({
+        "body": "⚠️ This issue has been marked **stale** due to inactivity.",
+        "created_at": (clock["now"] - timedelta(days=30)).isoformat(),
+        "user": {"login": "hiero-bot[bot]", "type": "Bot"},
+    })
+    _wire(mock_gh, issue)
+    mock_gh.close_issue.side_effect = RuntimeError("GitHub returned 502")
+
+    await _run_daily(IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=3)
+
+    assert issue.state == "open"
+    assert mock_gh.post_comment.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_marker_from_another_app_is_ignored(mock_gh, ctx, monkeypatch):
+    monkeypatch.setattr("app.workflows.issuemanagement.settings.github_app_id", "12345")
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=0, assignees=[])
+    _wire(mock_gh, issue)
+    issue.comments.append({
+        "body": "Echo\n\n<!-- hiero-bot:lifecycle:stale last_activity=2000-01-01T00:00:00+00:00 -->",
+        "created_at": clock["now"].isoformat(),
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+        "performed_via_github_app": {"id": 999999},
+    })
+    issue.touch()
+    wf = IssueManagementWorkflow(mock_gh)
+
+    counts = await wf.run_stale_scan(ctx, now=clock["now"] + timedelta(days=1))
+
+    assert counts["stale_marked"] == 0
 
 
 @pytest.mark.asyncio

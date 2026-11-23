@@ -9,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.schema import IssueManagementConfig
 from app.db.models import StaleActionLog
-from app.github.client import MAX_RETRY_WAIT_SECONDS, GitHubClient
+from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
+from app.utils.settings import settings
 
 log = get_logger("workflow.issuemanagement")
 
@@ -37,11 +38,10 @@ _LEGACY_PHRASES = {
     "closed": "automatically closed** due to continued inactivity",
 }
 
-# The label, unassignment and comment of one bot action can land well apart: the
-# GitHub client waits and retries rate-limited calls for up to
-# MAX_RETRY_WAIT_SECONDS. An ``updated_at`` this close to the bot's last comment is
-# its own, however long its calls took.
-_BOT_ACTION_TOLERANCE = timedelta(seconds=MAX_RETRY_WAIT_SECONDS + 60)
+# Every bot action ends with its lifecycle comment, so the ``updated_at`` GitHub
+# stamps for that action is the comment's own time. An ``updated_at`` this close
+# to the bot's last comment is its own; anything later is somebody else's.
+_BOT_ACTION_TOLERANCE = timedelta(seconds=60)
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -52,6 +52,23 @@ def _parse_timestamp(value: str) -> datetime:
 def _is_bot(user: dict | None) -> bool:
     user = user or {}
     return user.get("type") == "Bot" or str(user.get("login", "")).endswith("[bot]")
+
+
+def _is_own_comment(comment: dict) -> bool:
+    """True when ``comment`` was written by this GitHub App.
+
+    Other bots (CI, dependabot, ...) may echo user-controlled text, so their
+    comments must never carry a trusted marker. When GitHub reports the app
+    that wrote the comment it has to be ours; when it reports none we fall
+    back to the bot check.
+    """
+    if not _is_bot(comment.get("user")):
+        return False
+    app = comment.get("performed_via_github_app")
+    if isinstance(app, dict) and app.get("id") is not None:
+        configured = str(settings.github_app_id or "")
+        return not configured or str(app["id"]) == configured
+    return True
 
 
 def _marker(action: str, last_activity: datetime | None) -> str:
@@ -179,7 +196,7 @@ class IssueManagementWorkflow:
         honouring it from anyone could let a contributor forge a far-future
         ``last_activity`` and keep an issue from ever going stale.
         """
-        if not _is_bot(comment.get("user")):
+        if not _is_own_comment(comment):
             return None, None
 
         body = comment.get("body") or ""
@@ -305,6 +322,10 @@ class IssueManagementWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
 
+        # The comment goes last: GitHub stamps updated_at when it lands, so the
+        # bump that follows is the comment's own and the marker explains it. If
+        # the comment fails, the unexplained bump just counts as activity and the
+        # issue is retried later -- it is never closed early.
         await self._gh.add_label(owner, repo, number, stale_label, inst)
         await self._gh.post_comment(
             owner, repo, number,
@@ -328,6 +349,7 @@ class IssueManagementWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
 
+        await self._gh.close_issue(owner, repo, number, inst)
         await self._gh.post_comment(
             owner, repo, number,
             "🔒 This issue has been **automatically closed** due to continued inactivity.\n\n"
@@ -335,7 +357,6 @@ class IssueManagementWorkflow:
             + _marker("closed", last_activity),
             inst,
         )
-        await self._gh.close_issue(owner, repo, number, inst)
         await self._log_stale(ctx, number, "closed", days_inactive)
         await audit.record(
             ctx["db"], action="issue.closed", owner=owner, repo=repo,
@@ -350,10 +371,9 @@ class IssueManagementWorkflow:
         number = issue["number"]
         mentions = " ".join(f"@{a}" for a in assignees)
 
-        # Comment first: it carries the marker that preserves the issue's real
-        # activity. If the comment fails nothing has changed yet and the next scan
-        # retries; removing the assignees first would bump updated_at with no
-        # marker to explain it, restarting the stale countdown.
+        # Remove first, comment last (see _mark_stale). A failed removal posts
+        # nothing, so retries on later scans cannot pile up duplicate notices.
+        await self._gh.remove_assignees(owner, repo, number, assignees, inst)
         await self._gh.post_comment(
             owner, repo, number,
             f"⏰ {mentions} — auto-unassigned due to inactivity. "
@@ -361,7 +381,6 @@ class IssueManagementWorkflow:
             + _marker("unassigned", last_activity),
             inst,
         )
-        await self._gh.remove_assignees(owner, repo, number, assignees, inst)
         await self._log_stale(ctx, number, "unassigned", days_inactive)
         for login in assignees:
             await audit.record(
