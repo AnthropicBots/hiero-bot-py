@@ -111,7 +111,7 @@ async def test_request_carries_config_model_and_timeout():
 
 
 @pytest.mark.asyncio
-async def test_logs_provider_and_model(caplog):
+async def test_logs_provider_and_model(hiero_caplog):
     import logging
 
     backend = StubBackend(review_json())
@@ -121,16 +121,16 @@ async def test_logs_provider_and_model(caplog):
         provider="auto",
     )
 
-    with caplog.at_level(logging.INFO, logger="hiero.ai.reviewer"):
+    with hiero_caplog.at_level(logging.INFO, logger="hiero.ai.reviewer"):
         await AIReviewer(backend).review(cfg, "PR", "", DIFFS)
 
-    assert "provider=stub" in caplog.text
-    assert "model=local-model:7b" in caplog.text
+    assert "provider=stub" in hiero_caplog.text
+    assert "model=local-model:7b" in hiero_caplog.text
 
 
 @pytest.mark.asyncio
 async def test_logs_configured_provider_and_model_on_backend_creation(
-    monkeypatch, caplog
+    monkeypatch, hiero_caplog
 ):
     import logging
 
@@ -152,12 +152,12 @@ async def test_logs_configured_provider_and_model_on_backend_creation(
         provider="anthropic",
     )
 
-    with caplog.at_level(logging.INFO, logger="hiero.ai.reviewer"):
+    with hiero_caplog.at_level(logging.INFO, logger="hiero.ai.reviewer"):
         await AIReviewer().review(cfg, "PR", "", DIFFS)
 
     assert requested_providers == ["anthropic"]
-    assert "provider=anthropic" in caplog.text
-    assert "model=claude-test-model" in caplog.text
+    assert "provider=anthropic" in hiero_caplog.text
+    assert "model=claude-test-model" in hiero_caplog.text
 
 
 @pytest.mark.asyncio

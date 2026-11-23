@@ -7,13 +7,26 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.routes import router as api_router
 from app.auth.session import SESSION_COOKIE_NAME, create_db_session
+from app.auth.sync import clear_sync_cache
 from app.db.database import Base, get_db
-from app.db.models import Account, AccountUser, AuditLog, User
+from app.db.models import (
+    Account,
+    AccountRepo,
+    AccountUser,
+    AuditLog,
+    ContributorSnapshot,
+    PRHealthScore,
+    StaleActionLog,
+    User,
+)
 from app.main import app
+from app.utils.access import AuthorizedAccess, get_authorized_access
 
 
 @pytest_asyncio.fixture
 async def api_db():
+    clear_sync_cache()
+
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
 
     async with engine.begin() as conn:
@@ -37,10 +50,74 @@ async def api_db():
                 ),
                 AuditLog(
                     action="issue.assigned",
+                    owner="hiero",
+                    repo="secret",
+                    reason="unauthorized repository",
+                    target_login="bob",
+                ),
+                AuditLog(
+                    action="issue.assigned",
                     owner="other",
                     repo="other-repo",
                     reason="second tenant",
-                    target_login="bob",
+                    target_login="charlie",
+                ),
+                PRHealthScore(
+                    owner="hiero",
+                    repo="sdk-js",
+                    pr_number=1,
+                    pr_author="alice",
+                    score=90.0,
+                ),
+                PRHealthScore(
+                    owner="hiero",
+                    repo="secret",
+                    pr_number=2,
+                    pr_author="bob",
+                    score=50.0,
+                ),
+                PRHealthScore(
+                    owner="other",
+                    repo="other-repo",
+                    pr_number=3,
+                    pr_author="charlie",
+                    score=40.0,
+                ),
+                ContributorSnapshot(
+                    owner="hiero",
+                    repo="sdk-js",
+                    login="alice",
+                ),
+                ContributorSnapshot(
+                    owner="hiero",
+                    repo="secret",
+                    login="bob",
+                ),
+                ContributorSnapshot(
+                    owner="other",
+                    repo="other-repo",
+                    login="charlie",
+                ),
+                StaleActionLog(
+                    owner="hiero",
+                    repo="sdk-js",
+                    issue_number=10,
+                    action="marked_stale",
+                    days_inactive=60,
+                ),
+                StaleActionLog(
+                    owner="hiero",
+                    repo="secret",
+                    issue_number=11,
+                    action="marked_stale",
+                    days_inactive=90,
+                ),
+                StaleActionLog(
+                    owner="other",
+                    repo="other-repo",
+                    issue_number=12,
+                    action="closed",
+                    days_inactive=120,
                 ),
             ]
         )
@@ -49,6 +126,7 @@ async def api_db():
         yield session
 
     await engine.dispose()
+    clear_sync_cache()
 
 
 @pytest_asyncio.fixture
@@ -78,7 +156,12 @@ async def api_user(api_db):
         authorized=True,
     )
 
-    api_db.add(account_user)
+    account_repo = AccountRepo(
+        account_id=account.id,
+        repo_name="sdk-js",
+    )
+
+    api_db.add_all([account_user, account_repo])
     await api_db.commit()
 
     return user
@@ -255,6 +338,112 @@ async def test_legitimate_filters_still_work(client):
     assert rows[0]["repo"] == "sdk-js"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/v1/audit",
+        "/api/v1/pr-health",
+        "/api/v1/contributors",
+        "/api/v1/stale-log",
+    ],
+)
+async def test_list_endpoints_only_return_authorized_repositories(
+    client,
+    endpoint,
+):
+    response = await client.get(endpoint)
+
+    assert response.status_code == 200
+
+    rows = response.json()
+
+    assert len(rows) == 1
+    assert rows[0]["owner"] == "hiero"
+    assert rows[0]["repo"] == "sdk-js"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/v1/audit",
+        "/api/v1/pr-health",
+        "/api/v1/contributors",
+        "/api/v1/stale-log",
+    ],
+)
+async def test_list_endpoints_exclude_unauthorized_repo_filter(
+    client,
+    endpoint,
+):
+    response = await client.get(
+        endpoint,
+        params={"repo": "secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/v1/audit",
+        "/api/v1/pr-health",
+        "/api/v1/contributors",
+        "/api/v1/stale-log",
+    ],
+)
+async def test_list_endpoints_reject_explicit_unauthorized_repo(
+    client,
+    endpoint,
+):
+    response = await client.get(
+        endpoint,
+        params={"owner": "hiero", "repo": "secret"},
+    )
+
+    assert response.status_code == 403
+    assert "Access denied" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/v1/audit",
+        "/api/v1/pr-health",
+        "/api/v1/contributors",
+        "/api/v1/stale-log",
+    ],
+)
+async def test_list_endpoints_return_empty_for_empty_repo_inventory(
+    client,
+    endpoint,
+):
+    app.dependency_overrides[get_authorized_access] = lambda: AuthorizedAccess(
+        {"hiero"},
+        {"hiero": set()},
+    )
+
+    try:
+        response = await client.get(endpoint)
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+        denied_response = await client.get(
+            endpoint,
+            params={"owner": "hiero", "repo": "sdk-js"},
+        )
+
+        assert denied_response.status_code == 403
+    finally:
+        app.dependency_overrides.pop(get_authorized_access, None)
+
+
 # ── Resource bounds ───────────────────────────────────────────
 
 
@@ -319,6 +508,47 @@ async def test_stats_endpoints_require_their_scope(client):
     assert (
         await client.get("/api/v1/repos/stats")
     ).status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/v1/pr-health/stats",
+        "/api/v1/repos/stats",
+    ],
+)
+async def test_stats_endpoints_enforce_repo_access(client, endpoint):
+    authorized_response = await client.get(
+        endpoint,
+        params={"owner": "hiero", "repo": "sdk-js"},
+    )
+
+    assert authorized_response.status_code == 200
+
+    unauthorized_response = await client.get(
+        endpoint,
+        params={"owner": "hiero", "repo": "secret"},
+    )
+
+    assert unauthorized_response.status_code == 403
+    assert "Access denied" in unauthorized_response.json()["detail"]
+
+    app.dependency_overrides[get_authorized_access] = lambda: AuthorizedAccess(
+        {"hiero"},
+        {"hiero": set()},
+    )
+
+    try:
+        empty_inventory_response = await client.get(
+            endpoint,
+            params={"owner": "hiero", "repo": "sdk-js"},
+        )
+
+        assert empty_inventory_response.status_code == 403
+        assert "Access denied" in empty_inventory_response.json()["detail"]
+    finally:
+        app.dependency_overrides.pop(get_authorized_access, None)
 
 
 # ── Responses leak nothing sensitive ──────────────────────────

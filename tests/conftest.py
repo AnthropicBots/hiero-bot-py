@@ -1,5 +1,6 @@
 # tests/conftest.py
 
+import logging
 import types
 from unittest.mock import AsyncMock
 
@@ -117,3 +118,15 @@ def ctx(base_config, db):
         "db": db,
         "account": premium_account,
     }
+
+
+@pytest.fixture
+def hiero_caplog(caplog):
+    """Capture hiero logs without enabling propagation to the root logger."""
+    hiero_logger = logging.getLogger("hiero")
+    hiero_logger.addHandler(caplog.handler)
+
+    try:
+        yield caplog
+    finally:
+        hiero_logger.removeHandler(caplog.handler)

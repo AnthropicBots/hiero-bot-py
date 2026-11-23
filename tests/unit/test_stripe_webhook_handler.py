@@ -311,7 +311,9 @@ async def test_invalid_json_payload_returns_400(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unmatched_subscription_event_returns_400(db, monkeypatch, caplog):
+async def test_unmatched_subscription_event_returns_400(
+    db, monkeypatch, hiero_caplog
+):
     """An unmatched subscription event must return 400 so Stripe retries it."""
     import logging
 
@@ -325,11 +327,17 @@ async def test_unmatched_subscription_event_returns_400(db, monkeypatch, caplog)
     sig = sign(SECRET, body, int(time.time()))
     request = make_request(body, sig)
 
-    with caplog.at_level(logging.WARNING, logger="hiero.billing.stripe"), pytest.raises(HTTPException) as exc:
+    with (
+        hiero_caplog.at_level(logging.WARNING, logger="hiero.billing.stripe"),
+        pytest.raises(HTTPException) as exc,
+    ):
         await stripe_webhook(request, db=db)
 
     assert exc.value.status_code == 400
-    assert any("could not be matched" in r.message for r in caplog.records)
+    assert any(
+        "could not be matched" in record.message
+        for record in hiero_caplog.records
+    )
 
 
 @pytest.mark.asyncio

@@ -133,9 +133,9 @@ class IssueManagementWorkflow:
         if labels.intersection(label.casefold() for label in cfg.exempt_labels):
             return
 
-        updated = datetime.fromisoformat(
-            issue["updated_at"].replace("Z", "+00:00")
-        )
+        updated = datetime.fromisoformat(issue["updated_at"])
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=UTC)
         is_stale = cfg.stale_label.casefold() in labels
 
         last_activity, stale_marked_at = await self._get_last_activity(
