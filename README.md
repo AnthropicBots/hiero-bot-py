@@ -196,6 +196,20 @@ Add `.github/hiero-bot.yml` to any repo where the app is installed. Full referen
 
 **Defaults.** Once a config file exists, onboarding, PR quality gates, PR health scoring and contributor progression are on unless you set `enabled: false`. **Issue management (stale scan, auto-close, auto-unassign) and reviewer assignment are off** and must be enabled explicitly, for example `workflows.issue_management.enabled: true`.
 
+### Issue lifecycle
+
+The issue-management workflow is configured per repository under `workflows.issue_management` in `.github/hiero-bot.yml`; the day counts in the template are examples, not policy.
+
+| Key | Meaning |
+|---|---|
+| `enabled` | `false` (the default) turns off the whole workflow: no unassigning, stale marking, closing or lifecycle comments. |
+| `auto_unassign_inactive_days` | Remove assignees after this many days without activity. |
+| `stale_issue_days` | Mark an issue stale after this many days without activity. |
+| `close_stale_after_days` | Close a stale issue this many *additional* days after it was marked stale. Independent of `stale_issue_days`. |
+| `stale_label`, `exempt_labels` | The label applied to stale issues, and labels that exempt an issue entirely (case-insensitive). |
+
+Inactivity is measured from the last genuine activity (comments, edits, labels and assignments by people). The bot's own unassign, stale and close comments never restart a countdown: each one carries a hidden marker recording the activity it acted on. An issue past both the unassignment and stale thresholds is unassigned and marked stale in the same scan, and new contributor activity restarts the countdowns.
+
 ### Environment variables
 
 | Variable | Required | Description |

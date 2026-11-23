@@ -249,25 +249,35 @@ async def test_existing_stale_label_is_recognised_regardless_of_case(mock_gh, ct
 
 
 class _FakeGitHubIssue:
-    """One issue behaving like GitHub: the bot's own label and comment bump
-    ``updated_at``, exactly as they do on the real API."""
+    """One issue behaving like GitHub: the bot's own label, assignee change and
+    comment bump ``updated_at``, exactly as they do on the real API."""
 
-    def __init__(self, clock, idle_days: int):
+    def __init__(self, clock, idle_days: int, assignees=None):
         self.clock = clock
         self.updated = clock["now"] - timedelta(days=idle_days)
         self.labels: list[str] = []
+        self.assignees: list[str] = list(assignees or [])
         self.comments: list[dict] = []
         self.state = "open"
 
     def touch(self):
         self.updated = self.clock["now"]
 
+    def human_comment(self, body="Here is a genuine update."):
+        """A contributor comment: genuine activity, and it bumps updated_at."""
+        self.comments.append({
+            "body": body,
+            "created_at": self.clock["now"].isoformat(),
+            "user": {"login": "contributor", "type": "User"},
+        })
+        self.touch()
+
     def as_dict(self):
         return {
             "number": 1,
             "updated_at": self.updated.isoformat(),
             "labels": [{"name": name} for name in self.labels],
-            "assignees": [],
+            "assignees": [{"login": login} for login in self.assignees],
         }
 
 
@@ -279,11 +289,15 @@ def _wire(mock_gh, issue: _FakeGitHubIssue):
         issue.labels.append(label)
         issue.touch()
 
+    async def remove_assignees(owner, repo, number, logins, inst):
+        issue.assignees = [a for a in issue.assignees if a not in logins]
+        issue.touch()
+
     async def post_comment(owner, repo, number, body, inst):
         issue.comments.append({
             "body": body,
             "created_at": issue.clock["now"].isoformat(),
-            "user": {"login": "hiero-bot"},
+            "user": {"login": "hiero-bot[bot]", "type": "Bot"},
         })
         issue.touch()
 
@@ -295,6 +309,7 @@ def _wire(mock_gh, issue: _FakeGitHubIssue):
 
     mock_gh.list_issues = AsyncMock(side_effect=list_issues)
     mock_gh.add_label = AsyncMock(side_effect=add_label)
+    mock_gh.remove_assignees = AsyncMock(side_effect=remove_assignees)
     mock_gh.post_comment = AsyncMock(side_effect=post_comment)
     mock_gh.list_issue_comments = AsyncMock(side_effect=list_issue_comments)
     mock_gh.close_issue = AsyncMock(side_effect=close_issue)
@@ -315,6 +330,14 @@ async def _run_daily(wf, ctx, clock, issue, days, on_day=None):
             closed = day
             break
     return marked, closed
+
+
+def _configure(ctx, **overrides):
+    """Override lifecycle settings, as a repo would in .github/hiero-bot.yml."""
+    cfg = ctx["config"].workflows.issue_management
+    for name, value in overrides.items():
+        setattr(cfg, name, value)
+    return cfg
 
 
 @pytest.mark.asyncio
@@ -363,7 +386,213 @@ async def test_recently_marked_stale_issue_is_not_closed_yet(mock_gh, ctx):
         make_issue(updated_days_ago=3, labels=["stale"])
     ])
 
-    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+# Configurable lifecycle: every threshold below is a deliberately non-default
+# value, so these tests fail if the workflow falls back to hardcoded policy.
 
-    assert counts["closed"] == 0
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stale_days", "close_days"),
+    [(20, 5), (45, 3), (8, 12)],  # the last one closes *later* than it goes stale
+)
+async def test_custom_thresholds_drive_marking_and_closing(
+    mock_gh, ctx, stale_days, close_days
+):
+    _configure(ctx, stale_issue_days=stale_days, close_stale_after_days=close_days)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=stale_days + 1)
+    _wire(mock_gh, issue)
+
+    marked, closed = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=120
+    )
+
+    assert marked == 0
+    assert closed == close_days
+
+
+@pytest.mark.asyncio
+async def test_custom_unassign_threshold_is_respected(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=40)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=8, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+    wf = IssueManagementWorkflow(mock_gh)
+
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    assert issue.assignees == ["sleepy-dev"]  # 8 days idle < 9
+
+    clock["now"] += timedelta(days=2)  # now 10 days idle
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    assert issue.assignees == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_workflow_takes_no_lifecycle_actions(mock_gh, ctx):
+    from app.config.schema import LabelEscalationRule
+
+    _configure(
+        ctx,
+        enabled=False,
+        label_escalation_rules=[LabelEscalationRule(label="security", notify_team="sec")],
+    )
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=400, assignees=["sleepy-dev"])
+    issue.labels.append("stale")
+    _wire(mock_gh, issue)
+    wf = IssueManagementWorkflow(mock_gh)
+
+    counts = await wf.run_stale_scan(ctx, now=clock["now"])
+    await wf.handle_label_escalation(
+        ctx, {"issue": {"number": 1, "title": "t"}, "label": {"name": "security"}}
+    )
+
+    assert counts == {}
+    mock_gh.list_issues.assert_not_awaited()
+    mock_gh.remove_assignees.assert_not_awaited()
+    mock_gh.add_label.assert_not_awaited()
+    mock_gh.post_comment.assert_not_awaited()
     mock_gh.close_issue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_issue_past_both_thresholds_is_unassigned_and_marked_stale_in_one_scan(
+    mock_gh, ctx
+):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=25, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    assert counts["unassigned"] == 1
+    assert counts["stale_marked"] == 1
+    assert issue.assignees == []
+    assert "stale" in issue.labels
+    assert counts["closed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unassignment_does_not_reset_the_stale_countdown(mock_gh, ctx):
+    # 12 days idle: past the unassign threshold (9) but not the stale one (20).
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=60
+    )
+
+    assert issue.assignees == []
+    # Idle since day -12, so more than 20 days idle from day 9. A countdown that
+    # restarted at the unassignment comment would only mark it stale on day 21.
+    assert marked == 9
+
+
+@pytest.mark.asyncio
+async def test_stale_marking_does_not_extend_the_close_countdown_across_scans(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20, close_stale_after_days=4)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=25, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    marked, closed = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=60
+    )
+
+    assert marked == 0
+    assert closed == 4  # counted from the stale marking, not from the unassignment
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activity", ["comment", "non_comment"])
+async def test_genuine_activity_after_housekeeping_restarts_the_countdown(
+    mock_gh, ctx, activity
+):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    def contributor_returns_on_day_3(day):
+        if day == 3:
+            if activity == "comment":
+                issue.human_comment()
+            else:  # e.g. an edit or a label change: bumps updated_at only
+                issue.touch()
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=60,
+        on_day=contributor_returns_on_day_3,
+    )
+
+    assert marked == 24  # more than 20 days after the day-3 activity
+
+
+@pytest.mark.asyncio
+async def test_human_comment_quoting_bot_text_still_counts_as_activity(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    def contributor_quotes_the_bot(day):
+        if day == 3:
+            issue.human_comment("> auto-unassigned due to inactivity\n\nI am back!")
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=60,
+        on_day=contributor_quotes_the_bot,
+    )
+
+    assert marked == 24
+
+
+@pytest.mark.asyncio
+async def test_unassignment_comment_mentions_the_assignees(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=40)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["alice", "bob"])
+    _wire(mock_gh, issue)
+
+    await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    body = mock_gh.post_comment.call_args[0][3]
+    assert "@alice @bob" in body
+    assert "auto-unassigned due to inactivity. Re-assign yourself" in body
+
+
+@pytest.mark.asyncio
+async def test_custom_exempt_labels_leave_the_issue_untouched(mock_gh, ctx):
+    _configure(ctx, exempt_labels=["keep-open"], auto_unassign_inactive_days=9,
+               stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=400, assignees=["sleepy-dev"])
+    issue.labels.append("Keep-Open")
+    _wire(mock_gh, issue)
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    assert counts["unassigned"] == counts["stale_marked"] == counts["closed"] == 0
+    assert issue.assignees == ["sleepy-dev"]
+    mock_gh.post_comment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_naive_comment_timestamps_do_not_break_the_scan(mock_gh, ctx):
+    _configure(ctx, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=25)
+    issue.comments.append({
+        "body": "old comment",
+        "created_at": "2025-12-01T00:00:00",
+        "user": {"login": "contributor", "type": "User"},
+    })
+    _wire(mock_gh, issue)
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    assert counts["errors"] == 0
+    assert counts["stale_marked"] == 1
