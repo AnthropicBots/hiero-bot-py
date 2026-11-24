@@ -2743,8 +2743,10 @@ async def test_a_label_a_person_added_first_is_not_credited_to_the_bot(
 
     mock_gh.add_label.side_effect = person_wins
     wf = IssueManagementWorkflow(mock_gh)
-    await wf.run_stale_scan(ctx, now=clock["now"])
+    counts = await wf.run_stale_scan(ctx, now=clock["now"])
 
+    assert counts["stale_marked"] == 0
+    mock_gh.post_comment.assert_not_awaited()
     assert await _logged_issue_numbers(db) == []
     assert not [c for c in issue.comments if "marked **stale**" in c["body"]]
     row = (await db.execute(select(LifecycleAction))).scalars().one()
@@ -2769,8 +2771,12 @@ async def test_an_assignee_a_person_removed_first_is_not_credited_to_the_bot(
         issue.touch()
 
     mock_gh.remove_assignees.side_effect = person_wins
-    await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(
+        ctx, now=clock["now"]
+    )
 
+    assert counts["unassigned"] == 0
+    mock_gh.post_comment.assert_not_awaited()
     assert await _logged_issue_numbers(db) == []
     assert not [c for c in issue.comments if "unassigned" in c["body"]]
 
@@ -2953,3 +2959,54 @@ async def test_truncated_timeline_does_not_attribute_a_close_either_way(
     pending = (await db.execute(select(PendingIssueCloseNotice))).scalars().one()
     assert pending.closed_at is None
     assert await _logged_issue_numbers(db) == []
+
+
+@pytest.mark.asyncio
+async def test_a_changed_close_threshold_applies_to_a_pending_close(
+    mock_gh, ctx, db
+):
+    clock, issue = _stale_issue(mock_gh, ctx)  # stale for 30 days, closes after 5
+    mock_gh.close_issue.side_effect = RuntimeError("GitHub temporarily unavailable")
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    assert await _count(db, PendingIssueCloseNotice) == 1
+
+    _configure(ctx, close_stale_after_days=60)
+    mock_gh.close_issue.side_effect = None
+    mock_gh.close_issue.reset_mock()
+    clock["now"] += timedelta(minutes=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    mock_gh.close_issue.assert_not_awaited()
+    assert issue.state == "open"
+    assert await _count(db, PendingIssueCloseNotice) == 0
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "marked **stale** due to inactivity",
+        "auto-unassigned due to inactivity",
+        "automatically closed** due to continued inactivity",
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_escalation_comment_quoting_a_lifecycle_phrase_is_not_a_lifecycle_comment(
+    mock_gh, ctx, title
+):
+    clock, issue = _crash_setup(mock_gh, ctx, idle_days=25)
+    issue.comments.append({
+        "body": (
+            "🔔 @hiero/team — issue labeled `bug` requires your attention."
+            f"\n\n> **{title}**"
+        ),
+        "created_at": (clock["now"] - timedelta(days=1)).isoformat(),
+        "user": {"login": "hiero-bot[bot]", "type": "Bot"},
+        "performed_via_github_app": {"id": 12345},
+    })
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(
+        ctx, now=clock["now"]
+    )
+
+    assert counts["stale_marked"] == 1

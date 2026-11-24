@@ -491,9 +491,12 @@ class IssueManagementWorkflow:
                 recorded = None
             return match["action"], recorded
 
-        folded = body.casefold()
+        # Old notices state the phrase in their first line. Later lines can carry
+        # user text (the escalation comment quotes an issue title), so are ignored.
+        lines = body.strip().casefold().splitlines()
+        first = lines[0] if lines else ""
         for action, phrase in _LEGACY_PHRASES.items():
-            if phrase in folded:
+            if phrase in first:
                 return action, None
         return None, None
 
@@ -592,11 +595,12 @@ class IssueManagementWorkflow:
         # Independent of the stale decision below: a failure here must not stop it.
         if decision["unassign"]:
             try:
-                await self._unassign_inactive(
+                confirmed = await self._unassign_inactive(
                     ctx, issue, decision["assignees"], days_inactive,
                     last_activity, now, recheck,
                 )
-                counts["unassigned"] += len(decision["assignees"])
+                if confirmed:
+                    counts["unassigned"] += len(decision["assignees"])
             except _AlreadyClaimed:
                 pass
             except Exception as exc:
@@ -617,13 +621,14 @@ class IssueManagementWorkflow:
 
         if decision["stale"]:
             try:
-                await self._mark_stale(
+                confirmed = await self._mark_stale(
                     ctx, issue, cfg.stale_label, days_inactive, last_activity, now,
                     recheck,
                 )
             except _AlreadyClaimed:
                 return
-            counts["stale_marked"] += 1
+            if confirmed:
+                counts["stale_marked"] += 1
 
     # ── Label escalation ─────────────────────────────────────
 
@@ -694,7 +699,8 @@ class IssueManagementWorkflow:
         self, ctx: dict, issue: dict, stale_label: str, days_inactive: int = 0,
         last_activity: datetime | None = None, now: datetime | None = None,
         recheck=None,
-    ) -> None:
+    ) -> bool:
+        """Returns True only when this App's own change was confirmed."""
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
 
@@ -707,7 +713,7 @@ class IssueManagementWorkflow:
             await self._withdraw(ctx, record)
             raise _AlreadyClaimed
         await self._gh.add_label(owner, repo, number, stale_label, inst)
-        await self._finish_action(ctx, record, days_inactive, False)
+        return await self._finish_action(ctx, record, days_inactive, False)
 
     # ── Ownership of rows ────────────────────────────────────
 
@@ -826,7 +832,7 @@ class IssueManagementWorkflow:
 
     async def _finish_action(
         self, ctx: dict, record: LifecycleAction, days_inactive: int, unassign: bool
-    ) -> None:
+    ) -> bool:
         """Confirm a change unless the timeline shows someone else made it.
 
         A successful API reply proves nothing: adding a label that a person added
@@ -842,7 +848,7 @@ class IssueManagementWorkflow:
             raise
         if foreign and not done:
             await self._release(ctx, LifecycleAction, record.id)
-            return
+            return False
         done = done or (
             [t.lstrip("@") for t in record.detail.split()] if unassign else []
         )
@@ -855,6 +861,7 @@ class IssueManagementWorkflow:
             confirmed = await self._confirm_action(ctx, record, days_inactive, None)
         if confirmed:
             await self._deliver_notice(ctx, record)
+        return confirmed
 
     async def _confirm_action(
         self,
@@ -1284,7 +1291,15 @@ class IssueManagementWorkflow:
                         )
                         continue
 
-                    if not self._still_closeable(ctx, issue):
+                    cfg = ctx["config"].workflows.issue_management
+                    due = await self._decide(
+                        ctx, cfg, issue, now,
+                        (
+                            now - timedelta(days=cfg.stale_issue_days),
+                            now - timedelta(days=cfg.auto_unassign_inactive_days),
+                        ),
+                    )
+                    if not due or not due["close"]:
                         await db.delete(pending)
                         await db.commit()
                         log.info(
@@ -1539,7 +1554,8 @@ class IssueManagementWorkflow:
         self, ctx: dict, issue: dict, assignees: list[str], days_inactive: int = 0,
         last_activity: datetime | None = None, now: datetime | None = None,
         recheck=None,
-    ) -> None:
+    ) -> bool:
+        """Returns True only when this App's own change was confirmed."""
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
         mentions = " ".join(f"@{a}" for a in assignees)
@@ -1552,7 +1568,7 @@ class IssueManagementWorkflow:
             await self._withdraw(ctx, record)
             raise _AlreadyClaimed
         await self._gh.remove_assignees(owner, repo, number, assignees, inst)
-        await self._finish_action(ctx, record, days_inactive, True)
+        return await self._finish_action(ctx, record, days_inactive, True)
 
     async def _log_stale(self, ctx: dict, issue_number: int, action: str, days_inactive: int = 0) -> None:
         record = StaleActionLog(
