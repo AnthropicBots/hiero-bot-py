@@ -2835,3 +2835,121 @@ async def test_the_marker_is_searched_even_on_a_first_attempt(mock_gh, ctx, db):
     await wf.run_stale_scan(ctx, now=clock["now"])
 
     assert len([c for c in issue.comments if "marked **stale**" in c["body"]]) == 1
+
+
+# The last check before a change is the whole decision again.
+
+
+@pytest.mark.parametrize("change", ["comment", "exempt_label"])
+@pytest.mark.parametrize("kind", ["close", "stale", "unassign"])
+@pytest.mark.asyncio
+async def test_a_person_acting_just_before_the_change_stops_it(
+    mock_gh, ctx, db, kind, change
+):
+    if kind == "close":
+        clock, issue = _stale_issue(mock_gh, ctx)
+    else:
+        idle = 25 if kind == "stale" else 12
+        clock, issue = _crash_setup(
+            mock_gh, ctx, idle_days=idle,
+            assignees=["alice"] if kind == "unassign" else None,
+        )
+
+    def act():
+        if change == "comment":
+            issue.human_comment("Actively working on this.")
+        else:
+            issue.labels.append("pinned")
+
+    _change_on_call(mock_gh, 2, act)  # 1: the fresh read, 2: the final check
+
+    await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    mock_gh.close_issue.assert_not_awaited()
+    mock_gh.add_label.assert_not_awaited()
+    mock_gh.remove_assignees.assert_not_awaited()
+    assert issue.state == "open"
+    assert await _count(db, PendingIssueCloseNotice) == 0
+    assert await _count(db, LifecycleAction) == 0
+
+
+@pytest.mark.asyncio
+async def test_truncated_timeline_keeps_an_intent_instead_of_abandoning_it(
+    mock_gh, ctx, db, monkeypatch
+):
+    clock, _ = _crash_setup(mock_gh, ctx)
+    real = mock_gh.add_label.side_effect
+
+    async def lands_then_crashes(*args, **kwargs):
+        await real(*args, **kwargs)
+        raise _Crash()
+
+    mock_gh.add_label.side_effect = lands_then_crashes
+    wf = IssueManagementWorkflow(mock_gh)
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+    await db.rollback()
+
+    monkeypatch.setattr("app.workflows.issuemanagement._HISTORY_LIMIT", 1)
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    row = (await db.execute(select(LifecycleAction))).scalars().one()
+    await db.refresh(row)
+    assert row.status == "pending" and row.claimed_by is None
+
+    monkeypatch.setattr("app.workflows.issuemanagement._HISTORY_LIMIT", 5000)
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    await db.refresh(row)
+    assert row.status == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_truncated_timeline_keeps_a_pending_close_and_does_not_close(
+    mock_gh, ctx, db, monkeypatch
+):
+    clock, _ = _stale_issue(mock_gh, ctx)
+    mock_gh.close_issue.side_effect = RuntimeError("GitHub temporarily unavailable")
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    mock_gh.close_issue.side_effect = None
+    mock_gh.close_issue.reset_mock()
+
+    monkeypatch.setattr("app.workflows.issuemanagement._HISTORY_LIMIT", 1)
+    counts = await wf.run_stale_scan(ctx, now=clock["now"] + timedelta(minutes=1))
+
+    assert counts["errors"] >= 1
+    mock_gh.close_issue.assert_not_awaited()
+    assert await _count(db, PendingIssueCloseNotice) == 1
+
+
+@pytest.mark.asyncio
+async def test_truncated_timeline_does_not_attribute_a_close_either_way(
+    mock_gh, ctx, db, monkeypatch
+):
+    clock, issue = _stale_issue(mock_gh, ctx)
+    real = mock_gh.close_issue.side_effect
+
+    async def closes_then_times_out(*args, **kwargs):
+        await real(*args, **kwargs)
+        issue.add_timeline_event(
+            "closed", {"login": "hiero-bot[bot]", "type": "Bot"},
+            performed_via_github_app={"id": 12345},
+        )
+        issue.timeline_events[-1]["created_at"] = (
+            datetime.now(UTC) + timedelta(minutes=1)
+        ).isoformat()
+        raise RuntimeError("timeout")
+
+    mock_gh.close_issue.side_effect = closes_then_times_out
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    monkeypatch.setattr("app.workflows.issuemanagement._HISTORY_LIMIT", 1)
+    counts = await wf.run_stale_scan(ctx, now=clock["now"] + timedelta(minutes=1))
+
+    assert counts["errors"] >= 1
+    pending = (await db.execute(select(PendingIssueCloseNotice))).scalars().one()
+    assert pending.closed_at is None
+    assert await _logged_issue_numbers(db) == []

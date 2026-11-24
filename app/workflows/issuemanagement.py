@@ -65,6 +65,12 @@ def _parse_timestamp(value: str) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _check_history(items: list, number: int) -> None:
+    """Refuse to decide from a history that may have been cut short."""
+    if len(items) >= _HISTORY_LIMIT:
+        raise RuntimeError(f"History of #{number} may be truncated")
+
+
 def _floor_second(value: datetime) -> datetime:
     return value.replace(microsecond=0)
 
@@ -569,12 +575,26 @@ class IssueManagementWorkflow:
         last_activity = decision["last_activity"]
         days_inactive = decision["days_inactive"]
 
+        async def recheck(kind: str, targets: list[str] | None = None) -> bool:
+            """Decide again, in full, from the issue as it is right now."""
+            current = await self._gh.get_issue(
+                ctx["owner"], ctx["repo"], issue["number"], ctx["installation_id"]
+            )
+            again = await self._decide(ctx, cfg, current, now, cutoffs)
+            if not again or not again[kind]:
+                return False
+            if targets is None:
+                return True
+            return {t.casefold() for t in targets} <= {
+                a.casefold() for a in again["assignees"]
+            }
+
         # Independent of the stale decision below: a failure here must not stop it.
         if decision["unassign"]:
             try:
                 await self._unassign_inactive(
                     ctx, issue, decision["assignees"], days_inactive,
-                    last_activity, now,
+                    last_activity, now, recheck,
                 )
                 counts["unassigned"] += len(decision["assignees"])
             except _AlreadyClaimed:
@@ -589,7 +609,7 @@ class IssueManagementWorkflow:
         # The close period runs from the stale marking, pushed back by activity.
         if decision["close"]:
             newly_closed = await self._close_stale(
-                ctx, issue, days_inactive, last_activity
+                ctx, issue, days_inactive, last_activity, recheck
             )
             if newly_closed:
                 counts["closed"] += 1
@@ -598,7 +618,8 @@ class IssueManagementWorkflow:
         if decision["stale"]:
             try:
                 await self._mark_stale(
-                    ctx, issue, cfg.stale_label, days_inactive, last_activity, now
+                    ctx, issue, cfg.stale_label, days_inactive, last_activity, now,
+                    recheck,
                 )
             except _AlreadyClaimed:
                 return
@@ -672,6 +693,7 @@ class IssueManagementWorkflow:
     async def _mark_stale(
         self, ctx: dict, issue: dict, stale_label: str, days_inactive: int = 0,
         last_activity: datetime | None = None, now: datetime | None = None,
+        recheck=None,
     ) -> None:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
@@ -681,12 +703,7 @@ class IssueManagementWorkflow:
         record = await self._record_action(
             ctx, number, "stale", stale_label, last_activity, now
         )
-        fresh = await self._gh.get_issue(owner, repo, number, inst)
-        names = {
-            (lb["name"] if isinstance(lb, dict) else lb).casefold()
-            for lb in fresh.get("labels", [])
-        }
-        if stale_label.casefold() in names or (fresh.get("state") or "open") != "open":
+        if not await self._still_due(ctx, issue, "stale", recheck):
             await self._withdraw(ctx, record)
             raise _AlreadyClaimed
         await self._gh.add_label(owner, repo, number, stale_label, inst)
@@ -793,6 +810,14 @@ class IssueManagementWorkflow:
                 raise _AlreadyClaimed
         return record
 
+    async def _still_due(
+        self, ctx: dict, issue: dict, kind: str, recheck, targets=None
+    ) -> bool:
+        """The last check before a change: the full decision, made again."""
+        if recheck is not None:
+            return await recheck(kind, targets) if targets else await recheck(kind)
+        return True
+
     async def _withdraw(self, ctx: dict, record: LifecycleAction) -> None:
         """Drop an intent whose change was never made."""
         db: AsyncSession = ctx["db"]
@@ -810,7 +835,11 @@ class IssueManagementWorkflow:
         from history instead of crediting the bot.
         """
         cfg = ctx["config"].workflows.issue_management
-        done, foreign = await self._attributed(ctx, cfg, record)
+        try:
+            done, foreign = await self._attributed(ctx, cfg, record)
+        except Exception:
+            await self._release(ctx, LifecycleAction, record.id)
+            raise
         if foreign and not done:
             await self._release(ctx, LifecycleAction, record.id)
             return
@@ -975,6 +1004,7 @@ class IssueManagementWorkflow:
         timeline = await self._gh.list_issue_timeline(
             ctx["owner"], ctx["repo"], record.issue_number, ctx["installation_id"]
         )
+        _check_history(timeline, record.issue_number)
         since = _floor_second(_parse_timestamp(record.created_at.isoformat()))
         recent = [
             e for e in timeline
@@ -1205,6 +1235,7 @@ class IssueManagementWorkflow:
                 timeline = await self._gh.list_issue_timeline(
                     owner, repo, number, inst
                 )
+                _check_history(timeline, number)
 
                 # A human reopening or closing the issue after the pending
                 # operation was created takes precedence over automation.
@@ -1397,6 +1428,7 @@ class IssueManagementWorkflow:
         issue: dict,
         days_inactive: int = 0,
         last_activity: datetime | None = None,
+        recheck=None,
     ) -> bool:
         """Close an issue and reliably deliver its close notification.
 
@@ -1443,7 +1475,7 @@ class IssueManagementWorkflow:
         pending_id = pending.id
         try:
             return await self._close_and_notify(
-                ctx, pending, owner, repo, number, inst
+                ctx, pending, owner, repo, number, inst, recheck
             )
         finally:
             await self._release(ctx, PendingIssueCloseNotice, pending_id)
@@ -1464,14 +1496,19 @@ class IssueManagementWorkflow:
 
     async def _close_and_notify(
         self, ctx: dict, pending: PendingIssueCloseNotice,
-        owner: str, repo: str, number: int, inst: int,
+        owner: str, repo: str, number: int, inst: int, recheck=None,
     ) -> bool:
         db: AsyncSession = ctx["db"]
         newly_closed = pending.closed_at is None
 
         if newly_closed:
-            fresh = await self._gh.get_issue(owner, repo, number, inst)
-            if not self._still_closeable(ctx, fresh):
+            if recheck is not None:
+                closeable = await recheck("close")
+            else:
+                closeable = self._still_closeable(
+                    ctx, await self._gh.get_issue(owner, repo, number, inst)
+                )
+            if not closeable:
                 await db.delete(pending)
                 await db.commit()
                 return False
@@ -1501,6 +1538,7 @@ class IssueManagementWorkflow:
     async def _unassign_inactive(
         self, ctx: dict, issue: dict, assignees: list[str], days_inactive: int = 0,
         last_activity: datetime | None = None, now: datetime | None = None,
+        recheck=None,
     ) -> None:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
@@ -1510,15 +1548,7 @@ class IssueManagementWorkflow:
         record = await self._record_action(
             ctx, number, "unassigned", mentions, last_activity, now
         )
-        fresh = await self._gh.get_issue(owner, repo, number, inst)
-        still = {
-            person["login"].casefold()
-            for person in (fresh.get("assignees") or [])
-            if person and person.get("login")
-        }
-        if (fresh.get("state") or "open") != "open" or any(
-            a.casefold() not in still for a in assignees
-        ):
+        if not await self._still_due(ctx, issue, "unassign", recheck, assignees):
             await self._withdraw(ctx, record)
             raise _AlreadyClaimed
         await self._gh.remove_assignees(owner, repo, number, assignees, inst)
