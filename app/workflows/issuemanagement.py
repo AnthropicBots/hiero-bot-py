@@ -56,6 +56,11 @@ _LEASE = timedelta(minutes=30)
 _HISTORY_LIMIT = MAX_PAGES * 100
 
 
+# An unattributed change is given this long for GitHub's timeline to show whose
+# it was before the intent is abandoned.
+_ATTRIBUTION_GRACE = timedelta(hours=1)
+
+
 class _AlreadyClaimed(Exception):
     """Another worker (or an earlier unfinished attempt) owns this action."""
 
@@ -833,25 +838,23 @@ class IssueManagementWorkflow:
     async def _finish_action(
         self, ctx: dict, record: LifecycleAction, days_inactive: int, unassign: bool
     ) -> bool:
-        """Confirm a change unless the timeline shows someone else made it.
+        """Confirm a change only once this App's own event shows it was made.
 
         A successful API reply proves nothing: adding a label that a person added
-        a moment ago succeeds too. If another actor made the change and none of
-        ours is recorded, the intent stays pending and the next scan reconciles it
-        from history instead of crediting the bot.
+        a moment ago succeeds too, and the timeline may lag. Without our event the
+        intent stays pending for the next scan to reconcile from history.
         """
         cfg = ctx["config"].workflows.issue_management
         try:
-            done, foreign = await self._attributed(ctx, cfg, record)
+            done, _ = await self._attributed(ctx, cfg, record)
         except Exception:
             await self._release(ctx, LifecycleAction, record.id)
             raise
-        if foreign and not done:
+        if not done:
+            # No event of ours (yet): not proof that we made the change. The
+            # intent stays pending and the next scan reconciles it from history.
             await self._release(ctx, LifecycleAction, record.id)
             return False
-        done = done or (
-            [t.lstrip("@") for t in record.detail.split()] if unassign else []
-        )
         if unassign:
             confirmed = await self._confirm_action(
                 ctx, record, days_inactive, done,
@@ -964,7 +967,8 @@ class IssueManagementWorkflow:
             days = (created - _parse_timestamp(record.last_activity.isoformat())).days
 
         issue = await self._gh.get_issue(owner, repo, number, inst)
-        done, _ = await self._attributed(ctx, cfg, record)
+        done, foreign = await self._attributed(ctx, cfg, record)
+        waiting = not foreign and self._now(ctx) - created < _ATTRIBUTION_GRACE
 
         if action == "stale":
             label = cfg.stale_label.casefold()
@@ -974,6 +978,8 @@ class IssueManagementWorkflow:
             }
             if done:
                 await self._confirm_action(ctx, record, days, None)
+            elif present and waiting:
+                return  # the timeline may not show whose it was yet
             elif present:
                 await self._abandon(ctx, record, "label present but not attributable")
             else:
@@ -993,6 +999,8 @@ class IssueManagementWorkflow:
             if person and person.get("login")
         }
         if any(t.casefold() not in assigned for t in targeted):
+            if waiting:
+                return
             await self._abandon(ctx, record, "assignee gone but not attributable")
         else:
             await db.delete(record)
@@ -1291,15 +1299,15 @@ class IssueManagementWorkflow:
                         )
                         continue
 
-                    cfg = ctx["config"].workflows.issue_management
-                    due = await self._decide(
-                        ctx, cfg, issue, now,
-                        (
-                            now - timedelta(days=cfg.stale_issue_days),
-                            now - timedelta(days=cfg.auto_unassign_inactive_days),
-                        ),
-                    )
-                    if not due or not due["close"]:
+                    due = await self._close_due(ctx, issue, now)
+                    if due:
+                        # Last look, right before the destructive call.
+                        due = await self._close_due(
+                            ctx,
+                            await self._gh.get_issue(owner, repo, number, inst),
+                            now,
+                        )
+                    if not due:
                         await db.delete(pending)
                         await db.commit()
                         log.info(
@@ -1494,6 +1502,18 @@ class IssueManagementWorkflow:
             )
         finally:
             await self._release(ctx, PendingIssueCloseNotice, pending_id)
+
+    async def _close_due(self, ctx: dict, issue: dict, now: datetime) -> bool:
+        """The full close decision, from the current configuration."""
+        cfg = ctx["config"].workflows.issue_management
+        decision = await self._decide(
+            ctx, cfg, issue, now,
+            (
+                now - timedelta(days=cfg.stale_issue_days),
+                now - timedelta(days=cfg.auto_unassign_inactive_days),
+            ),
+        )
+        return bool(decision and decision["close"])
 
     @staticmethod
     def _still_closeable(ctx: dict, issue: dict) -> bool:

@@ -3,7 +3,7 @@
 import asyncio
 import time
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import DEFAULT, AsyncMock
 
 import httpx
 import pytest
@@ -330,9 +330,12 @@ async def _logged_issue_numbers(db) -> list[int]:
 
 @pytest.mark.asyncio
 async def test_failing_issue_does_not_abort_the_scan(mock_gh, ctx, db):
+    default_add_label = mock_gh.add_label.side_effect
+
     async def add_label(owner, repo, number, label, inst):
         if number == 1:
             raise _http_error(403)
+        await default_add_label(owner, repo, number, label, inst)
 
     mock_gh.list_issues = AsyncMock(return_value=[
         make_issue(number=1, updated_days_ago=400),
@@ -352,10 +355,13 @@ async def test_failing_issue_does_not_abort_the_scan(mock_gh, ctx, db):
 async def test_timeline_failure_skips_issue_without_lifecycle_actions(
     mock_gh, ctx, db
 ):
+    default_timeline = mock_gh.list_issue_timeline.side_effect
+
     async def list_timeline(owner, repo, number, inst):
         if number == 1:
             raise _http_error(503)
-        return []
+        events = await default_timeline(owner, repo, number, inst)
+        return [] if events is DEFAULT else events
 
     mock_gh.list_issues = AsyncMock(return_value=[
         make_issue(number=1, updated_days_ago=400),
@@ -382,9 +388,12 @@ async def test_timeline_failure_skips_issue_without_lifecycle_actions(
 
 @pytest.mark.asyncio
 async def test_earlier_audit_rows_survive_a_later_failure(mock_gh, ctx, db):
+    default_add_label = mock_gh.add_label.side_effect
+
     async def add_label(owner, repo, number, label, inst):
         if number == 3:
             raise _http_error(403)
+        await default_add_label(owner, repo, number, label, inst)
 
     mock_gh.list_issues = AsyncMock(return_value=[
         make_issue(number=1, updated_days_ago=400),
@@ -1775,6 +1784,11 @@ async def test_rate_limited_unassignment_does_not_reset_the_stale_countdown(mock
     _wire(mock_gh, issue)
 
     async def removal_after_a_long_retry_wait(owner, repo, number, logins, inst):
+        for login in logins:
+            issue.add_timeline_event(
+                "unassigned", {"login": "hiero-bot[bot]", "type": "Bot"},
+                performed_via_github_app={"id": 12345}, assignee=login,
+            )
         issue.assignees = [a for a in issue.assignees if a not in logins]
         issue.updated = clock["now"] + timedelta(minutes=40)  # the client waited
 
@@ -3010,3 +3024,96 @@ async def test_an_escalation_comment_quoting_a_lifecycle_phrase_is_not_a_lifecyc
     )
 
     assert counts["stale_marked"] == 1
+
+
+@pytest.mark.parametrize("change", ["comment", "exempt_label"])
+@pytest.mark.asyncio
+async def test_pending_close_recovery_rechecks_just_before_closing(
+    mock_gh, ctx, db, change
+):
+    clock, issue = _stale_issue(mock_gh, ctx)
+    mock_gh.close_issue.side_effect = RuntimeError("GitHub temporarily unavailable")
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    assert await _count(db, PendingIssueCloseNotice) == 1
+
+    def act():
+        if change == "comment":
+            issue.human_comment("Actively working on this.")
+        else:
+            issue.labels.append("pinned")
+
+    mock_gh.close_issue.side_effect = None
+    mock_gh.close_issue.reset_mock()
+    _change_on_call(mock_gh, 2, act)  # 1: recovery's read, 2: the final read
+    clock["now"] += timedelta(minutes=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    mock_gh.close_issue.assert_not_awaited()
+    assert issue.state == "open"
+    assert await _count(db, PendingIssueCloseNotice) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_label_with_no_visible_event_is_not_credited_to_the_bot(
+    mock_gh, ctx, db
+):
+    clock, issue = _crash_setup(mock_gh, ctx)
+
+    async def lands_without_an_event(owner, repo, number, label, inst):
+        issue.labels.append(label)  # the timeline has not caught up
+        issue.touch()
+
+    mock_gh.add_label.side_effect = lands_without_an_event
+    wf = IssueManagementWorkflow(mock_gh)
+    counts = await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert counts["stale_marked"] == 0
+    mock_gh.post_comment.assert_not_awaited()
+    assert await _logged_issue_numbers(db) == []
+    row = (await db.execute(select(LifecycleAction))).scalars().one()
+    assert row.status == "pending" and row.claimed_by is None
+
+    # The timeline catches up and shows the bot's own event: now it is confirmed.
+    issue.add_timeline_event(
+        "labeled", {"login": "hiero-bot[bot]", "type": "Bot"},
+        performed_via_github_app={"id": 12345}, label="stale",
+    )
+    clock["now"] += timedelta(minutes=5)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    await db.refresh(row)
+    assert row.status == "delivered"
+    assert await _logged_issue_numbers(db) == [1]
+
+
+@pytest.mark.asyncio
+async def test_an_assignee_with_no_visible_event_is_not_credited_to_the_bot(
+    mock_gh, ctx, db
+):
+    clock, issue = _crash_setup(mock_gh, ctx, idle_days=12, assignees=["alice"])
+
+    async def lands_without_an_event(owner, repo, number, logins, inst):
+        issue.assignees = [a for a in issue.assignees if a not in logins]
+        issue.touch()
+
+    mock_gh.remove_assignees.side_effect = lands_without_an_event
+    wf = IssueManagementWorkflow(mock_gh)
+    counts = await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert counts["unassigned"] == 0
+    mock_gh.post_comment.assert_not_awaited()
+    assert await _logged_issue_numbers(db) == []
+    row = (await db.execute(select(LifecycleAction))).scalars().one()
+    assert row.status == "pending"
+
+    # Within the grace period it is still waited on; nothing is ever shown for it,
+    # so afterwards it is given up on.
+    clock["now"] += timedelta(minutes=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    await db.refresh(row)
+    assert row.status == "pending"
+    clock["now"] += timedelta(hours=2)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    await db.refresh(row)
+    assert row.status == "abandoned"
+    assert await _logged_issue_numbers(db) == []
