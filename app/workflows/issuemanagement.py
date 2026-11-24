@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import re
+import time
+import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.schema import IssueManagementConfig
 from app.db.models import LifecycleAction, PendingIssueCloseNotice, StaleActionLog
-from app.github.client import GitHubClient
+from app.github.client import MAX_PAGES, GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
 from app.utils.settings import settings
@@ -55,6 +57,16 @@ _MAX_NOTICE_ATTEMPTS = 5
 _SETTLE_TOLERANCE = timedelta(seconds=5)
 
 
+# A worker owns a row for this long. It must comfortably exceed the time one
+# action takes, because after it expires another worker may settle the row.
+_LEASE = timedelta(minutes=30)
+
+# The client stops paginating after MAX_PAGES pages of 100. A history that long
+# may be cut short, and an incomplete history must never be mistaken for a full
+# one.
+_HISTORY_LIMIT = MAX_PAGES * 100
+
+
 class _AlreadyClaimed(Exception):
     """Another worker (or an earlier unfinished attempt) owns this action."""
 
@@ -94,6 +106,19 @@ def _notice_marker(record_id: int) -> str:
     return f"<!-- hiero-bot:notice:{record_id} -->"
 
 
+def _is_own_event(event: dict) -> bool:
+    """True only when a timeline event was made by this GitHub App."""
+    configured_app_id = str(settings.github_app_id or "").strip()
+    app = event.get("performed_via_github_app")
+    return (
+        bool(configured_app_id)
+        and _is_bot(event.get("actor"))
+        and isinstance(app, dict)
+        and app.get("id") is not None
+        and str(app["id"]) == configured_app_id
+    )
+
+
 def _marker(action: str, last_activity: datetime | None) -> str:
     if last_activity is None:
         return ""
@@ -116,6 +141,10 @@ class IssueManagementWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db: AsyncSession = ctx["db"]
         now = now or datetime.now(UTC)
+        # Leases are measured on the scan's clock, advanced by real elapsed time so
+        # a long scan does not hand out leases that are already stale.
+        ctx["_lifecycle_clock"] = (now, time.monotonic())
+        ctx["_lifecycle_worker"] = uuid.uuid4().hex
 
         # Every threshold comes from the repository's configuration. They are
         # independent: close_stale_after_days is additional time counted from
@@ -203,6 +232,11 @@ class IssueManagementWorkflow:
         timeline_events = await self._gh.list_issue_timeline(
             ctx["owner"], ctx["repo"], issue["number"], ctx["installation_id"]
         )
+        if len(comments) >= _HISTORY_LIMIT or len(timeline_events) >= _HISTORY_LIMIT:
+            raise RuntimeError(
+                f"History of #{issue['number']} may be truncated; "
+                "not acting on an incomplete record"
+            )
         result = await ctx["db"].execute(
             select(LifecycleAction)
             .where(
@@ -221,6 +255,7 @@ class IssueManagementWorkflow:
         bot_event_last: datetime | None = None
         bot_stale_marked_at: datetime | None = None
         stale_marked_at: datetime | None = None
+        record_stale_at: datetime | None = None
         ignored_bot_activity = False
         # GitHub bumps ``updated_at`` for every bot action, so only an
         # ``updated_at`` clearly later than all of them can be a person's edit,
@@ -376,9 +411,9 @@ class IssueManagementWorkflow:
                     else None
                 )
             if record.action == "stale" and (
-                stale_marked_at is None or record_time > stale_marked_at
+                record_stale_at is None or record_time > record_stale_at
             ):
-                stale_marked_at = record_time
+                record_stale_at = record_time
 
         # The update time read back after our change may include a person's edit
         # made meanwhile: never trust it beyond the latest time GitHub itself
@@ -428,8 +463,10 @@ class IssueManagementWorkflow:
         valid_candidates = [candidate for candidate in candidates if candidate]
         last_activity = max(valid_candidates)
 
-        if stale_marked_at is None:
-            stale_marked_at = bot_stale_marked_at
+        # When the issue was marked stale: the stale-label event is the authority;
+        # our own record of the action is next best, and the notice's timestamp
+        # (which can lag the label by however long delivery took) the last resort.
+        stale_marked_at = bot_stale_marked_at or record_stale_at or stale_marked_at
 
         return last_activity, stale_marked_at
 
@@ -461,20 +498,21 @@ class IssueManagementWorkflow:
                 return action, None
         return None, None
 
-    async def _scan_issue(
+    async def _decide(
         self,
         ctx: dict,
         cfg: IssueManagementConfig,
         issue: dict,
         now: datetime,
         cutoffs: tuple[datetime, datetime],
-        counts: dict[str, int],
-    ) -> None:
-        """Apply the stale rules to one issue, updating ``counts`` in place."""
+    ) -> dict | None:
+        """Work out what should be done to one issue, from the issue as given."""
         stale_cutoff, unassign_cutoff = cutoffs
 
         if issue.get("pull_request"):
-            return  # Skip PRs
+            return None  # Skip PRs
+        if (issue.get("state") or "open").casefold() != "open":
+            return None
 
         # GitHub label names are case-insensitive, so compare them casefolded.
         labels = {
@@ -482,7 +520,7 @@ class IssueManagementWorkflow:
             for lb in issue.get("labels", [])
         }
         if labels & {name.casefold() for name in cfg.exempt_labels}:
-            return
+            return None
 
         updated = _parse_timestamp(issue["updated_at"])
         is_stale = cfg.stale_label.casefold() in labels
@@ -493,23 +531,63 @@ class IssueManagementWorkflow:
         last_activity, stale_marked_at = await self._get_last_activity(
             ctx, issue, updated
         )
-        days_inactive = (now - last_activity).days
-
         assignees = [
             person["login"]
             for person in (issue.get("assignees") or [])
             if person and person.get("login")
         ]
+        close_due = False
+        if is_stale:
+            reference = max(stale_marked_at or last_activity, last_activity)
+            close_due = now >= reference + timedelta(days=cfg.close_stale_after_days)
+        return {
+            "issue": issue,
+            "last_activity": last_activity,
+            "days_inactive": (now - last_activity).days,
+            "assignees": assignees,
+            "unassign": bool(assignees) and last_activity < unassign_cutoff,
+            "close": is_stale and close_due,
+            "stale": not is_stale and last_activity < stale_cutoff,
+        }
 
-        # Auto-unassign
+    async def _scan_issue(
+        self,
+        ctx: dict,
+        cfg: IssueManagementConfig,
+        issue: dict,
+        now: datetime,
+        cutoffs: tuple[datetime, datetime],
+        counts: dict[str, int],
+    ) -> None:
+        """Apply the stale rules to one issue, updating ``counts`` in place."""
+        decision = await self._decide(ctx, cfg, issue, now, cutoffs)
+        if not decision or not (
+            decision["unassign"] or decision["close"] or decision["stale"]
+        ):
+            return
+
+        # The listing is a snapshot and may be minutes old. Before changing
+        # anything, fetch the issue again and decide again, so a comment, an
+        # assignment or a label that arrived meanwhile is respected.
+        fresh = await self._gh.get_issue(
+            ctx["owner"], ctx["repo"], issue["number"], ctx["installation_id"]
+        )
+        decision = await self._decide(ctx, cfg, fresh, now, cutoffs)
+        if not decision:
+            return
+        issue = decision["issue"]
+        last_activity = decision["last_activity"]
+        days_inactive = decision["days_inactive"]
+
         # A failure here must not stop the stale decision below: the two actions
         # are independent and both are judged from the same pre-scan activity.
-        if assignees and last_activity < unassign_cutoff:
+        if decision["unassign"]:
             try:
                 await self._unassign_inactive(
-                    ctx, issue, assignees, days_inactive, last_activity, now
+                    ctx, issue, decision["assignees"], days_inactive,
+                    last_activity, now,
                 )
-                counts["unassigned"] += len(assignees)
+                counts["unassigned"] += len(decision["assignees"])
             except _AlreadyClaimed:
                 pass
             except Exception as exc:
@@ -521,19 +599,15 @@ class IssueManagementWorkflow:
 
         # Close stale: the close period runs from the stale marking, and is
         # pushed back by any genuine activity since.
-        if is_stale:
-            close_reference = max(stale_marked_at or last_activity, last_activity)
-            if now >= close_reference + timedelta(days=cfg.close_stale_after_days):
-                newly_closed = await self._close_stale(
-                    ctx, issue, days_inactive, last_activity
-                )
-                if newly_closed:
-                    counts["closed"] += 1
+        if decision["close"]:
+            newly_closed = await self._close_stale(
+                ctx, issue, days_inactive, last_activity
+            )
+            if newly_closed:
+                counts["closed"] += 1
             return
 
-        # Mark stale (independent of the unassignment above, so an issue past
-        # both thresholds gets both actions in the same scan)
-        if last_activity < stale_cutoff:
+        if decision["stale"]:
             try:
                 await self._mark_stale(
                     ctx, issue, cfg.stale_label, days_inactive, last_activity, now
@@ -621,14 +695,61 @@ class IssueManagementWorkflow:
             ctx, number, "stale", stale_label, last_activity, now
         )
         await self._gh.add_label(owner, repo, number, stale_label, inst)
-        await self._confirm_action(ctx, record, days_inactive, None)
-        await self._deliver_notice(ctx, record)
+        if await self._confirm_action(ctx, record, days_inactive, None):
+            await self._deliver_notice(ctx, record)
+
+    # ── Ownership of rows ────────────────────────────────────
+
+    @staticmethod
+    def _worker(ctx: dict) -> str:
+        return ctx.get("_lifecycle_worker") or "direct"
+
+    @staticmethod
+    def _now(ctx: dict) -> datetime:
+        clock = ctx.get("_lifecycle_clock")
+        if not clock:
+            return datetime.now(UTC)
+        base, started = clock
+        return base + timedelta(seconds=time.monotonic() - started)
+
+    async def _claim(self, ctx: dict, model, record_id: int) -> bool:
+        """Atomically take a row for this worker; False if another one holds it."""
+        db: AsyncSession = ctx["db"]
+        now = self._now(ctx)
+        worker = self._worker(ctx)
+        result = await db.execute(
+            update(model)
+            .where(
+                model.id == record_id,
+                or_(
+                    model.claimed_by.is_(None),
+                    model.claimed_by == worker,
+                    model.lease_expires_at <= now,
+                ),
+            )
+            .values(claimed_by=worker, lease_expires_at=now + _LEASE)
+        )
+        await db.commit()
+        return result.rowcount == 1
+
+    async def _release(self, ctx: dict, model, record_id: int) -> None:
+        db: AsyncSession = ctx["db"]
+        try:
+            await db.execute(
+                update(model)
+                .where(model.id == record_id, model.claimed_by == self._worker(ctx))
+                .values(claimed_by=None, lease_expires_at=None)
+            )
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            log.warning("Could not release %s #%s: %s", model.__name__, record_id, exc)
 
     async def _record_action(
         self, ctx: dict, number: int, action: str, detail: str,
         last_activity: datetime | None, now: datetime | None = None,
     ) -> LifecycleAction:
-        """Store a bot action durably, before its notice is attempted."""
+        """Store (and claim) a bot action durably, before GitHub is changed."""
         record = LifecycleAction(
             owner=ctx["owner"],
             repo=ctx["repo"],
@@ -637,13 +758,46 @@ class IssueManagementWorkflow:
             detail=detail,
             last_activity=last_activity,
             created_at=now or datetime.now(UTC),
+            status="pending",
+            claimed_by=self._worker(ctx),
+            lease_expires_at=self._now(ctx) + _LEASE,
         )
-        ctx["db"].add(record)
+        db: AsyncSession = ctx["db"]
+        db.add(record)
         try:
-            await ctx["db"].commit()
+            await db.commit()
         except IntegrityError as exc:
-            await ctx["db"].rollback()
+            await db.rollback()
             raise _AlreadyClaimed from exc
+
+        # Our decision may have been made before another worker finished the same
+        # action. With our intent holding the slot, look for it once more.
+        if last_activity is not None:
+            result = await db.execute(
+                select(LifecycleAction.detail).where(
+                    LifecycleAction.owner == ctx["owner"],
+                    LifecycleAction.repo == ctx["repo"],
+                    LifecycleAction.issue_number == number,
+                    LifecycleAction.action == action,
+                    LifecycleAction.applied_at.is_not(None),
+                    LifecycleAction.created_at > last_activity,
+                    LifecycleAction.id != record.id,
+                )
+            )
+            ours = {t.casefold() for t in detail.split()}
+            already = any(
+                action == "stale" or ours & {t.casefold() for t in other.split()}
+                for other in result.scalars().all()
+            )
+            if already:
+                record_id = record.id
+                await db.execute(
+                    update(LifecycleAction)
+                    .where(LifecycleAction.id == record_id)
+                    .values(status="abandoned", claimed_by=None, lease_expires_at=None)
+                )
+                await db.commit()
+                raise _AlreadyClaimed
         return record
 
     async def _confirm_action(
@@ -652,33 +806,59 @@ class IssueManagementWorkflow:
         record: LifecycleAction,
         days_inactive: int,
         logins: list[str] | None,
-    ) -> None:
-        """Mark an intent as applied, writing its log and audit rows with it."""
+        detail: str | None = None,
+    ) -> bool:
+        """Mark a pending intent as applied, with its log and audit rows.
+
+        The status change is conditional on this worker still owning the intent,
+        so exactly one worker writes the bookkeeping. Returns False when it does
+        not.
+        """
+        db: AsyncSession = ctx["db"]
         owner, repo = ctx["owner"], ctx["repo"]
-        number = record.issue_number
-        record.applied_at = datetime.now(UTC)
-        if record.action == "stale":
+        number, action = record.issue_number, record.action
+        values = {"status": "applied", "applied_at": datetime.now(UTC)}
+        if detail is not None:
+            values["detail"] = detail
+        result = await db.execute(
+            update(LifecycleAction)
+            .where(
+                LifecycleAction.id == record.id,
+                LifecycleAction.status == "pending",
+                LifecycleAction.claimed_by == self._worker(ctx),
+            )
+            .values(**values)
+        )
+        if result.rowcount != 1:
+            await db.rollback()
+            return False
+        if action == "stale":
             await self._log_stale(ctx, number, "marked_stale", days_inactive)
             await audit.record(
-                ctx["db"], action="issue.stale_marked", owner=owner, repo=repo,
+                db, action="issue.stale_marked", owner=owner, repo=repo,
                 target_number=number, reason="No activity within stale period",
             )
         else:
             await self._log_stale(ctx, number, "unassigned", days_inactive)
             for login in logins or []:
                 await audit.record(
-                    ctx["db"], action="issue.unassigned", owner=owner, repo=repo,
+                    db, action="issue.unassigned", owner=owner, repo=repo,
                     target_number=number, target_login=login,
                     reason="Auto-unassigned due to inactivity",
                 )
-        await ctx["db"].commit()
+        await db.commit()
+        await db.refresh(record)
+        return True
 
     async def _recover_pending_actions(self, ctx: dict) -> None:
         """Settle intents left by a crash or an ambiguous GitHub failure.
 
-        GitHub's actual state decides: a change that landed is confirmed (with
-        its bookkeeping), one that did not is forgotten so the normal scan can
-        decide again from fresh activity.
+        Only an intent whose owner is gone (released, or its lease expired) is
+        touched, and only after taking it atomically. What happened is read from
+        GitHub's *history* -- events made by this App after the intent was
+        written -- not from the issue's current state, which a person may have
+        changed since. A change that cannot be attributed to us is never
+        recorded as ours.
         """
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db: AsyncSession = ctx["db"]
@@ -687,52 +867,101 @@ class IssueManagementWorkflow:
             select(LifecycleAction.id).where(
                 LifecycleAction.owner == owner,
                 LifecycleAction.repo == repo,
-                LifecycleAction.applied_at.is_(None),
+                LifecycleAction.status == "pending",
             )
         )
         for record_id in list(result.scalars().all()):
-            record = await db.get(LifecycleAction, record_id)
-            if record is None:
-                continue
-            action, number = record.action, record.issue_number
+            if not await self._claim(ctx, LifecycleAction, record_id):
+                continue  # another worker is on it
             try:
-                issue = await self._gh.get_issue(owner, repo, number, inst)
-                days = 0
-                if record.last_activity is not None:
-                    days = (
-                        _parse_timestamp(record.created_at.isoformat())
-                        - _parse_timestamp(record.last_activity.isoformat())
-                    ).days
-                if record.action == "stale":
-                    labels = {
-                        (lb["name"] if isinstance(lb, dict) else lb).casefold()
-                        for lb in issue.get("labels", [])
-                    }
-                    if cfg.stale_label.casefold() in labels:
-                        await self._confirm_action(ctx, record, days, None)
-                    else:
-                        await db.delete(record)
-                        await db.commit()
-                else:
-                    targeted = [t.lstrip("@") for t in record.detail.split()]
-                    current = {
-                        person["login"].casefold()
-                        for person in (issue.get("assignees") or [])
-                        if person and person.get("login")
-                    }
-                    removed = [t for t in targeted if t.casefold() not in current]
-                    if removed:
-                        record.detail = " ".join(f"@{t}" for t in removed)
-                        await self._confirm_action(ctx, record, days, removed)
-                    else:
-                        await db.delete(record)
-                        await db.commit()
+                await self._settle_intent(ctx, cfg, record_id, owner, repo, inst)
             except Exception as exc:
                 await db.rollback()
                 log.warning(
-                    "Could not settle %s intent #%s on %s/%s#%s: %s",
-                    action, record_id, owner, repo, number, exc,
+                    "Could not settle lifecycle intent #%s on %s/%s: %s",
+                    record_id, owner, repo, exc,
                 )
+            finally:
+                await self._release(ctx, LifecycleAction, record_id)
+
+    async def _settle_intent(
+        self, ctx: dict, cfg, record_id: int, owner: str, repo: str, inst: int
+    ) -> None:
+        db: AsyncSession = ctx["db"]
+        record = await db.get(LifecycleAction, record_id)
+        if record is None:
+            return
+        await db.refresh(record)
+        if record.status != "pending":
+            return
+        number, action = record.issue_number, record.action
+        created = _parse_timestamp(record.created_at.isoformat())
+        days = 0
+        if record.last_activity is not None:
+            days = (created - _parse_timestamp(record.last_activity.isoformat())).days
+
+        issue = await self._gh.get_issue(owner, repo, number, inst)
+        timeline = await self._gh.list_issue_timeline(owner, repo, number, inst)
+        ours = [
+            e for e in timeline
+            if _is_own_event(e)
+            and e.get("created_at")
+            and _parse_timestamp(e["created_at"]) >= created
+        ]
+
+        if action == "stale":
+            label = cfg.stale_label.casefold()
+            did_it = any(
+                e.get("event") == "labeled"
+                and isinstance(e.get("label"), dict)
+                and str(e["label"].get("name", "")).casefold() == label
+                for e in ours
+            )
+            present = label in {
+                (lb["name"] if isinstance(lb, dict) else lb).casefold()
+                for lb in issue.get("labels", [])
+            }
+            if did_it:
+                await self._confirm_action(ctx, record, days, None)
+            elif present:
+                await self._abandon(ctx, record, "label present but not attributable")
+            else:
+                await db.delete(record)
+                await db.commit()
+            return
+
+        targeted = [t.lstrip("@") for t in record.detail.split()]
+        removed_by_us = {
+            str((e.get("assignee") or {}).get("login", "")).casefold()
+            for e in ours
+            if e.get("event") == "unassigned"
+        }
+        done = [t for t in targeted if t.casefold() in removed_by_us]
+        if done:
+            await self._confirm_action(
+                ctx, record, days, done, detail=" ".join(f"@{t}" for t in done)
+            )
+            return
+        assigned = {
+            person["login"].casefold()
+            for person in (issue.get("assignees") or [])
+            if person and person.get("login")
+        }
+        if any(t.casefold() not in assigned for t in targeted):
+            await self._abandon(ctx, record, "assignee gone but not attributable")
+        else:
+            await db.delete(record)
+            await db.commit()
+
+    async def _abandon(self, ctx: dict, record: LifecycleAction, why: str) -> None:
+        """Keep an intent that cannot be reconciled, visibly, instead of guessing."""
+        log.warning(
+            "Abandoning lifecycle intent #%s (%s on %s/%s#%s): %s",
+            record.id, record.action, record.owner, record.repo,
+            record.issue_number, why,
+        )
+        record.status = "abandoned"
+        await ctx["db"].commit()
 
     @staticmethod
     def _notice_body(record: LifecycleAction) -> str:
@@ -754,48 +983,68 @@ class IssueManagementWorkflow:
         )
 
     async def _deliver_notice(self, ctx: dict, record: LifecycleAction) -> None:
-        """Post a recorded action's notice once; never raise, never duplicate.
+        """Post a confirmed action's notice at most once; never raise.
 
-        A failure leaves the record pending for the next scan. Before any retry
-        the issue is searched for the notice's marker, because a timed-out POST
-        may have been accepted.
+        The row is taken first, so two workers cannot both post. The issue is
+        searched for the notice's marker before *every* post, whatever the
+        attempt counter says, because a counter that was never committed cannot
+        be trusted to say whether an earlier post landed.
         """
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db: AsyncSession = ctx["db"]
-        number = record.issue_number
+        number, record_id = record.issue_number, record.id
 
-        record.notice_attempts += 1
+        if not await self._claim(ctx, LifecycleAction, record_id):
+            return
         try:
-            if record.notice_attempts > 1:
+            await db.refresh(record)
+            if record.status != "applied":
+                return
+            record.notice_attempts += 1
+            await db.commit()  # the attempt is counted before it is made
+
+            delivered = False
+            try:
                 existing = await self._gh.list_issue_comments(owner, repo, number, inst)
-                marker = _notice_marker(record.id)
-                if any(
+                marker = _notice_marker(record_id)
+                if not any(
                     marker in (comment.get("body") or "") and _is_own_comment(comment)
                     for comment in existing
                 ):
-                    record.notice_delivered_at = datetime.now(UTC)
-            if record.notice_delivered_at is None:
-                await self._post_lifecycle_comment(
-                    owner, repo, number, self._notice_body(record), inst
+                    await self._post_lifecycle_comment(
+                        owner, repo, number, self._notice_body(record), inst
+                    )
+                delivered = True
+            except Exception as exc:
+                log.warning(
+                    "Notice for %s on %s/%s#%s not delivered (attempt %s): %s",
+                    record.action, owner, repo, number, record.notice_attempts, exc,
                 )
-                record.notice_delivered_at = datetime.now(UTC)
-        except Exception as exc:
-            log.warning(
-                "Notice for %s on %s/%s#%s not delivered (attempt %s): %s",
-                record.action, owner, repo, number, record.notice_attempts, exc,
-            )
 
-        # Remember the update time GitHub stamped for our own changes, so a later
-        # edit can be told apart from them exactly.
-        try:
-            current = await self._gh.get_issue(owner, repo, number, inst)
-            record.settled_updated_at = _parse_timestamp(current["updated_at"])
-        except Exception as exc:
-            log.warning(
-                "Could not read the update time of %s/%s#%s: %s",
-                owner, repo, number, exc,
-            )
-        await db.commit()
+            if delivered:
+                record.status = "delivered"
+                record.notice_delivered_at = datetime.now(UTC)
+            elif record.notice_attempts >= _MAX_NOTICE_ATTEMPTS:
+                record.status = "notice_failed"
+                log.error(
+                    "Giving up on the %s notice for %s/%s#%s after %s attempts; "
+                    "retry_failed_notices() makes it eligible again",
+                    record.action, owner, repo, number, record.notice_attempts,
+                )
+
+            # Remember the update time GitHub stamped for our own changes, so a
+            # later edit can be told apart from them.
+            try:
+                current = await self._gh.get_issue(owner, repo, number, inst)
+                record.settled_updated_at = _parse_timestamp(current["updated_at"])
+            except Exception as exc:
+                log.warning(
+                    "Could not read the update time of %s/%s#%s: %s",
+                    owner, repo, number, exc,
+                )
+            await db.commit()
+        finally:
+            await self._release(ctx, LifecycleAction, record_id)
 
     async def _recover_pending_notices(self, ctx: dict) -> None:
         """Retry notices that failed on an earlier scan."""
@@ -804,15 +1053,39 @@ class IssueManagementWorkflow:
             select(LifecycleAction.id).where(
                 LifecycleAction.owner == ctx["owner"],
                 LifecycleAction.repo == ctx["repo"],
-                LifecycleAction.applied_at.is_not(None),
-                LifecycleAction.notice_delivered_at.is_(None),
-                LifecycleAction.notice_attempts < _MAX_NOTICE_ATTEMPTS,
+                LifecycleAction.status == "applied",
             )
         )
         for record_id in list(result.scalars().all()):
             record = await db.get(LifecycleAction, record_id)
             if record is not None:
                 await self._deliver_notice(ctx, record)
+
+    async def failed_notices(self, ctx: dict) -> list[LifecycleAction]:
+        """Notices given up on after too many failed attempts."""
+        result = await ctx["db"].execute(
+            select(LifecycleAction).where(
+                LifecycleAction.owner == ctx["owner"],
+                LifecycleAction.repo == ctx["repo"],
+                LifecycleAction.status == "notice_failed",
+            )
+        )
+        return list(result.scalars().all())
+
+    async def retry_failed_notices(self, ctx: dict) -> int:
+        """Make every given-up notice eligible for delivery again."""
+        db: AsyncSession = ctx["db"]
+        result = await db.execute(
+            update(LifecycleAction)
+            .where(
+                LifecycleAction.owner == ctx["owner"],
+                LifecycleAction.repo == ctx["repo"],
+                LifecycleAction.status == "notice_failed",
+            )
+            .values(status="applied", notice_attempts=0)
+        )
+        await db.commit()
+        return result.rowcount
 
     async def _recover_pending_close_notices(
         self,
@@ -841,6 +1114,10 @@ class IssueManagementWorkflow:
         pending_ids = list(result.scalars().all())
 
         for pending_id in pending_ids:
+            # Take the record first: two workers must not both close the issue
+            # or both post its notice.
+            if not await self._claim(ctx, PendingIssueCloseNotice, pending_id):
+                continue
             try:
                 result = await db.execute(
                     select(PendingIssueCloseNotice).where(
@@ -851,6 +1128,7 @@ class IssueManagementWorkflow:
 
                 if pending is None:
                     continue
+                await db.refresh(pending)
 
                 number = pending.issue_number
                 pending_created_at = pending.created_at
@@ -990,6 +1268,8 @@ class IssueManagementWorkflow:
                     owner, repo, pending_id, exc,
                 )
                 await db.rollback()
+            finally:
+                await self._release(ctx, PendingIssueCloseNotice, pending_id)
 
         return pending_numbers
 
@@ -1024,8 +1304,9 @@ class IssueManagementWorkflow:
                     "🔒 This issue has been **automatically closed** due to "
                     "continued inactivity.\n\n"
                     "Feel free to re-open if still relevant."
-                    + _marker("closed", pending.last_activity)
                     + f"\n\n{notice_marker}"
+                    # The lifecycle marker must be the very end of the comment.
+                    + _marker("closed", pending.last_activity)
                 ),
                 inst,
             )
@@ -1068,12 +1349,35 @@ class IssueManagementWorkflow:
                 issue_number=number,
                 days_inactive=days_inactive,
                 last_activity=last_activity,
+                claimed_by=self._worker(ctx),
+                lease_expires_at=self._now(ctx) + _LEASE,
             )
             db.add(pending)
 
             # This commit must happen before the external GitHub operation.
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                return False  # another worker created it first
+        elif not await self._claim(ctx, PendingIssueCloseNotice, pending.id):
+            return False
+        else:
+            await db.refresh(pending)
 
+        pending_id = pending.id
+        try:
+            return await self._close_and_notify(
+                ctx, pending, owner, repo, number, inst
+            )
+        finally:
+            await self._release(ctx, PendingIssueCloseNotice, pending_id)
+
+    async def _close_and_notify(
+        self, ctx: dict, pending: PendingIssueCloseNotice,
+        owner: str, repo: str, number: int, inst: int,
+    ) -> bool:
+        db: AsyncSession = ctx["db"]
         newly_closed = pending.closed_at is None
 
         if newly_closed:
@@ -1115,8 +1419,8 @@ class IssueManagementWorkflow:
             ctx, number, "unassigned", mentions, last_activity, now
         )
         await self._gh.remove_assignees(owner, repo, number, assignees, inst)
-        await self._confirm_action(ctx, record, days_inactive, assignees)
-        await self._deliver_notice(ctx, record)
+        if await self._confirm_action(ctx, record, days_inactive, assignees):
+            await self._deliver_notice(ctx, record)
 
     async def _log_stale(self, ctx: dict, issue_number: int, action: str, days_inactive: int = 0) -> None:
         record = StaleActionLog(

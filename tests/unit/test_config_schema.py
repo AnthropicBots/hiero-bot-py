@@ -529,13 +529,13 @@ def test_every_schema_field_has_a_runtime_reader():
 
     indirect_reader_contracts = {
         "workflows.issue_management.close_stale_after_days": [
-            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.close_stale_after_days"),
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.close_stale_after_days"),
         ],
         "workflows.issue_management.exempt_labels": [
-            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.exempt_labels"),
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.exempt_labels"),
         ],
         "workflows.issue_management.stale_label": [
-            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.stale_label"),
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.stale_label"),
         ],
         "workflows.issue_management.label_escalation_rules.label": [
             ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "handle_label_escalation", "r.label"),

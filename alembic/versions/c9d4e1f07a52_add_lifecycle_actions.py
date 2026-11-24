@@ -28,6 +28,11 @@ def upgrade() -> None:
         sa.Column("action", sa.String(length=16), nullable=False),
         sa.Column("detail", sa.Text(), nullable=False),
         sa.Column("last_activity", sa.DateTime(), nullable=True),
+        sa.Column(
+            "status", sa.String(length=16), nullable=False, server_default="pending"
+        ),
+        sa.Column("claimed_by", sa.String(length=64), nullable=True),
+        sa.Column("lease_expires_at", sa.DateTime(), nullable=True),
         sa.Column("applied_at", sa.DateTime(), nullable=True),
         sa.Column("notice_delivered_at", sa.DateTime(), nullable=True),
         sa.Column("notice_attempts", sa.Integer(), nullable=False),
@@ -45,12 +50,18 @@ def upgrade() -> None:
         "lifecycle_actions",
         ["owner", "repo", "issue_number", "action"],
         unique=True,
-        sqlite_where=sa.text("applied_at IS NULL"),
-        postgresql_where=sa.text("applied_at IS NULL"),
+        sqlite_where=sa.text("status = 'pending'"),
+        postgresql_where=sa.text("status = 'pending'"),
     )
+    with op.batch_alter_table("pending_issue_close_notices") as batch:
+        batch.add_column(sa.Column("claimed_by", sa.String(length=64), nullable=True))
+        batch.add_column(sa.Column("lease_expires_at", sa.DateTime(), nullable=True))
 
 
 def downgrade() -> None:
+    with op.batch_alter_table("pending_issue_close_notices") as batch:
+        batch.drop_column("lease_expires_at")
+        batch.drop_column("claimed_by")
     op.drop_index("uq_lifecycle_action_pending", table_name="lifecycle_actions")
     op.drop_index("ix_lifecycle_action_issue", table_name="lifecycle_actions")
     op.drop_table("lifecycle_actions")

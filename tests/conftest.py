@@ -56,6 +56,15 @@ def mock_gh():
     gh.list_team_members = AsyncMock(return_value=[{"login": "mentor1"}])
     gh.get_file_content = AsyncMock(return_value=None)
     gh.get = AsyncMock(return_value=[])
+
+    async def get_issue(owner, repo, number, installation_id):
+        # By default an issue is whatever the (possibly re-stubbed) listing says.
+        for issue in await gh.list_issues(owner, repo, installation_id):
+            if issue.get("number") == number:
+                return issue
+        return {"number": number}
+
+    gh.get_issue = AsyncMock(side_effect=get_issue)
     
     return gh
 
