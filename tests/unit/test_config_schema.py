@@ -749,3 +749,39 @@ def test_every_schema_field_has_a_runtime_reader():
         "Schema fields without detected configuration readers: "
         f"{unused}"
     )
+
+
+@pytest.mark.parametrize(
+    "field", ["stale_issue_days", "close_stale_after_days", "auto_unassign_inactive_days"]
+)
+@pytest.mark.parametrize("value", [0, -1, "soon", None, 1.5])
+def test_lifecycle_thresholds_reject_unusable_values(field, value):
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate(
+            {"repo": "hiero/x", "workflows": {"issue_management": {field: value}}}
+        )
+
+
+@pytest.mark.parametrize("value", [1, 365, 100_000])
+def test_lifecycle_thresholds_accept_boundary_values(value):
+    cfg = RepoConfig.model_validate(
+        {
+            "repo": "hiero/x",
+            "workflows": {
+                "issue_management": {
+                    "stale_issue_days": value,
+                    "close_stale_after_days": value,
+                    "auto_unassign_inactive_days": value,
+                }
+            },
+        }
+    )
+    assert cfg.workflows.issue_management.stale_issue_days == value
+
+
+def test_config_without_lifecycle_settings_keeps_the_documented_defaults():
+    cfg = RepoConfig.model_validate({"repo": "hiero/x", "workflows": {}})
+    im = cfg.workflows.issue_management
+    assert (im.enabled, im.stale_issue_days, im.close_stale_after_days) == (False, 60, 7)
+    assert im.auto_unassign_inactive_days == 14
+    assert im.count_bot_comments_as_activity is False

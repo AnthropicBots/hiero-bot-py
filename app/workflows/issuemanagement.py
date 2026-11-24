@@ -6,6 +6,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.schema import IssueManagementConfig
@@ -46,6 +47,16 @@ _BOT_ACTION_TOLERANCE = timedelta(seconds=60)
 
 # A notice that keeps failing is given up on after this many delivery attempts.
 _MAX_NOTICE_ATTEMPTS = 5
+
+# The update time read back after our own change may already include a person's
+# edit made in the meantime, so it is trusted only up to this far past the last
+# time GitHub attributes to our own action. An edit within this window of it
+# cannot be told apart from our own change.
+_SETTLE_TOLERANCE = timedelta(seconds=5)
+
+
+class _AlreadyClaimed(Exception):
+    """Another worker (or an earlier unfinished attempt) owns this action."""
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -132,8 +143,10 @@ class IssueManagementWorkflow:
             )
             await db.rollback()
 
-        # Deliver unassignment and stale notices that failed on an earlier scan.
+        # Settle unfinished unassign / stale actions, then deliver notices that
+        # failed on an earlier scan.
         try:
+            await self._recover_pending_actions(ctx)
             await self._recover_pending_notices(ctx)
         except Exception as exc:
             counts["errors"] += 1
@@ -196,6 +209,7 @@ class IssueManagementWorkflow:
                 LifecycleAction.owner == ctx["owner"],
                 LifecycleAction.repo == ctx["repo"],
                 LifecycleAction.issue_number == issue["number"],
+                LifecycleAction.applied_at.is_not(None),
             )
             .order_by(LifecycleAction.created_at, LifecycleAction.id)
         )
@@ -366,6 +380,18 @@ class IssueManagementWorkflow:
             ):
                 stale_marked_at = record_time
 
+        # The update time read back after our change may include a person's edit
+        # made meanwhile: never trust it beyond the latest time GitHub itself
+        # attributes to our own action (or, with no such evidence, our record).
+        if own_floor is not None:
+            if own_bot_last is not None:
+                own_floor = min(own_floor, own_bot_last + _SETTLE_TOLERANCE)
+            elif records:
+                last_record = max(
+                    _parse_timestamp(r.created_at.isoformat()) for r in records
+                )
+                own_floor = min(own_floor, last_record + _BOT_ACTION_TOLERANCE)
+
         # A lifecycle comment or record is the strongest evidence because it
         # carries the pre-action activity baseline. Without either, use the
         # attributable bot timeline event.
@@ -484,6 +510,8 @@ class IssueManagementWorkflow:
                     ctx, issue, assignees, days_inactive, last_activity, now
                 )
                 counts["unassigned"] += len(assignees)
+            except _AlreadyClaimed:
+                pass
             except Exception as exc:
                 counts["errors"] += 1
                 log.warning(
@@ -506,9 +534,12 @@ class IssueManagementWorkflow:
         # Mark stale (independent of the unassignment above, so an issue past
         # both thresholds gets both actions in the same scan)
         if last_activity < stale_cutoff:
-            await self._mark_stale(
-                ctx, issue, cfg.stale_label, days_inactive, last_activity, now
-            )
+            try:
+                await self._mark_stale(
+                    ctx, issue, cfg.stale_label, days_inactive, last_activity, now
+                )
+            except _AlreadyClaimed:
+                return
             counts["stale_marked"] += 1
 
     # ── Label escalation ─────────────────────────────────────
@@ -583,20 +614,15 @@ class IssueManagementWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
 
-        await self._gh.add_label(owner, repo, number, stale_label, inst)
-        # The action is recorded before its notice goes out, so a failed notice
-        # neither loses the issue's real activity nor goes undelivered: it is
-        # retried on later scans.
+        # Intent first, then the GitHub change, then confirmation (with its log
+        # and audit rows, in one transaction), then the notice. A crash or an
+        # ambiguous failure at any point is reconciled by the next scan.
         record = await self._record_action(
             ctx, number, "stale", stale_label, last_activity, now
         )
+        await self._gh.add_label(owner, repo, number, stale_label, inst)
+        await self._confirm_action(ctx, record, days_inactive, None)
         await self._deliver_notice(ctx, record)
-
-        await self._log_stale(ctx, number, "marked_stale", days_inactive)
-        await audit.record(
-            ctx["db"], action="issue.stale_marked", owner=owner, repo=repo,
-            target_number=number, reason="No activity within stale period",
-        )
 
     async def _record_action(
         self, ctx: dict, number: int, action: str, detail: str,
@@ -613,8 +639,100 @@ class IssueManagementWorkflow:
             created_at=now or datetime.now(UTC),
         )
         ctx["db"].add(record)
-        await ctx["db"].commit()
+        try:
+            await ctx["db"].commit()
+        except IntegrityError as exc:
+            await ctx["db"].rollback()
+            raise _AlreadyClaimed from exc
         return record
+
+    async def _confirm_action(
+        self,
+        ctx: dict,
+        record: LifecycleAction,
+        days_inactive: int,
+        logins: list[str] | None,
+    ) -> None:
+        """Mark an intent as applied, writing its log and audit rows with it."""
+        owner, repo = ctx["owner"], ctx["repo"]
+        number = record.issue_number
+        record.applied_at = datetime.now(UTC)
+        if record.action == "stale":
+            await self._log_stale(ctx, number, "marked_stale", days_inactive)
+            await audit.record(
+                ctx["db"], action="issue.stale_marked", owner=owner, repo=repo,
+                target_number=number, reason="No activity within stale period",
+            )
+        else:
+            await self._log_stale(ctx, number, "unassigned", days_inactive)
+            for login in logins or []:
+                await audit.record(
+                    ctx["db"], action="issue.unassigned", owner=owner, repo=repo,
+                    target_number=number, target_login=login,
+                    reason="Auto-unassigned due to inactivity",
+                )
+        await ctx["db"].commit()
+
+    async def _recover_pending_actions(self, ctx: dict) -> None:
+        """Settle intents left by a crash or an ambiguous GitHub failure.
+
+        GitHub's actual state decides: a change that landed is confirmed (with
+        its bookkeeping), one that did not is forgotten so the normal scan can
+        decide again from fresh activity.
+        """
+        owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
+        db: AsyncSession = ctx["db"]
+        cfg = ctx["config"].workflows.issue_management
+        result = await db.execute(
+            select(LifecycleAction.id).where(
+                LifecycleAction.owner == owner,
+                LifecycleAction.repo == repo,
+                LifecycleAction.applied_at.is_(None),
+            )
+        )
+        for record_id in list(result.scalars().all()):
+            record = await db.get(LifecycleAction, record_id)
+            if record is None:
+                continue
+            action, number = record.action, record.issue_number
+            try:
+                issue = await self._gh.get_issue(owner, repo, number, inst)
+                days = 0
+                if record.last_activity is not None:
+                    days = (
+                        _parse_timestamp(record.created_at.isoformat())
+                        - _parse_timestamp(record.last_activity.isoformat())
+                    ).days
+                if record.action == "stale":
+                    labels = {
+                        (lb["name"] if isinstance(lb, dict) else lb).casefold()
+                        for lb in issue.get("labels", [])
+                    }
+                    if cfg.stale_label.casefold() in labels:
+                        await self._confirm_action(ctx, record, days, None)
+                    else:
+                        await db.delete(record)
+                        await db.commit()
+                else:
+                    targeted = [t.lstrip("@") for t in record.detail.split()]
+                    current = {
+                        person["login"].casefold()
+                        for person in (issue.get("assignees") or [])
+                        if person and person.get("login")
+                    }
+                    removed = [t for t in targeted if t.casefold() not in current]
+                    if removed:
+                        record.detail = " ".join(f"@{t}" for t in removed)
+                        await self._confirm_action(ctx, record, days, removed)
+                    else:
+                        await db.delete(record)
+                        await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                log.warning(
+                    "Could not settle %s intent #%s on %s/%s#%s: %s",
+                    action, record_id, owner, repo, number, exc,
+                )
 
     @staticmethod
     def _notice_body(record: LifecycleAction) -> str:
@@ -686,6 +804,7 @@ class IssueManagementWorkflow:
             select(LifecycleAction.id).where(
                 LifecycleAction.owner == ctx["owner"],
                 LifecycleAction.repo == ctx["repo"],
+                LifecycleAction.applied_at.is_not(None),
                 LifecycleAction.notice_delivered_at.is_(None),
                 LifecycleAction.notice_attempts < _MAX_NOTICE_ATTEMPTS,
             )
@@ -990,21 +1109,14 @@ class IssueManagementWorkflow:
         number = issue["number"]
         mentions = " ".join(f"@{a}" for a in assignees)
 
-        # Remove first. A failed removal changes nothing and posts nothing; once
-        # it succeeds the action is recorded and its notice delivered or retried.
-        await self._gh.remove_assignees(owner, repo, number, assignees, inst)
+        # Intent (naming exactly who is targeted) before the removal; see
+        # _mark_stale for the sequence.
         record = await self._record_action(
             ctx, number, "unassigned", mentions, last_activity, now
         )
+        await self._gh.remove_assignees(owner, repo, number, assignees, inst)
+        await self._confirm_action(ctx, record, days_inactive, assignees)
         await self._deliver_notice(ctx, record)
-
-        await self._log_stale(ctx, number, "unassigned", days_inactive)
-        for login in assignees:
-            await audit.record(
-                ctx["db"], action="issue.unassigned", owner=owner, repo=repo,
-                target_number=number, target_login=login,
-                reason="Auto-unassigned due to inactivity",
-            )
 
     async def _log_stale(self, ctx: dict, issue_number: int, action: str, days_inactive: int = 0) -> None:
         record = StaleActionLog(

@@ -28,6 +28,7 @@ def upgrade() -> None:
         sa.Column("action", sa.String(length=16), nullable=False),
         sa.Column("detail", sa.Text(), nullable=False),
         sa.Column("last_activity", sa.DateTime(), nullable=True),
+        sa.Column("applied_at", sa.DateTime(), nullable=True),
         sa.Column("notice_delivered_at", sa.DateTime(), nullable=True),
         sa.Column("notice_attempts", sa.Integer(), nullable=False),
         sa.Column("settled_updated_at", sa.DateTime(), nullable=True),
@@ -39,8 +40,17 @@ def upgrade() -> None:
         ["owner", "repo", "issue_number"],
         unique=False,
     )
+    op.create_index(
+        "uq_lifecycle_action_pending",
+        "lifecycle_actions",
+        ["owner", "repo", "issue_number", "action"],
+        unique=True,
+        sqlite_where=sa.text("applied_at IS NULL"),
+        postgresql_where=sa.text("applied_at IS NULL"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("uq_lifecycle_action_pending", table_name="lifecycle_actions")
     op.drop_index("ix_lifecycle_action_issue", table_name="lifecycle_actions")
     op.drop_table("lifecycle_actions")

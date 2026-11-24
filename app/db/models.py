@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
@@ -130,21 +131,53 @@ class StaleActionLog(Base):
 
 
 class LifecycleAction(Base):
+    """A housekeeping action the bot took on an issue (unassign or stale).
+
+    It is stored before the action's notice is posted, so the notice can be
+    retried and the issue's activity from before the action is never lost, and
+    it remembers the update time GitHub stamped, so a later edit by a person can
+    be told apart from the bot's own change.
+    """
+
     __tablename__ = "lifecycle_actions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime,
+        default=lambda: datetime.now(UTC),
+    )
     owner: Mapped[str] = mapped_column(String(128))
     repo: Mapped[str] = mapped_column(String(128))
     issue_number: Mapped[int] = mapped_column(Integer)
     action: Mapped[str] = mapped_column(String(16))  # unassigned | stale
     detail: Mapped[str] = mapped_column(Text)  # @mentions, or the stale label
     last_activity: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-    notice_delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # Set once the GitHub change has been confirmed and its log and audit rows
+    # written (in one transaction). Until then the row is only an intent.
+    applied_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    notice_delivered_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime, nullable=True
+    )
     notice_attempts: Mapped[int] = mapped_column(Integer, default=0)
-    settled_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    settled_updated_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime, nullable=True
+    )
 
-    __table_args__ = (Index("ix_lifecycle_action_issue", "owner", "repo", "issue_number"),)
+    __table_args__ = (
+        Index("ix_lifecycle_action_issue", "owner", "repo", "issue_number"),
+        # At most one unconfirmed intent per issue and action: whichever worker
+        # inserts first owns it, so two workers cannot both act on one issue.
+        Index(
+            "uq_lifecycle_action_pending",
+            "owner",
+            "repo",
+            "issue_number",
+            "action",
+            unique=True,
+            sqlite_where=text("applied_at IS NULL"),
+            postgresql_where=text("applied_at IS NULL"),
+        ),
+    )
 
 
 class PendingIssueCloseNotice(Base):
@@ -287,5 +320,3 @@ class AccountRepo(Base):
     __table_args__ = (
         UniqueConstraint("account_id", "repo_name", name="uq_account_repo"),
     )
-
-

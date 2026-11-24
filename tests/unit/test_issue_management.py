@@ -7,9 +7,15 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app.db.models import PendingIssueCloseNotice, StaleActionLog
+from app.db.models import (
+    AuditLog,
+    LifecycleAction,
+    PendingIssueCloseNotice,
+    StaleActionLog,
+)
 from app.workflows.issuemanagement import (
     IssueManagementWorkflow,
+    _AlreadyClaimed,
     _is_own_comment,
 )
 
@@ -1797,3 +1803,247 @@ async def test_failing_removal_is_retried_and_keeps_the_stale_countdown(mock_gh,
 
     assert issue.assignees == []
     assert marked == 9
+
+
+# Crash safety: the intent is stored before GitHub is called, so a process that
+# dies at any point leaves enough behind for the next scan to finish the job.
+
+
+class _Crash(BaseException):
+    """Simulates the process dying: not caught by the scan's error handling."""
+
+
+async def _count(db, model) -> int:
+    return len((await db.execute(select(model))).scalars().all())
+
+
+def _crash_setup(mock_gh, ctx, idle_days=25, assignees=None):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20,
+               close_stale_after_days=30)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=idle_days, assignees=assignees)
+    _wire(mock_gh, issue)
+    return clock, issue
+
+
+@pytest.mark.asyncio
+async def test_crash_before_the_label_request_loses_nothing(mock_gh, ctx, db):
+    clock, issue = _crash_setup(mock_gh, ctx)
+    real = mock_gh.add_label.side_effect
+    mock_gh.add_label.side_effect = _Crash()
+    wf = IssueManagementWorkflow(mock_gh)
+
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert issue.labels == []
+    assert await _count(db, LifecycleAction) == 1  # the intent survived
+
+    mock_gh.add_label.side_effect = real
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert issue.labels == ["stale"]
+    assert await _logged_issue_numbers(db) == [1]
+    assert len([c for c in issue.comments if "marked **stale**" in c["body"]]) == 1
+
+
+@pytest.mark.asyncio
+async def test_crash_after_the_label_landed_is_reconciled_without_a_second_label(
+    mock_gh, ctx, db
+):
+    clock, issue = _crash_setup(mock_gh, ctx)
+    real = mock_gh.add_label.side_effect
+
+    async def lands_then_crashes(*args, **kwargs):
+        await real(*args, **kwargs)
+        raise _Crash()
+
+    mock_gh.add_label.side_effect = lands_then_crashes
+    wf = IssueManagementWorkflow(mock_gh)
+
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert issue.labels == ["stale"]
+    assert await _logged_issue_numbers(db) == []  # not yet confirmed
+
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert mock_gh.add_label.await_count == 1
+    assert await _logged_issue_numbers(db) == [1]
+    assert await _count(db, AuditLog) == 1
+    assert len([c for c in issue.comments if "marked **stale**" in c["body"]]) == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_after_the_label_landed_is_reconciled(mock_gh, ctx, db):
+    clock, _ = _crash_setup(mock_gh, ctx)
+    real = mock_gh.add_label.side_effect
+
+    async def lands_then_times_out(*args, **kwargs):
+        await real(*args, **kwargs)
+        raise httpx.ReadTimeout("timed out")
+
+    mock_gh.add_label.side_effect = lands_then_times_out
+    wf = IssueManagementWorkflow(mock_gh)
+
+    first = await wf.run_stale_scan(ctx, now=clock["now"])
+    assert first["errors"] == 1
+
+    clock["now"] += timedelta(days=1)
+    second = await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert second["errors"] == 0
+    assert mock_gh.add_label.await_count == 1
+    assert await _logged_issue_numbers(db) == [1]
+
+
+@pytest.mark.asyncio
+async def test_crash_after_the_removal_landed_keeps_baseline_and_audit(
+    mock_gh, ctx, db
+):
+    clock, issue = _crash_setup(mock_gh, ctx, idle_days=12, assignees=["sleepy-dev"])
+    real = mock_gh.remove_assignees.side_effect
+
+    async def lands_then_crashes(*args, **kwargs):
+        await real(*args, **kwargs)
+        raise _Crash()
+
+    mock_gh.remove_assignees.side_effect = lands_then_crashes
+    wf = IssueManagementWorkflow(mock_gh)
+
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert issue.assignees == []
+
+    mock_gh.remove_assignees.side_effect = real
+    marked, _ = await _run_daily(wf, ctx, clock, issue, days=40)
+
+    assert mock_gh.remove_assignees.await_count == 1
+    assert marked == 9  # the original countdown, not one restarted by the removal
+    audits = (await db.execute(select(AuditLog).where(
+        AuditLog.action == "issue.unassigned"))).scalars().all()
+    assert [a.target_login for a in audits] == ["sleepy-dev"]
+    assert len([c for c in issue.comments if "auto-unassigned" in c["body"]]) == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_removal_confirms_only_who_was_removed(mock_gh, ctx, db):
+    clock, issue = _crash_setup(mock_gh, ctx, idle_days=12, assignees=["alice", "bob"])
+
+    async def removes_alice_then_crashes(owner, repo, number, logins, inst):
+        issue.assignees = [a for a in issue.assignees if a != "alice"]
+        issue.touch()
+        raise _Crash()
+
+    real_remove = mock_gh.remove_assignees.side_effect
+    mock_gh.remove_assignees.side_effect = removes_alice_then_crashes
+    wf = IssueManagementWorkflow(mock_gh)
+
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+
+    mock_gh.remove_assignees.side_effect = real_remove
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    notice = [c for c in issue.comments if "auto-unassigned" in c["body"]]
+    assert len(notice) >= 1
+    assert "@alice" in notice[0]["body"] and "@bob" not in notice[0]["body"]
+    audits = (await db.execute(select(AuditLog).where(
+        AuditLog.action == "issue.unassigned"))).scalars().all()
+    assert sorted(a.target_login for a in audits) == ["alice", "bob"]
+    assert issue.assignees == []
+
+
+@pytest.mark.asyncio
+async def test_someone_assigned_after_a_failed_removal_is_not_removed_by_recovery(
+    mock_gh, ctx
+):
+    clock, issue = _crash_setup(mock_gh, ctx, idle_days=12, assignees=["sleepy-dev"])
+    mock_gh.remove_assignees.side_effect = _Crash()
+    wf = IssueManagementWorkflow(mock_gh)
+
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+
+    real = _wire  # reinstall the working fake, then a person adds an assignee
+    real(mock_gh, issue)
+    issue.assignees.append("newcomer")
+    issue.add_timeline_event("assigned", {"login": "maintainer", "type": "User"})
+    issue.touch()
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert "newcomer" in issue.assignees  # fresh activity: nobody is removed
+
+
+@pytest.mark.asyncio
+async def test_two_workers_cannot_both_claim_the_same_action(mock_gh, ctx, db):
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf._record_action(ctx, 7, "stale", "stale", None, None)
+
+    with pytest.raises(_AlreadyClaimed):
+        await wf._record_action(ctx, 7, "stale", "stale", None, None)
+
+    await wf._record_action(ctx, 7, "unassigned", "@a", None, None)  # other action
+    await wf._record_action(ctx, 8, "stale", "stale", None, None)  # other issue
+    assert await _count(db, LifecycleAction) == 3
+
+
+@pytest.mark.asyncio
+async def test_claimed_issue_is_skipped_not_reported_as_an_error(mock_gh, ctx):
+    clock, _ = _crash_setup(mock_gh, ctx)
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf._record_action(ctx, 1, "stale", "stale", None, None)
+    # Recovery cannot settle it right now, as if another worker is mid-action.
+    mock_gh.get_issue.side_effect = RuntimeError("busy")
+
+    counts = await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert counts["errors"] == 0
+    assert counts["stale_marked"] == 0
+    mock_gh.add_label.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_audit_rows_survive_a_crash_before_the_notice(mock_gh, ctx, db):
+    clock, _ = _crash_setup(mock_gh, ctx)
+    mock_gh.post_comment.side_effect = _Crash()
+    wf = IssueManagementWorkflow(mock_gh)
+
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert await _logged_issue_numbers(db) == [1]
+    assert await _count(db, AuditLog) == 1
+
+
+@pytest.mark.asyncio
+async def test_human_edit_before_the_readback_is_not_swallowed(mock_gh, ctx):
+    # A person edits the issue after the bot's notice but before the bot reads the
+    # update time back. That read-back must not become the bot's own boundary.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+    real_get = mock_gh.get_issue.side_effect
+    edited = {"done": False}
+
+    async def edit_lands_first(*args, **kwargs):
+        if not edited["done"]:
+            edited["done"] = True
+            issue.updated = clock["now"] + timedelta(seconds=30)  # the edit
+        return await real_get(*args, **kwargs)
+
+    mock_gh.get_issue.side_effect = edit_lands_first
+    wf = IssueManagementWorkflow(mock_gh)
+
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    clock["now"] += timedelta(seconds=30)
+    marked, _ = await _run_daily(wf, ctx, clock, issue, days=40)
+
+    assert marked == 21  # counted from the edit, not from the day-12 activity
