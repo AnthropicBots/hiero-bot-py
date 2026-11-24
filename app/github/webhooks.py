@@ -560,7 +560,7 @@ class WebhookRouter:
                 detail="Invalid installation payload: installation ID must be a positive integer",
             )
 
-        if action in ("created", "unsuspended"):
+        if action in ("created", "unsuspend", "unsuspended"):
             account_info = inst.get("account")
 
             if not isinstance(account_info, dict):
@@ -646,14 +646,14 @@ class WebhookRouter:
 
         elif action in ("deleted", "suspend"):
             async with self._installation_transaction(db):
-                acc = await db.scalar(
+                target_acc = await db.scalar(
                     select(Account).where(
                         Account.github_installation_id == inst_id
                     )
                 )
 
-                if acc:
-                    acc.suspended_at = datetime.now(UTC)
+                if target_acc:
+                    target_acc.suspended_at = datetime.now(UTC)
 
         return {"ok": True, "action": action}
 

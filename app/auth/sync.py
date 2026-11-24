@@ -35,15 +35,15 @@ def clear_sync_cache() -> None:
     _SYNC_CACHE.clear()
 
 
-async def _fetch_installation_ids(
+async def _fetch_installations(
     client: httpx.AsyncClient, token: str
-) -> tuple[set[int], bool]:
+) -> tuple[dict[int, dict], bool]:
     """
-    Return the installation IDs the user can access and whether that list is
-    complete. It is incomplete when a page fails or the page cap is reached,
-    and callers must not revoke access based on an incomplete list.
+    Return the installations the user can access as a dict of {inst_id: inst_data}
+    and whether that list is complete. It is incomplete when a page fails or the page cap
+    is reached, and callers must not revoke access based on an incomplete list.
     """
-    ids: set[int] = set()
+    installations: dict[int, dict] = {}
     for page in range(1, MAX_INSTALLATION_PAGES + 1):
         res = await client.get(
             INSTALLATIONS_URL,
@@ -55,18 +55,27 @@ async def _fetch_installation_ids(
             params={"per_page": INSTALLATIONS_PER_PAGE, "page": page},
         )
         if res.status_code != 200:
-            return ids, False
+            return installations, False
 
         batch = res.json().get("installations", [])
-        ids.update(inst["id"] for inst in batch if "id" in inst)
+        for inst in batch:
+            if isinstance(inst, dict) and "id" in inst:
+                installations[inst["id"]] = inst
         if len(batch) < INSTALLATIONS_PER_PAGE:
-            return ids, True
+            return installations, True
 
     log.warning(
         "User installation list exceeded %d pages; skipping revocation",
         MAX_INSTALLATION_PAGES,
     )
-    return ids, False
+    return installations, False
+
+
+async def _fetch_installation_ids(
+    client: httpx.AsyncClient, token: str
+) -> tuple[set[int], bool]:
+    installations, complete = await _fetch_installations(client, token)
+    return set(installations.keys()), complete
 
 
 async def get_user_authorized_accounts(
@@ -91,7 +100,8 @@ async def get_user_authorized_accounts(
             token = decrypt_token(user_token.encrypted_access_token)
             if token:
                 async with httpx.AsyncClient() as client:
-                    inst_ids, complete = await _fetch_installation_ids(client, token)
+                    inst_map, complete = await _fetch_installations(client, token)
+                    inst_ids = set(inst_map.keys())
 
                 # Every account link this user has, loaded once and used both
                 # to grant and to revoke, rather than one query per account.
@@ -108,7 +118,66 @@ async def get_user_authorized_accounts(
                 if inst_ids:
                     acc_stmt = select(Account).where(Account.github_installation_id.in_(inst_ids))
                     acc_res = await db.execute(acc_stmt)
-                    accounts = acc_res.scalars().all()
+                    accounts = list(acc_res.scalars().all())
+                    existing_inst_ids = {acc.github_installation_id for acc in accounts}
+
+                    # Issue #128: If an installation in GitHub is missing from DB, create it
+                    missing_inst_ids = inst_ids - existing_inst_ids
+                    for missing_id in sorted(missing_inst_ids):
+                        inst_payload = inst_map.get(missing_id, {})
+                        account_data = inst_payload.get("account")
+                        if not isinstance(account_data, dict) or not account_data.get("login"):
+                            continue
+
+                        org_login = account_data["login"]
+                        github_account_id = (
+                            account_data.get("id")
+                            if isinstance(account_data.get("id"), int)
+                            else None
+                        )
+                        account_type = account_data.get("type") or "Organization"
+
+                        new_acc = Account(
+                            github_installation_id=missing_id,
+                            github_account_id=github_account_id,
+                            org_login=org_login,
+                            account_type=account_type,
+                            plan_tier="free",
+                            suspended_at=None,
+                        )
+                        db.add(new_acc)
+                        await db.flush()
+                        accounts.append(new_acc)
+
+                        # Fetch repos for the newly created installation
+                        try:
+                            repos_url = f"https://api.github.com/user/installations/{missing_id}/repositories"
+                            repos_res = await client.get(
+                                repos_url,
+                                headers={
+                                    "Authorization": f"Bearer {token}",
+                                    "Accept": "application/vnd.github.v3+json",
+                                    "User-Agent": "Hiero-Bot-Py",
+                                },
+                            )
+                            if repos_res.status_code == 200:
+                                repos_data = repos_res.json().get("repositories", [])
+                                for repo_obj in repos_data:
+                                    if isinstance(repo_obj, dict):
+                                        rname = repo_obj.get("name")
+                                        if rname and isinstance(rname, str):
+                                            db.add(
+                                                AccountRepo(
+                                                    account_id=new_acc.id,
+                                                    repo_name=rname.strip(),
+                                                )
+                                            )
+                        except Exception as err:
+                            log.warning(
+                                "Failed fetching repositories for installation %s: %s",
+                                missing_id,
+                                err,
+                            )
 
                     for acc in accounts:
                         link = links.get(acc.id)
@@ -141,7 +210,7 @@ async def get_user_authorized_accounts(
         .where(AccountUser.user_id == user.id, AccountUser.authorized == True)
     )
     db_res = await db.execute(stmt)
-    accounts = db_res.scalars().all()
+    accounts = list(db_res.scalars().all())
 
     if not accounts:
         _SYNC_CACHE[user.id] = (now, [])

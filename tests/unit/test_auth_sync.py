@@ -506,3 +506,84 @@ async def test_sync_query_count_does_not_grow_with_installations(db):
     large = await count_sync_queries("many-orgs", [800 + i for i in range(40)])
 
     assert large == small
+
+
+@pytest.mark.asyncio
+async def test_installation_missing_from_db_is_created_during_sync(db):
+    """When GitHub returns an installation that does not yet exist in the
+    database, get_user_authorized_accounts creates the Account and AccountRepo
+    rows and authorizes the user."""
+    from app.db.models import AccountRepo
+
+    user = User(github_user_id=999, github_login="newuser")
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    token = UserOAuthToken(
+        user_id=user.id, encrypted_access_token=encrypt_token("gho_secret")
+    )
+    db.add(token)
+    await db.commit()
+
+    def mock_get(url, *args, **kwargs):
+        res = MagicMock()
+        res.status_code = 200
+        if "/repositories" in url:
+            res.json = MagicMock(return_value={"repositories": [{"name": "web-app"}]})
+        else:
+            res.json = MagicMock(
+                return_value={
+                    "installations": [
+                        {
+                            "id": 7777,
+                            "account": {
+                                "id": 8888,
+                                "login": "missing-org",
+                                "type": "Organization",
+                            },
+                        }
+                    ]
+                }
+            )
+        return res
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=mock_get)
+    ctx_manager = MagicMock()
+    ctx_manager.__aenter__ = AsyncMock(return_value=client)
+    ctx_manager.__aexit__ = AsyncMock(return_value=False)
+
+    clear_sync_cache()
+    with patch("app.auth.sync.httpx.AsyncClient", return_value=ctx_manager):
+        result = await get_user_authorized_accounts(user, db)
+
+    assert len(result) == 1
+    assert result[0]["github_installation_id"] == 7777
+    assert result[0]["org_login"] == "missing-org"
+    assert result[0]["repos"] == ["web-app"]
+
+    acc = (
+        await db.execute(
+            select(Account).where(Account.github_installation_id == 7777)
+        )
+    ).scalar_one()
+    assert acc.org_login == "missing-org"
+    assert acc.github_account_id == 8888
+    assert acc.plan_tier == "free"
+
+    repos = (
+        await db.execute(
+            select(AccountRepo.repo_name).where(AccountRepo.account_id == acc.id)
+        )
+    ).scalars().all()
+    assert repos == ["web-app"]
+
+    au = (
+        await db.execute(
+            select(AccountUser).where(
+                AccountUser.account_id == acc.id, AccountUser.user_id == user.id
+            )
+        )
+    ).scalar_one()
+    assert au.authorized is True
