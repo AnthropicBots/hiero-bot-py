@@ -947,6 +947,32 @@ async def test_persistent_failure_of_the_unassign_notice_never_makes_marking_ear
     assert marked is None or marked >= 9
 
 
+@pytest.mark.asyncio
+async def test_retry_does_not_duplicate_a_comment_github_already_accepted(mock_gh, ctx):
+    # The first POST lands but the client times out: the retry must notice it.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    real_post_comment = mock_gh.post_comment.side_effect
+    attempts = {"count": 0}
+
+    async def accepted_then_timeout(*args, **kwargs):
+        attempts["count"] += 1
+        await real_post_comment(*args, **kwargs)
+        if attempts["count"] == 1:
+            raise httpx.ReadTimeout("timed out")
+
+    mock_gh.post_comment.side_effect = accepted_then_timeout
+
+    await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    notices = [c for c in issue.comments if "auto-unassigned" in c["body"]]
+    assert len(notices) == 1
+    assert attempts["count"] == 1
+
+
 @pytest.mark.parametrize(("seconds", "expected"), [(30, 8), (90, 21)])
 @pytest.mark.asyncio
 async def test_issue_edit_is_attributed_by_the_60_second_window(

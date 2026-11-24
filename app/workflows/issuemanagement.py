@@ -499,6 +499,8 @@ class IssueManagementWorkflow:
 
         The GitHub client does not retry POSTs, and these comments carry the
         marker that preserves an issue's real activity, so one retry is worth it.
+        A timeout does not prove GitHub rejected the first attempt, so before
+        retrying we look for the same comment, written by this app, on the issue.
         """
         try:
             await self._gh.post_comment(owner, repo, number, body, inst)
@@ -507,6 +509,16 @@ class IssueManagementWorkflow:
                 "Posting a lifecycle comment on %s/%s#%s failed, retrying once: %s",
                 owner, repo, number, exc,
             )
+            try:
+                existing = await self._gh.list_issue_comments(owner, repo, number, inst)
+            except Exception:
+                raise exc  # cannot tell whether it landed: do not risk a duplicate
+            if any(
+                _is_own_comment(comment)
+                and (comment.get("body") or "").strip() == body.strip()
+                for comment in existing
+            ):
+                return
             await self._gh.post_comment(owner, repo, number, body, inst)
 
 
