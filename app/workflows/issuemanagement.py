@@ -42,6 +42,7 @@ _LEGACY_PHRASES = {
 # Every bot action ends with its lifecycle comment, so the ``updated_at`` GitHub
 # stamps for that action is the comment's own time. An ``updated_at`` this close
 # to the bot's last comment is its own; anything later is somebody else's.
+_BOT_ACTION_TOLERANCE = timedelta(seconds=60)
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -179,6 +180,10 @@ class IssueManagementWorkflow:
         bot_stale_marked_at: datetime | None = None
         stale_marked_at: datetime | None = None
         ignored_bot_activity = False
+        # Latest moment any bot (ours or another) touched the issue. GitHub bumps
+        # ``updated_at`` for each of those, so only an ``updated_at`` clearly later
+        # than this can be a person's edit, which leaves no comment or event.
+        bot_activity_last: datetime | None = None
 
         cfg = ctx["config"].workflows.issue_management
 
@@ -207,6 +212,8 @@ class IssueManagementWorkflow:
 
                 if is_bot and not cfg.count_bot_comments_as_activity:
                     ignored_bot_activity = True
+                    if bot_activity_last is None or timestamp > bot_activity_last:
+                        bot_activity_last = timestamp
                     continue
 
                 if human_last is None or timestamp > human_last:
@@ -216,6 +223,9 @@ class IssueManagementWorkflow:
 
             if baseline is not None:
                 baseline = min(baseline, timestamp)
+
+            if bot_activity_last is None or timestamp > bot_activity_last:
+                bot_activity_last = timestamp
 
             if bot_last is None or timestamp >= bot_last:
                 bot_last, bot_baseline = timestamp, baseline
@@ -256,6 +266,9 @@ class IssueManagementWorkflow:
                 if human_last is None or timestamp > human_last:
                     human_last = timestamp
                 continue
+
+            if bot_activity_last is None or timestamp > bot_activity_last:
+                bot_activity_last = timestamp
 
             app = event.get("performed_via_github_app")
             is_own_app_event = (
@@ -325,6 +338,11 @@ class IssueManagementWorkflow:
                 ]
         else:
             candidates = [human_last, updated]
+
+        # An edit leaves neither a comment nor a timeline event; its only trace is
+        # ``updated_at``. Count it once it is clearly later than every bot action.
+        if bot_activity_last is not None and updated > bot_activity_last + _BOT_ACTION_TOLERANCE:
+            candidates.append(updated)
 
         valid_candidates = [candidate for candidate in candidates if candidate]
         last_activity = max(valid_candidates)
@@ -483,8 +501,9 @@ class IssueManagementWorkflow:
 
         # The comment goes last: GitHub stamps updated_at when it lands, so the
         # bump that follows is the comment's own and the marker explains it. If
-        # the comment fails, the unexplained bump just counts as activity and the
-        # issue is retried later -- it is never closed early.
+        # the comment fails the error is counted and the scan moves on: the label
+        # stays, so the issue is stale from the next scan (its close period runs
+        # from the label event) and the missing notice is not retried.
         await self._gh.add_label(owner, repo, number, stale_label, inst)
         await self._gh.post_comment(
             owner, repo, number,

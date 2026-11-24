@@ -1423,6 +1423,47 @@ async def test_failed_close_notice_is_recovered_without_closing_twice(
 
 
 @pytest.mark.asyncio
+async def test_issue_body_edit_after_a_bot_action_counts_as_activity(mock_gh, ctx):
+    # An edit leaves no comment and no timeline event, only a newer updated_at.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+    wf = IssueManagementWorkflow(mock_gh)
+
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    assert issue.assignees == []
+
+    clock["now"] += timedelta(hours=1)
+    issue.updated = clock["now"]  # the edit
+
+    marked, _ = await _run_daily(wf, ctx, clock, issue, days=40)
+
+    assert marked == 21  # 20 full days after the edit, not day 8 from old activity
+
+
+@pytest.mark.asyncio
+async def test_other_bot_comment_does_not_hide_a_later_issue_edit(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=60)
+    _wire(mock_gh, issue)
+    issue.comments.append({
+        "body": "automated note",
+        "created_at": (clock["now"] - timedelta(days=50)).isoformat(),
+        "user": {"login": "ci[bot]", "type": "Bot"},
+        "performed_via_github_app": {"id": 999},
+    })
+    issue.updated = clock["now"] - timedelta(days=2)  # a person edited the body
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(
+        ctx, now=clock["now"]
+    )
+
+    assert counts["stale_marked"] == 0
+
+
+@pytest.mark.asyncio
 async def test_marker_with_an_unknown_action_is_ignored(mock_gh, ctx):
     _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
     clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}

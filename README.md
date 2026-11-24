@@ -208,7 +208,7 @@ The issue-management workflow is configured per repository under `workflows.issu
 | `close_stale_after_days` | Close a stale issue this many *additional* days after it was marked stale. Independent of `stale_issue_days`. |
 | `stale_label`, `exempt_labels` | The label applied to stale issues, and labels that exempt an issue entirely (case-insensitive). |
 
-Inactivity is measured from the last genuine activity: human comments and supported human-authored GitHub timeline events, such as label and assignment changes. Comments from other bots or apps do not count by default; set `count_bot_comments_as_activity: true` to include them. The bot's own lifecycle comments are identified using a hidden marker and verified GitHub App identity, so they never restart an inactivity countdown. Bot-generated timeline events are also ignored. Polling cannot reliably attribute ordinary issue-body edits; detecting those edits would require webhook-based event tracking.
+Inactivity is measured from the last genuine activity: human comments and supported human-authored GitHub timeline events, such as label and assignment changes. Comments from other bots or apps do not count by default; set `count_bot_comments_as_activity: true` to include them. The bot's own lifecycle comments are identified using a hidden marker and verified GitHub App identity, so they never restart an inactivity countdown. Bot-generated timeline events are also ignored. Edits to an issue's body leave no comment or timeline event, so they are detected from the issue's last-updated time and count once it is more than a minute later than every bot action.
 
 An issue past both the unassignment and stale thresholds is unassigned and marked stale in the same scan. New activity restarts the inactivity countdowns. On an issue that is already stale, activity postpones closing by `close_stale_after_days`; the stale label stays until a maintainer removes it. If fetching an issue's timeline fails, that issue is skipped for the current scan and retried on a subsequent scan. Close notifications are persisted before the close operation and retried on subsequent scans if delivery fails, without closing the issue twice or posting duplicate notices.
 
@@ -243,6 +243,10 @@ This project is under active, ongoing development. Planned work includes multi-f
 ## Contributing
 
 Issues and PRs are welcome. Please sign your commits (DCO) and include tests for new workflow logic — see `tests/unit/` for the existing patterns before adding new ones.
+
+## Author
+
+**Mohit Yadav** ([@mohityadav8](https://github.com/mohityadav8)) — CS undergraduate (BE-CSE, Chandigarh University, 2024–2028), open-source contributor across NVIDIA/aicr, SHAP, pgmpy, hiero-sdk-python, and OWASP Nest. Portfolio: [mohityadav8.github.io](https://mohityadav8.github.io)
 
 ## License
 
