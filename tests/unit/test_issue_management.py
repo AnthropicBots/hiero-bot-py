@@ -947,6 +947,33 @@ async def test_persistent_failure_of_the_unassign_notice_never_makes_marking_ear
     assert marked is None or marked >= 9
 
 
+@pytest.mark.parametrize(("count_bots", "expected_marked"), [(False, 1), (True, 0)])
+@pytest.mark.asyncio
+async def test_own_non_lifecycle_comment_follows_the_bot_comment_policy(
+    mock_gh, ctx, count_bots, expected_marked
+):
+    # The app's own escalation comments are bot comments like any other: they do
+    # not reset inactivity unless the repository opts in.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    ctx["config"].workflows.issue_management.count_bot_comments_as_activity = count_bots
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=25)
+    _wire(mock_gh, issue)
+    issue.comments.append({
+        "body": "🔔 @org/core — issue labeled `bug` requires your attention.\n\n> **Crash**",
+        "created_at": clock["now"].isoformat(),
+        "user": {"login": "hiero-bot[bot]", "type": "Bot"},
+        "performed_via_github_app": {"id": 12345},
+    })
+    issue.touch()
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(
+        ctx, now=clock["now"]
+    )
+
+    assert counts["stale_marked"] == expected_marked
+
+
 @pytest.mark.asyncio
 async def test_retry_does_not_duplicate_a_comment_github_already_accepted(mock_gh, ctx):
     # The first POST lands but the client times out: the retry must notice it.

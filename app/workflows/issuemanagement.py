@@ -196,19 +196,11 @@ class IssueManagementWorkflow:
             action, baseline = self._classify_comment(comment)
 
             if action is None:
-                user = comment.get("user") or {}
-                is_bot = _is_bot(user)
-                is_our_bot = _is_own_comment(comment)
-
-                if is_our_bot:
-                    # An ordinary comment from our own App is not a
-                    # lifecycle marker. Count its actual timestamp so
-                    # marker-like text in an echoed title cannot alter
-                    # the activity baseline.
-                    if human_last is None or timestamp > human_last:
-                        human_last = timestamp
-
-                    continue
+                # Not a lifecycle comment. Any bot's ordinary comment -- including
+                # this app's own escalation or welcome comments -- follows the
+                # bot-comment policy; its timestamp is used as is, so marker-like
+                # text echoed into it cannot alter the activity baseline.
+                is_bot = _is_bot(comment.get("user"))
 
                 if is_bot and not cfg.count_bot_comments_as_activity:
                     ignored_bot_activity = True
@@ -520,7 +512,6 @@ class IssueManagementWorkflow:
             ):
                 return
             await self._gh.post_comment(owner, repo, number, body, inst)
-
 
     async def _mark_stale(
         self, ctx: dict, issue: dict, stale_label: str, days_inactive: int = 0,
