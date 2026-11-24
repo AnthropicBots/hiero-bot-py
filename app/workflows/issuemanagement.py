@@ -1230,12 +1230,12 @@ class IssueManagementWorkflow:
             if not await self._claim(ctx, PendingIssueCloseNotice, pending_id):
                 continue
             try:
-                result = await db.execute(
+                pending_row = await db.execute(
                     select(PendingIssueCloseNotice).where(
                         PendingIssueCloseNotice.id == pending_id
                     )
                 )
-                pending = result.scalar_one_or_none()
+                pending = pending_row.scalar_one_or_none()
 
                 if pending is None:
                     continue
