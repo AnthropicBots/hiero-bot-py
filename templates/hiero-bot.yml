@@ -176,6 +176,11 @@ workflows:
       - security
       - in-progress
     auto_unassign_inactive_days: 14  # days without activity before assignees are removed; an issue past this and stale_issue_days gets both actions in the same scan
+
+    # Whether comments from other bots (CI, Dependabot, Renovate, etc.)
+    # count as genuine issue activity. Human comments always count.
+    count_bot_comments_as_activity: false
+
     label_escalation_rules:
       - label: "security"
         notify_team: "security-team"

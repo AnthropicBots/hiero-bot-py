@@ -1,8 +1,7 @@
-
 <div align="center">
   <img src="./.github/assets/mark2_orbit_ring.jpg" width="120" height="120" alt="hydra-maintainer logo" />
 
-  # hydra-maintainer
+# hydra-maintainer
 
   **A self-hostable, open-source automation platform for open-source maintainers.**
 
@@ -204,13 +203,14 @@ The issue-management workflow is configured per repository under `workflows.issu
 |---|---|
 | `enabled` | `false` (the default) turns off the whole workflow: no unassigning, stale marking, closing or lifecycle comments. |
 | `auto_unassign_inactive_days` | Remove assignees after this many days without activity. |
+| `count_bot_comments_as_activity` | Whether comments from other bots (such as CI, Dependabot or Renovate) count as activity. Defaults to `false`; human comments always count. |
 | `stale_issue_days` | Mark an issue stale after this many days without activity. |
 | `close_stale_after_days` | Close a stale issue this many *additional* days after it was marked stale. Independent of `stale_issue_days`. |
 | `stale_label`, `exempt_labels` | The label applied to stale issues, and labels that exempt an issue entirely (case-insensitive). |
 
-Inactivity is measured from the last genuine activity: comments (including comments from other bots or apps, which this workflow does not tell apart from people), edits, labels and assignments. The bot's own unassign, stale and close comments never restart a countdown: each one carries a hidden marker, written by this app, recording the activity it acted on. An issue past both the unassignment and stale thresholds is unassigned and marked stale in the same scan, and new activity restarts the inactivity countdowns. On an issue that is already stale, activity only postpones the close by `close_stale_after_days`; the stale label stays until a maintainer removes it.
+Inactivity is measured from the last genuine activity: human comments and supported human-authored GitHub timeline events, such as label and assignment changes. Comments from other bots or apps do not count by default; set `count_bot_comments_as_activity: true` to include them. The bot's own lifecycle comments are identified using a hidden marker and verified GitHub App identity, so they never restart an inactivity countdown. Bot-generated timeline events are also ignored. Polling cannot reliably attribute ordinary issue-body edits; detecting those edits would require webhook-based event tracking.
 
-The bot posts its comment last in every action, so GitHub's resulting update time is recognised as the bot's own. If a GitHub call fails part-way, the next scan may count the bot's own change as activity; that delays an action and never brings one forward. A failed stale or close notice is not retried.
+An issue past both the unassignment and stale thresholds is unassigned and marked stale in the same scan. New activity restarts the inactivity countdowns. On an issue that is already stale, activity postpones closing by `close_stale_after_days`; the stale label stays until a maintainer removes it. If fetching an issue's timeline fails, that issue is skipped for the current scan and retried on a subsequent scan. Close notifications are persisted before the close operation and retried on subsequent scans if delivery fails, without closing the issue twice or posting duplicate notices.
 
 ### Environment variables
 
@@ -243,10 +243,6 @@ This project is under active, ongoing development. Planned work includes multi-f
 ## Contributing
 
 Issues and PRs are welcome. Please sign your commits (DCO) and include tests for new workflow logic — see `tests/unit/` for the existing patterns before adding new ones.
-
-## Author
-
-**Mohit Yadav** ([@mohityadav8](https://github.com/mohityadav8)) — CS undergraduate (BE-CSE, Chandigarh University, 2024–2028), open-source contributor across NVIDIA/aicr, SHAP, pgmpy, hiero-sdk-python, and OWASP Nest. Portfolio: [mohityadav8.github.io](https://mohityadav8.github.io)
 
 ## License
 

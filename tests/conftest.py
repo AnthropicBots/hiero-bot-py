@@ -32,6 +32,7 @@ def mock_gh():
     gh.post_comment = AsyncMock()
     gh.request_reviewers = AsyncMock()
     gh.list_issue_comments = AsyncMock(return_value=[])
+    gh.list_issue_timeline = AsyncMock(return_value=[])
     gh.update_comment = AsyncMock()
     gh.add_label = AsyncMock()
     gh.remove_label = AsyncMock()
@@ -98,6 +99,7 @@ def base_config():
                 "stale_label": "stale",
                 "exempt_labels": ["pinned", "security"],
                 "auto_unassign_inactive_days": 14,
+                "count_bot_comments_as_activity": False,
                 "label_escalation_rules": [],
             },
             "pr_health": {"enabled": True},

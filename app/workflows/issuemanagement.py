@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.schema import IssueManagementConfig
-from app.db.models import StaleActionLog
+from app.db.models import PendingIssueCloseNotice, StaleActionLog
 from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
@@ -41,7 +42,6 @@ _LEGACY_PHRASES = {
 # Every bot action ends with its lifecycle comment, so the ``updated_at`` GitHub
 # stamps for that action is the comment's own time. An ``updated_at`` this close
 # to the bot's last comment is its own; anything later is somebody else's.
-_BOT_ACTION_TOLERANCE = timedelta(seconds=60)
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -55,20 +55,24 @@ def _is_bot(user: dict | None) -> bool:
 
 
 def _is_own_comment(comment: dict) -> bool:
-    """True when ``comment`` was written by this GitHub App.
+    """True only when GitHub identifies this comment as ours.
 
-    Other bots (CI, dependabot, ...) may echo user-controlled text, so their
-    comments must never carry a trusted marker. When GitHub reports the app
-    that wrote the comment it has to be ours; when it reports none we fall
-    back to the bot check.
+    A bot username alone is not sufficient: another GitHub App or bot
+    could otherwise forge a lifecycle marker. Missing or incomplete App
+    metadata must fail closed.
     """
     if not _is_bot(comment.get("user")):
         return False
+
+    configured_app_id = str(settings.github_app_id or "").strip()
+    if not configured_app_id:
+        return False
+
     app = comment.get("performed_via_github_app")
-    if isinstance(app, dict) and app.get("id") is not None:
-        configured = str(settings.github_app_id or "")
-        return not configured or str(app["id"]) == configured
-    return True
+    if not isinstance(app, dict) or app.get("id") is None:
+        return False
+
+    return str(app["id"]) == configured_app_id
 
 
 def _marker(action: str, last_activity: datetime | None) -> str:
@@ -95,24 +99,44 @@ class IssueManagementWorkflow:
         now = now or datetime.now(UTC)
 
         # Every threshold comes from the repository's configuration. They are
-        # independent: close_stale_after_days is *additional* time counted from
-        # the moment the issue is marked stale, so it may be shorter or longer
-        # than stale_issue_days.
+        # independent: close_stale_after_days is additional time counted from
+        # the moment the issue is marked stale.
         stale_cutoff = now - timedelta(days=cfg.stale_issue_days)
-        unassign_cutoff = now - timedelta(days=cfg.auto_unassign_inactive_days)
+        unassign_cutoff = now - timedelta(
+            days=cfg.auto_unassign_inactive_days
+        )
+
+        counts = {"stale_marked": 0, "closed": 0, "unassigned": 0, "errors": 0}
+
+        # Recover unfinished close operations before scanning open issues.
+        # This is necessary because successfully closed issues no longer
+        # appear in the normal open-issue listing.
+        pending_issue_numbers: set[int] = set()
+        try:
+            pending_issue_numbers = await self._recover_pending_close_notices(
+                ctx, now, counts
+            )
+        except Exception as exc:
+            counts["errors"] += 1
+            log.warning(
+                "Stale scan %s/%s: pending close-notice recovery failed: %s",
+                owner, repo, exc,
+            )
+            await db.rollback()
 
         issues = await self._gh.list_issues(
             owner, repo, inst, state="open", sort="updated", direction="asc"
         )
 
-        counts = {"stale_marked": 0, "closed": 0, "unassigned": 0, "errors": 0}
         cutoffs = (stale_cutoff, unassign_cutoff)
 
         for issue in issues:
-            # One failing issue (a 403 secondary rate limit, a deleted issue, a
-            # network error) must not abort the scan or discard the audit rows
-            # of actions already taken, so each issue is isolated and committed
-            # on its own.
+            # Pending closures are handled exclusively by recovery above.
+            if issue.get("number") in pending_issue_numbers:
+                continue
+
+            # One failing issue must not abort the scan or discard audit rows
+            # for actions already taken on other issues.
             try:
                 await self._scan_issue(ctx, cfg, issue, now, cutoffs, counts)
                 await db.commit()
@@ -133,59 +157,182 @@ class IssueManagementWorkflow:
     ) -> tuple[datetime, datetime | None]:
         """Return ``(last_activity, stale_marked_at)`` for one issue.
 
-        ``updated_at`` cannot be trusted on its own: the bot's own housekeeping
-        bumps it. Genuine activity is therefore the latest of
+        Genuine activity comes from contributor comments and human-authored
+        GitHub timeline events. Other bots' comments are configurable.
 
-        * contributor comments,
-        * the activity the bot recorded in its lifecycle comments (the state
-          *before* it acted), and
-        * ``updated_at`` -- but only when it is newer than the bot's last
-          comment, i.e. when somebody other than the bot touched the issue
-          (an edit, a label, a re-assignment).
+        Lifecycle comments record the activity baseline from before the bot
+        acted. When an action succeeds but its notification fails, the
+        attributable GitHub App timeline event provides a safe fallback
+        baseline instead.
         """
         comments = await self._gh.list_issue_comments(
+            ctx["owner"], ctx["repo"], issue["number"], ctx["installation_id"]
+        )
+        timeline_events = await self._gh.list_issue_timeline(
             ctx["owner"], ctx["repo"], issue["number"], ctx["installation_id"]
         )
 
         human_last: datetime | None = None
         bot_last: datetime | None = None
         bot_baseline: datetime | None = None
+        bot_event_last: datetime | None = None
+        bot_stale_marked_at: datetime | None = None
         stale_marked_at: datetime | None = None
+        ignored_bot_activity = False
+
+        cfg = ctx["config"].workflows.issue_management
 
         for comment in comments:
             created_at = comment.get("created_at")
             if not created_at:
                 continue
+
             timestamp = _parse_timestamp(created_at)
             action, baseline = self._classify_comment(comment)
 
             if action is None:
+                user = comment.get("user") or {}
+                is_bot = _is_bot(user)
+                is_our_bot = _is_own_comment(comment)
+
+                if is_our_bot:
+                    # An ordinary comment from our own App is not a
+                    # lifecycle marker. Count its actual timestamp so
+                    # marker-like text in an echoed title cannot alter
+                    # the activity baseline.
+                    if human_last is None or timestamp > human_last:
+                        human_last = timestamp
+
+                    continue
+
+                if is_bot and not cfg.count_bot_comments_as_activity:
+                    ignored_bot_activity = True
+                    continue
+
                 if human_last is None or timestamp > human_last:
                     human_last = timestamp
+
                 continue
 
             if baseline is not None:
-                # A recorded activity can never be later than the comment that
-                # records it; this bounds whatever a marker claims.
                 baseline = min(baseline, timestamp)
 
             if bot_last is None or timestamp >= bot_last:
                 bot_last, bot_baseline = timestamp, baseline
+
             if action == "stale" and (
                 stale_marked_at is None or timestamp > stale_marked_at
             ):
                 stale_marked_at = timestamp
 
-        candidates = [human_last] if human_last else []
-        if bot_last is None or updated > bot_last + _BOT_ACTION_TOLERANCE:
-            candidates.append(updated)  # nothing but real activity explains it
-        else:
-            # The bump is the bot's own. Fall back to the activity it recorded;
-            # a comment from before markers existed recorded none, so the time
-            # of that comment is the best available estimate.
-            candidates.append(bot_baseline or bot_last)
+        activity_events = {
+            "assigned",
+            "unassigned",
+            "labeled",
+            "unlabeled",
+            "milestoned",
+            "demilestoned",
+            "renamed",
+            "reopened",
+            "locked",
+            "unlocked",
+        }
 
-        return max(candidates), stale_marked_at
+        configured_app_id = str(settings.github_app_id or "").strip()
+
+        for event in timeline_events:
+            event_name = event.get("event")
+            if event_name not in activity_events:
+                continue
+
+            actor = event.get("actor") or {}
+            created_at = event.get("created_at")
+            if not created_at:
+                continue
+
+            timestamp = _parse_timestamp(created_at)
+
+            if actor and not _is_bot(actor):
+                if human_last is None or timestamp > human_last:
+                    human_last = timestamp
+                continue
+
+            app = event.get("performed_via_github_app")
+            is_own_app_event = (
+                bool(configured_app_id)
+                and _is_bot(actor)
+                and isinstance(app, dict)
+                and app.get("id") is not None
+                and str(app["id"]) == configured_app_id
+            )
+
+            if is_own_app_event:
+                if event_name == "unassigned":
+                    # If the unassignment notice failed, retain the
+                    # attributable lifecycle event as a safe fallback.
+                    if bot_event_last is None or timestamp > bot_event_last:
+                        bot_event_last = timestamp
+
+                elif event_name == "labeled":
+                    label = event.get("label") or {}
+                    label_name = (
+                        label.get("name")
+                        if isinstance(label, dict)
+                        else label
+                    )
+
+                    if (
+                        isinstance(label_name, str)
+                        and label_name.casefold() == cfg.stale_label.casefold()
+                    ):
+                        if bot_event_last is None or timestamp > bot_event_last:
+                            bot_event_last = timestamp
+
+                        if (
+                            bot_stale_marked_at is None
+                            or timestamp > bot_stale_marked_at
+                        ):
+                            bot_stale_marked_at = timestamp
+                    else:
+                        # Unrelated labels are not genuine issue activity.
+                        ignored_bot_activity = True
+
+                else:
+                    # Other events generated by our App must not make
+                    # updated_at look like human activity.
+                    ignored_bot_activity = True
+
+            elif actor and _is_bot(actor):
+                ignored_bot_activity = True
+
+        # A lifecycle comment is the strongest record because its marker
+        # carries the pre-action activity baseline. If its comment failed,
+        # use the attributable bot timeline event instead.
+        if bot_last is not None:
+            candidates = [human_last, bot_baseline or bot_last]
+        elif bot_event_last is not None:
+            candidates = [human_last, bot_event_last]
+        elif ignored_bot_activity:
+            # Excluded bot activity can bump updated_at. Do not mistake that
+            # bump for contributor activity.
+            created_at = issue.get("created_at")
+            if created_at:
+                candidates = [human_last, _parse_timestamp(created_at)]
+            else:
+                candidates = [
+                    human_last,
+                    datetime.min.replace(tzinfo=UTC),
+                ]
+        else:
+            candidates = [human_last, updated]
+
+        valid_candidates = [candidate for candidate in candidates if candidate]
+        last_activity = max(valid_candidates)
+
+        if stale_marked_at is None:
+            stale_marked_at = bot_stale_marked_at
+
+        return last_activity, stale_marked_at
 
     @staticmethod
     def _classify_comment(comment: dict) -> tuple[str | None, datetime | None]:
@@ -276,8 +423,11 @@ class IssueManagementWorkflow:
         if is_stale:
             close_reference = max(stale_marked_at or last_activity, last_activity)
             if now >= close_reference + timedelta(days=cfg.close_stale_after_days):
-                await self._close_stale(ctx, issue, days_inactive, last_activity)
-                counts["closed"] += 1
+                newly_closed = await self._close_stale(
+                    ctx, issue, days_inactive, last_activity
+                )
+                if newly_closed:
+                    counts["closed"] += 1
             return
 
         # Mark stale (independent of the unassignment above, so an issue past
@@ -351,26 +501,292 @@ class IssueManagementWorkflow:
             target_number=number, reason="No activity within stale period",
         )
 
-    async def _close_stale(
-        self, ctx: dict, issue: dict, days_inactive: int = 0,
-        last_activity: datetime | None = None,
+    async def _recover_pending_close_notices(
+        self,
+        ctx: dict,
+        now: datetime,
+        counts: dict[str, int],
+    ) -> set[int]:
+        """Retry pending close operations and their notifications."""
+        owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
+        db: AsyncSession = ctx["db"]
+
+        result = await db.execute(
+            select(PendingIssueCloseNotice.issue_number).where(
+                PendingIssueCloseNotice.owner == owner,
+                PendingIssueCloseNotice.repo == repo,
+            )
+        )
+        pending_numbers = set(result.scalars().all())
+
+        result = await db.execute(
+            select(PendingIssueCloseNotice.id).where(
+                PendingIssueCloseNotice.owner == owner,
+                PendingIssueCloseNotice.repo == repo,
+            )
+        )
+        pending_ids = list(result.scalars().all())
+
+        for pending_id in pending_ids:
+            try:
+                result = await db.execute(
+                    select(PendingIssueCloseNotice).where(
+                        PendingIssueCloseNotice.id == pending_id
+                    )
+                )
+                pending = result.scalar_one_or_none()
+
+                if pending is None:
+                    continue
+
+                number = pending.issue_number
+                pending_created_at = pending.created_at
+
+                issue = await self._gh.get_issue(
+                    owner, repo, number, inst
+                )
+                timeline = await self._gh.list_issue_timeline(
+                    owner, repo, number, inst
+                )
+
+                # A human reopening or closing the issue after the pending
+                # operation was created takes precedence over automation.
+                human_intervened = any(
+                    event.get("event") in {"reopened", "closed"}
+                    and event.get("created_at")
+                    and event.get("actor")
+                    and not _is_bot(event["actor"])
+                    and _parse_timestamp(event["created_at"])
+                    > pending_created_at
+                    for event in timeline
+                )
+
+                if human_intervened:
+                    await db.delete(pending)
+                    await db.commit()
+                    log.info(
+                        "Stale scan %s/%s: cancelled pending close for "
+                        "issue #%s after human intervention",
+                        owner, repo, number,
+                    )
+                    continue
+
+                issue_state = (issue.get("state") or "").casefold()
+
+                if issue_state == "open":
+                    updated_at = issue.get("updated_at") or issue.get(
+                        "created_at"
+                    )
+                    updated = (
+                        _parse_timestamp(updated_at)
+                        if updated_at
+                        else datetime.min.replace(tzinfo=UTC)
+                    )
+                    last_activity, _ = await self._get_last_activity(
+                        ctx, issue, updated
+                    )
+
+                    if last_activity > pending_created_at:
+                        await db.delete(pending)
+                        await db.commit()
+                        log.info(
+                            "Stale scan %s/%s: cancelled pending close for "
+                            "issue #%s after new activity",
+                            owner, repo, number,
+                        )
+                        continue
+
+                    await self._gh.close_issue(
+                        owner, repo, number, inst
+                    )
+
+                    pending.closed_at = now
+                    await self._log_stale(
+                        ctx, number, "closed", pending.days_inactive
+                    )
+                    await audit.record(
+                        db,
+                        action="issue.closed",
+                        owner=owner,
+                        repo=repo,
+                        target_number=number,
+                        reason="Closed after stale period expired",
+                    )
+                    await db.commit()
+                    counts["closed"] += 1
+
+                elif issue_state == "closed" and pending.closed_at is None:
+                    # GitHub may have accepted the original close request
+                    # even if the client timed out. Only attribute that
+                    # closure to this bot when the timeline confirms it.
+                    configured_app_id = str(
+                        settings.github_app_id or ""
+                    ).strip()
+
+                    own_close_event = bool(configured_app_id) and any(
+                        event.get("event") == "closed"
+                        and event.get("created_at")
+                        and _is_bot(event.get("actor"))
+                        and isinstance(
+                            event.get("performed_via_github_app"), dict
+                        )
+                        and event["performed_via_github_app"].get("id")
+                        is not None
+                        and str(
+                            event["performed_via_github_app"]["id"]
+                        ) == configured_app_id
+                        and _parse_timestamp(event["created_at"])
+                        >= pending_created_at
+                        for event in timeline
+                    )
+
+                    if not own_close_event:
+                        raise RuntimeError(
+                            f"Issue #{number} is closed, but its closure "
+                            "cannot be attributed to this GitHub App"
+                        )
+
+                    pending.closed_at = now
+                    await self._log_stale(
+                        ctx, number, "closed", pending.days_inactive
+                    )
+                    await audit.record(
+                        db,
+                        action="issue.closed",
+                        owner=owner,
+                        repo=repo,
+                        target_number=number,
+                        reason="Closed after stale period expired",
+                    )
+                    await db.commit()
+                    counts["closed"] += 1
+
+                elif issue_state != "closed":
+                    raise RuntimeError(
+                        f"Unexpected state for issue #{number}: "
+                        f"{issue_state!r}"
+                    )
+
+                await self._deliver_close_notice(ctx, pending)
+
+            except Exception as exc:
+                counts["errors"] += 1
+                log.warning(
+                    "Stale scan %s/%s: could not recover close notice "
+                    "for pending record #%s: %s",
+                    owner, repo, pending_id, exc,
+                )
+                await db.rollback()
+
+        return pending_numbers
+
+    async def _deliver_close_notice(
+        self,
+        ctx: dict,
+        pending: PendingIssueCloseNotice,
     ) -> None:
+        """Deliver a pending close notice once, then remove its outbox record."""
+        owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
+        number = pending.issue_number
+        db: AsyncSession = ctx["db"]
+
+        notice_marker = f"<!-- hiero-bot:close-notice:{pending.id} -->"
+
+        comments = await self._gh.list_issue_comments(
+            owner, repo, number, inst
+        )
+
+        already_notified = any(
+            notice_marker in (comment.get("body") or "")
+            and _is_own_comment(comment)
+            for comment in comments
+        )
+
+        if not already_notified:
+            await self._gh.post_comment(
+                owner,
+                repo,
+                number,
+                (
+                    "🔒 This issue has been **automatically closed** due to "
+                    "continued inactivity.\n\n"
+                    "Feel free to re-open if still relevant."
+                    + _marker("closed", pending.last_activity)
+                    + f"\n\n{notice_marker}"
+                ),
+                inst,
+            )
+
+        # Keep the record if posting raises. A later scan can check whether
+        # GitHub accepted the comment before retrying it.
+        await db.delete(pending)
+        await db.commit()
+
+    async def _close_stale(
+        self,
+        ctx: dict,
+        issue: dict,
+        days_inactive: int = 0,
+        last_activity: datetime | None = None,
+    ) -> bool:
+        """Close an issue and reliably deliver its close notification.
+
+        The pending record is committed before the GitHub close request.
+        If closing or commenting fails, the record remains available for
+        recovery by a later stale scan.
+        """
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
+        db: AsyncSession = ctx["db"]
 
-        await self._gh.close_issue(owner, repo, number, inst)
-        await self._gh.post_comment(
-            owner, repo, number,
-            "🔒 This issue has been **automatically closed** due to continued inactivity.\n\n"
-            "Feel free to re-open if still relevant."
-            + _marker("closed", last_activity),
-            inst,
+        result = await db.execute(
+            select(PendingIssueCloseNotice).where(
+                PendingIssueCloseNotice.owner == owner,
+                PendingIssueCloseNotice.repo == repo,
+                PendingIssueCloseNotice.issue_number == number,
+            )
         )
-        await self._log_stale(ctx, number, "closed", days_inactive)
-        await audit.record(
-            ctx["db"], action="issue.closed", owner=owner, repo=repo,
-            target_number=number, reason="Closed after stale period expired",
-        )
+        pending = result.scalar_one_or_none()
+
+        if pending is None:
+            pending = PendingIssueCloseNotice(
+                owner=owner,
+                repo=repo,
+                issue_number=number,
+                days_inactive=days_inactive,
+                last_activity=last_activity,
+            )
+            db.add(pending)
+
+            # This commit must happen before the external GitHub operation.
+            await db.commit()
+
+        newly_closed = pending.closed_at is None
+
+        if newly_closed:
+            await self._gh.close_issue(owner, repo, number, inst)
+
+            pending.closed_at = datetime.now(UTC)
+
+            await self._log_stale(
+                ctx, number, "closed", pending.days_inactive
+            )
+            await audit.record(
+                db,
+                action="issue.closed",
+                owner=owner,
+                repo=repo,
+                target_number=number,
+                reason="Closed after stale period expired",
+            )
+
+            # Persist closure and its audit record before attempting the
+            # notification. A notification failure must not lose either.
+            await db.commit()
+
+        await self._deliver_close_notice(ctx, pending)
+
+        return newly_closed
 
     async def _unassign_inactive(
         self, ctx: dict, issue: dict, assignees: list[str], days_inactive: int = 0,

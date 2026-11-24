@@ -144,6 +144,12 @@ class IssueManagementConfig(BaseModel):
     stale_label: str = "stale"
     exempt_labels: list[str] = ["pinned", "security", "in-progress"]
     auto_unassign_inactive_days: int = Field(default=14, gt=0)
+
+    # Other bots (CI, Dependabot, etc.) do not count as genuine issue activity
+    # by default. Repositories can opt in if they want bot comments to reset
+    # inactivity timers.
+    count_bot_comments_as_activity: bool = False
+
     label_escalation_rules: list[LabelEscalationRule] = []
 
 

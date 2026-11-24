@@ -129,6 +129,38 @@ class StaleActionLog(Base):
     )
 
 
+class PendingIssueCloseNotice(Base):
+    __tablename__ = "pending_issue_close_notices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime,
+        default=lambda: datetime.now(UTC),
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime,
+        nullable=True,
+    )
+    owner: Mapped[str] = mapped_column(String(128))
+    repo: Mapped[str] = mapped_column(String(128))
+    issue_number: Mapped[int] = mapped_column(Integer)
+    days_inactive: Mapped[int] = mapped_column(Integer)
+    last_activity: Mapped[datetime | None] = mapped_column(
+        UTCDateTime,
+        nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner",
+            "repo",
+            "issue_number",
+            name="uq_pending_close_notice_owner_repo_issue",
+        ),
+        Index("ix_pending_close_notice_owner_repo", "owner", "repo"),
+    )
+
+
 class ReviewerRecommendation(Base):
     __tablename__ = "reviewer_recommendations"
 
