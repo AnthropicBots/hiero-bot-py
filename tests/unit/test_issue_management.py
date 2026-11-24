@@ -2584,3 +2584,254 @@ async def test_edit_at_the_same_moment_as_the_bot_update_is_not_detectable(
     )
 
     assert marked == 9
+
+
+# A person's change between the last check and the mutation.
+
+_parse_ts = datetime.fromisoformat
+_PERSON = {"login": "maintainer", "type": "User"}
+
+
+def _stale_issue(mock_gh, ctx):
+    _configure(ctx, stale_issue_days=20, close_stale_after_days=5,
+               auto_unassign_inactive_days=9)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=40)
+    issue.labels.append("stale")
+    issue.comments.append({
+        "body": "⚠️ This issue has been marked **stale** due to inactivity.",
+        "created_at": (clock["now"] - timedelta(days=30)).isoformat(),
+        "user": {"login": "hiero-bot[bot]", "type": "Bot"},
+        "performed_via_github_app": {"id": 12345},
+    })
+    _wire(mock_gh, issue)
+    return clock, issue
+
+
+def _change_on_call(mock_gh, nth, change):
+    """Run ``change`` just before the nth ``get_issue`` answers."""
+    real = mock_gh.get_issue.side_effect
+    calls = {"n": 0}
+
+    async def get_issue(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == nth:
+            change()
+        return await real(*args, **kwargs)
+
+    mock_gh.get_issue.side_effect = get_issue
+
+
+@pytest.mark.parametrize("change", ["remove_label", "add_exempt_label"])
+@pytest.mark.asyncio
+async def test_close_is_withdrawn_when_a_person_changes_labels_before_it(
+    mock_gh, ctx, db, change
+):
+    clock, issue = _stale_issue(mock_gh, ctx)
+
+    def act():
+        if change == "remove_label":
+            issue.labels.remove("stale")
+        else:
+            issue.labels.append("pinned")
+
+    _change_on_call(mock_gh, 2, act)  # 1: the fresh read, 2: just before closing
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(
+        ctx, now=clock["now"]
+    )
+
+    assert counts["closed"] == 0
+    mock_gh.close_issue.assert_not_awaited()
+    assert issue.state == "open"
+    assert await _count(db, PendingIssueCloseNotice) == 0
+
+
+@pytest.mark.parametrize("change", ["remove_label", "add_exempt_label"])
+@pytest.mark.asyncio
+async def test_recovery_does_not_close_after_a_person_changed_the_labels(
+    mock_gh, ctx, db, change
+):
+    clock, issue = _stale_issue(mock_gh, ctx)
+    mock_gh.close_issue.side_effect = RuntimeError("GitHub temporarily unavailable")
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    assert await _count(db, PendingIssueCloseNotice) == 1
+
+    # The person acts before the pending close's creation time, as in a race
+    # the scan's own timeline read did not see.
+    if change == "remove_label":
+        issue.labels.remove("stale")
+        issue.add_timeline_event("unlabeled", _PERSON, label="stale")
+    else:
+        issue.labels.append("pinned")
+    mock_gh.close_issue.side_effect = None
+    clock["now"] += timedelta(minutes=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert issue.state == "open"
+    assert await _count(db, PendingIssueCloseNotice) == 0
+    assert mock_gh.post_comment.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_event_in_the_same_second_as_the_intent_is_attributed(
+    mock_gh, ctx, db
+):
+    clock, issue = _crash_setup(mock_gh, ctx)
+    clock["now"] = clock["now"].replace(microsecond=650000)
+    real = mock_gh.add_label.side_effect
+
+    async def lands_then_crashes(*args, **kwargs):
+        await real(*args, **kwargs)
+        for event in issue.timeline_events:  # GitHub reports whole seconds
+            event["created_at"] = (
+                _parse_ts(event["created_at"]).replace(microsecond=0).isoformat()
+            )
+        raise _Crash()
+
+    mock_gh.add_label.side_effect = lands_then_crashes
+    wf = IssueManagementWorkflow(mock_gh)
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+
+    mock_gh.add_label.side_effect = real
+    await db.rollback()
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    row = (await db.execute(select(LifecycleAction))).scalars().one()
+    await db.refresh(row)
+    assert row.status == "delivered"
+    assert await _logged_issue_numbers(db) == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_person_acting_in_the_same_second_as_a_pending_close_cancels_it(
+    mock_gh, ctx, db
+):
+    clock, issue = _stale_issue(mock_gh, ctx)
+    clock["now"] = clock["now"].replace(microsecond=650000)
+    mock_gh.close_issue.side_effect = RuntimeError("GitHub temporarily unavailable")
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    pending = (await db.execute(select(PendingIssueCloseNotice))).scalars().one()
+    created = pending.created_at.replace(microsecond=0, tzinfo=UTC)
+    issue.timeline_events.append({
+        "event": "reopened", "created_at": created.isoformat(),
+        "actor": _PERSON, "performed_via_github_app": None,
+        "label": None, "assignee": None,
+    })
+    mock_gh.close_issue.side_effect = None
+    await wf.run_stale_scan(ctx, now=clock["now"] + timedelta(minutes=1))
+
+    assert issue.state == "open"
+    assert await _count(db, PendingIssueCloseNotice) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_label_a_person_added_first_is_not_credited_to_the_bot(
+    mock_gh, ctx, db
+):
+    clock, issue = _crash_setup(mock_gh, ctx)
+
+    async def person_wins(owner, repo, number, label, inst):
+        issue.labels.append(label)
+        issue.add_timeline_event("labeled", _PERSON, label=label)
+        issue.touch()
+
+    mock_gh.add_label.side_effect = person_wins
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert await _logged_issue_numbers(db) == []
+    assert not [c for c in issue.comments if "marked **stale**" in c["body"]]
+    row = (await db.execute(select(LifecycleAction))).scalars().one()
+    assert row.status == "pending" and row.claimed_by is None
+
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    await db.refresh(row)
+    assert row.status == "abandoned"
+    assert await _logged_issue_numbers(db) == []
+
+
+@pytest.mark.asyncio
+async def test_an_assignee_a_person_removed_first_is_not_credited_to_the_bot(
+    mock_gh, ctx, db
+):
+    clock, issue = _crash_setup(mock_gh, ctx, idle_days=12, assignees=["alice"])
+
+    async def person_wins(owner, repo, number, logins, inst):
+        issue.assignees = [a for a in issue.assignees if a not in logins]
+        issue.add_timeline_event("unassigned", _PERSON, assignee="alice")
+        issue.touch()
+
+    mock_gh.remove_assignees.side_effect = person_wins
+    await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    assert await _logged_issue_numbers(db) == []
+    assert not [c for c in issue.comments if "unassigned" in c["body"]]
+
+
+@pytest.mark.asyncio
+async def test_a_label_added_between_the_check_and_the_call_withdraws_the_intent(
+    mock_gh, ctx, db
+):
+    clock, issue = _crash_setup(mock_gh, ctx)
+    _change_on_call(mock_gh, 2, lambda: issue.labels.append("stale"))
+
+    await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx, now=clock["now"])
+
+    mock_gh.add_label.assert_not_awaited()
+    assert await _count(db, LifecycleAction) == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_clears_a_dead_workers_lease_but_not_a_live_one(
+    mock_gh, ctx, db
+):
+    clock, _ = _crash_setup(mock_gh, ctx)
+    wf = IssueManagementWorkflow(mock_gh)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    row = (await db.execute(select(LifecycleAction))).scalars().one()
+    now = wf._now(ctx)
+
+    row.status, row.claimed_by = "notice_failed", "other"
+    row.lease_expires_at = now + timedelta(minutes=10)
+    await db.commit()
+    assert await wf.retry_failed_notices(ctx) == 0  # a live lease is left alone
+
+    row.lease_expires_at = now - timedelta(minutes=1)
+    await db.commit()
+    assert await wf.retry_failed_notices(ctx) == 1
+    await db.refresh(row)
+    assert row.claimed_by is None and row.lease_expires_at is None
+    assert row.status == "applied"
+
+
+@pytest.mark.asyncio
+async def test_the_marker_is_searched_even_on_a_first_attempt(mock_gh, ctx, db):
+    clock, issue = _crash_setup(mock_gh, ctx)
+    real = mock_gh.post_comment.side_effect
+
+    async def accepted_then_crash(*args, **kwargs):
+        await real(*args, **kwargs)
+        raise _Crash()
+
+    mock_gh.post_comment.side_effect = accepted_then_crash
+    wf = IssueManagementWorkflow(mock_gh)
+    with pytest.raises(_Crash):
+        await wf.run_stale_scan(ctx, now=clock["now"])
+
+    mock_gh.post_comment.side_effect = real
+    await db.rollback()
+    row = (await db.execute(select(LifecycleAction))).scalars().one()
+    row.notice_attempts = 0  # the counter write was lost with the process
+    row.claimed_by = None
+    await db.commit()
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert len([c for c in issue.comments if "marked **stale**" in c["body"]]) == 1

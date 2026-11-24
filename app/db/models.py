@@ -152,16 +152,12 @@ class LifecycleAction(Base):
     action: Mapped[str] = mapped_column(String(16))  # unassigned | stale
     detail: Mapped[str] = mapped_column(Text)  # @mentions, or the stale label
     last_activity: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-    # pending (intent only) -> applied (change confirmed, notice owed) ->
-    # delivered | notice_failed (retries exhausted; see retry_failed_notices);
-    # abandoned: an intent that could not be reconciled with GitHub's history.
+    # pending -> applied -> delivered | notice_failed; or abandoned (unreconcilable).
     status: Mapped[str] = mapped_column(String(16), default="pending")
-    # Which worker currently owns the row, and until when. Another worker may take
-    # it over only after the lease has expired (or the owner released it).
+    # Current owner and lease; taken over only once released or expired.
     claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-    # Set once the GitHub change has been confirmed and its log and audit rows
-    # written (in one transaction). Until then the row is only an intent.
+    # Set when the change is confirmed; until then the row is only an intent.
     applied_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     notice_delivered_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime, nullable=True
@@ -173,9 +169,7 @@ class LifecycleAction(Base):
 
     __table_args__ = (
         Index("ix_lifecycle_action_issue", "owner", "repo", "issue_number"),
-        # At most one pending intent per issue and action type (a stale and an
-        # unassign intent may coexist). It stops two workers inserting the same
-        # intent; ownership of an existing row is decided by the lease columns.
+        # One pending intent per issue and action type; leases decide ownership.
         Index(
             "uq_lifecycle_action_pending",
             "owner",
