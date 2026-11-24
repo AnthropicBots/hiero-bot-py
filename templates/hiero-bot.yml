@@ -162,16 +162,25 @@ workflows:
       min_months_active: 12
 
   # Issue Management
+  # The day counts below are examples, not policy: set your own. Inactivity is
+  # measured from the last genuine activity on the issue (comments, edits,
+  # labels, assignments by people). The bot's own unassign / stale / close
+  # comments never count as activity, so they do not restart any countdown.
   issue_management:
-    enabled: true              # off by default: this workflow closes issues and unassigns people
+    enabled: true              # off by default: this workflow closes issues and unassigns people. false disables all of it (unassigning, stale marking, closing and their comments)
     stale_issue_days: 60       # days without activity before an issue is marked stale
-    close_stale_after_days: 7  # grace period: days after an issue is marked stale (with no further activity) before it is closed
+    close_stale_after_days: 7  # additional days after an issue is marked stale (with no further activity) before it is closed; independent of stale_issue_days
     stale_label: "stale"
-    exempt_labels:
+    exempt_labels:             # issues with any of these labels are never touched
       - pinned
       - security
       - in-progress
-    auto_unassign_inactive_days: 14
+    auto_unassign_inactive_days: 14  # days without activity before assignees are removed; an issue past this and stale_issue_days gets both actions in the same scan
+
+    # Whether comments from other bots (CI, Dependabot, Renovate, etc.)
+    # count as genuine issue activity. Human comments always count.
+    count_bot_comments_as_activity: false
+
     label_escalation_rules:
       - label: "security"
         notify_team: "security-team"

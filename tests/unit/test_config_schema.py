@@ -211,20 +211,20 @@ def test_invalid_ai_focus_area():
         )
 
 
-def test_stale_order_validator():
-    """close_stale_after_days must be less than stale_issue_days."""
-    with pytest.raises(ValidationError, match="close_stale_after_days"):
-        RepoConfig.model_validate(
-            {
-                "repo": "hiero/x",
-                "workflows": {
-                    "issue_management": {
-                        "stale_issue_days": 7,
-                        "close_stale_after_days": 60,
-                    }
-                },
-            }
-        )
+def test_close_stale_period_can_exceed_stale_threshold():
+    """The close period is additional time after an issue becomes stale."""
+    cfg = RepoConfig.model_validate(
+        {
+            "repo": "hiero/x",
+            "workflows": {
+                "issue_management": {
+                    "stale_issue_days": 7,
+                    "close_stale_after_days": 60,
+                }
+            },
+        }
+    )
+    assert cfg.workflows.issue_management.close_stale_after_days == 60
 
 
 def test_mentor_strategy_validated():
@@ -528,11 +528,14 @@ def test_every_schema_field_has_a_runtime_reader():
     schema_paths = collect_field_paths(RepoConfig)
 
     indirect_reader_contracts = {
+        "workflows.issue_management.close_stale_after_days": [
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.close_stale_after_days"),
+        ],
         "workflows.issue_management.exempt_labels": [
-            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.exempt_labels"),
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.exempt_labels"),
         ],
         "workflows.issue_management.stale_label": [
-            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.stale_label"),
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.stale_label"),
         ],
         "workflows.issue_management.label_escalation_rules.label": [
             ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "handle_label_escalation", "r.label"),
@@ -746,3 +749,39 @@ def test_every_schema_field_has_a_runtime_reader():
         "Schema fields without detected configuration readers: "
         f"{unused}"
     )
+
+
+@pytest.mark.parametrize(
+    "field", ["stale_issue_days", "close_stale_after_days", "auto_unassign_inactive_days"]
+)
+@pytest.mark.parametrize("value", [0, -1, "soon", None, 1.5])
+def test_lifecycle_thresholds_reject_unusable_values(field, value):
+    with pytest.raises(ValidationError):
+        RepoConfig.model_validate(
+            {"repo": "hiero/x", "workflows": {"issue_management": {field: value}}}
+        )
+
+
+@pytest.mark.parametrize("value", [1, 365, 100_000])
+def test_lifecycle_thresholds_accept_boundary_values(value):
+    cfg = RepoConfig.model_validate(
+        {
+            "repo": "hiero/x",
+            "workflows": {
+                "issue_management": {
+                    "stale_issue_days": value,
+                    "close_stale_after_days": value,
+                    "auto_unassign_inactive_days": value,
+                }
+            },
+        }
+    )
+    assert cfg.workflows.issue_management.stale_issue_days == value
+
+
+def test_config_without_lifecycle_settings_keeps_the_documented_defaults():
+    cfg = RepoConfig.model_validate({"repo": "hiero/x", "workflows": {}})
+    im = cfg.workflows.issue_management
+    assert (im.enabled, im.stale_issue_days, im.close_stale_after_days) == (False, 60, 7)
+    assert im.auto_unassign_inactive_days == 14
+    assert im.count_bot_comments_as_activity is False

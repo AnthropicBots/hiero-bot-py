@@ -640,6 +640,19 @@ class GitHubClient:
             installation_id,
         )
 
+    async def list_issue_timeline(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        installation_id: int,
+    ) -> list[dict]:
+        """Return the timeline events for an issue, including actor attribution."""
+        return await self.paginate(
+            f"/repos/{owner}/{repo}/issues/{number}/timeline",
+            installation_id,
+        )
+
     async def update_comment(
         self,
         owner: str,
@@ -756,6 +769,19 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/issues/{number}/assignees",
             installation_id,
             json={"assignees": assignees},
+        )
+
+    async def get_issue(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        installation_id: int,
+    ) -> dict:
+        """Fetch one issue by number."""
+        return await self.get(
+            f"/repos/{owner}/{repo}/issues/{number}",
+            installation_id,
         )
 
     async def close_issue(

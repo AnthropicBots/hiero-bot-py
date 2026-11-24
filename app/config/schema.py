@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, get_args
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.utils.logger import get_logger
 from app.utils.safe_regex import validate_pattern
@@ -144,6 +144,12 @@ class IssueManagementConfig(BaseModel):
     stale_label: str = "stale"
     exempt_labels: list[str] = ["pinned", "security", "in-progress"]
     auto_unassign_inactive_days: int = Field(default=14, gt=0)
+
+    # Other bots (CI, Dependabot, etc.) do not count as genuine issue activity
+    # by default. Repositories can opt in if they want bot comments to reset
+    # inactivity timers.
+    count_bot_comments_as_activity: bool = False
+
     label_escalation_rules: list[LabelEscalationRule] = []
 
 
@@ -232,13 +238,6 @@ class RepoConfig(BaseModel):
     workflows: WorkflowsConfig = Field(default_factory=WorkflowsConfig)
     difficulty_labels: DifficultyLabels = Field(default_factory=DifficultyLabels)
     teams: TeamsConfig = Field(default_factory=TeamsConfig)
-
-    @model_validator(mode="after")
-    def validate_stale_order(self) -> RepoConfig:
-        im = self.workflows.issue_management
-        if im.close_stale_after_days >= im.stale_issue_days:
-            raise ValueError("close_stale_after_days must be less than stale_issue_days")
-        return self
 
 
 # Unknown-Key Detection

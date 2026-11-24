@@ -56,3 +56,7 @@ workflows:
     stale_issue_days: 30
     close_stale_after_days: 7   # now correctly means "7 days after being marked stale" (#120)
     auto_unassign_inactive_days: 14
+
+    # Whether comments from other bots count as genuine issue activity.
+    # Human comments always count; other bots are ignored by default.
+    count_bot_comments_as_activity: false

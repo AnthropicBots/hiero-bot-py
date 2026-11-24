@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
@@ -129,6 +130,95 @@ class StaleActionLog(Base):
     )
 
 
+class LifecycleAction(Base):
+    """A housekeeping action the bot took on an issue (unassign or stale).
+
+    It is stored before the action's notice is posted, so the notice can be
+    retried and the issue's activity from before the action is never lost, and
+    it remembers the update time GitHub stamped, so a later edit by a person can
+    be told apart from the bot's own change.
+    """
+
+    __tablename__ = "lifecycle_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime,
+        default=lambda: datetime.now(UTC),
+    )
+    owner: Mapped[str] = mapped_column(String(128))
+    repo: Mapped[str] = mapped_column(String(128))
+    issue_number: Mapped[int] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(String(16))  # unassigned | stale
+    detail: Mapped[str] = mapped_column(Text)  # @mentions, or the stale label
+    last_activity: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # pending -> applied -> delivered | notice_failed; or abandoned (unreconcilable).
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    # Current owner and lease; taken over only once released or expired.
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # Set when the change is confirmed; until then the row is only an intent.
+    applied_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    notice_delivered_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime, nullable=True
+    )
+    notice_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    settled_updated_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime, nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_lifecycle_action_issue", "owner", "repo", "issue_number"),
+        # One pending intent per issue and action type; leases decide ownership.
+        Index(
+            "uq_lifecycle_action_pending",
+            "owner",
+            "repo",
+            "issue_number",
+            "action",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+
+class PendingIssueCloseNotice(Base):
+    __tablename__ = "pending_issue_close_notices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime,
+        default=lambda: datetime.now(UTC),
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime,
+        nullable=True,
+    )
+    owner: Mapped[str] = mapped_column(String(128))
+    repo: Mapped[str] = mapped_column(String(128))
+    issue_number: Mapped[int] = mapped_column(Integer)
+    days_inactive: Mapped[int] = mapped_column(Integer)
+    last_activity: Mapped[datetime | None] = mapped_column(
+        UTCDateTime,
+        nullable=True,
+    )
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime, nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner",
+            "repo",
+            "issue_number",
+            name="uq_pending_close_notice_owner_repo_issue",
+        ),
+        Index("ix_pending_close_notice_owner_repo", "owner", "repo"),
+    )
+
+
 class ReviewerRecommendation(Base):
     __tablename__ = "reviewer_recommendations"
 
@@ -237,5 +327,3 @@ class AccountRepo(Base):
     __table_args__ = (
         UniqueConstraint("account_id", "repo_name", name="uq_account_repo"),
     )
-
-

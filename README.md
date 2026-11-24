@@ -1,4 +1,3 @@
-
 <div align="center">
   <img src="./.github/assets/mark2_orbit_ring.jpg" width="120" height="120" alt="hydra-maintainer logo" />
 
@@ -195,6 +194,23 @@ During the rotation window, both the current and previous secrets are accepted.
 Add `.github/hiero-bot.yml` to any repo where the app is installed. Full reference: [`templates/hiero-bot.yml`](templates/hiero-bot.yml). The bot is completely silent if no config file exists — nothing runs by accident.
 
 **Defaults.** Once a config file exists, onboarding, PR quality gates, PR health scoring and contributor progression are on unless you set `enabled: false`. **Issue management (stale scan, auto-close, auto-unassign) and reviewer assignment are off** and must be enabled explicitly, for example `workflows.issue_management.enabled: true`.
+
+### Issue lifecycle
+
+The issue-management workflow is configured per repository under `workflows.issue_management` in `.github/hiero-bot.yml`; the day counts in the template are examples, not policy.
+
+| Key | Meaning |
+|---|---|
+| `enabled` | `false` (the default) turns off the whole workflow: no unassigning, stale marking, closing or lifecycle comments. |
+| `auto_unassign_inactive_days` | Remove assignees after this many days without activity. |
+| `count_bot_comments_as_activity` | Whether comments from other bots (such as CI, Dependabot or Renovate) count as activity. Defaults to `false`; human comments always count. |
+| `stale_issue_days` | Mark an issue stale after this many days without activity. |
+| `close_stale_after_days` | Close a stale issue this many *additional* days after it was marked stale. Independent of `stale_issue_days`. |
+| `stale_label`, `exempt_labels` | The label applied to stale issues, and labels that exempt an issue entirely (case-insensitive). |
+
+Inactivity is measured from the last genuine activity: human comments and supported human-authored GitHub timeline events, such as label and assignment changes. Comments from other bots or apps do not count by default; set `count_bot_comments_as_activity: true` to include them. The bot's own lifecycle comments are identified using a hidden marker and verified GitHub App identity, so they never restart an inactivity countdown. Bot-generated timeline events are also ignored. Edits to an issue's body leave no comment or timeline event, so they are detected from the issue's last-updated time. The bot records that time after each of its own unassign and stale actions, so an edit made after one counts. GitHub gives an issue-body edit no event and no author, so an edit stamped at the same moment as the bot's own change, or made between the bot's change and its read-back within a few seconds, cannot be told apart from it and is not counted; this is a limit of the data GitHub provides, not exact tracking. Updates from other bots get a one-minute allowance.
+
+An issue past both the unassignment and stale thresholds is unassigned and marked stale in the same scan. New activity restarts the inactivity countdowns. On an issue that is already stale, activity postpones closing by `close_stale_after_days`; the stale label stays until a maintainer removes it. If fetching an issue's timeline fails, that issue is skipped for the current scan and retried on a subsequent scan. Before changing anything the bot fetches the issue again and decides again, so a comment, assignment or label that arrived after the listing is respected. Unassign and stale actions are then recorded, and claimed with a lease, before the GitHub change is made; they are confirmed together with their log and audit rows once it lands, and only then announced. If the process stops or GitHub's answer is lost, a later scan takes over the action once its lease has expired and reads GitHub's history, not the issue's present state: it records the action only when this app's own event is found after the intent was written, so a change made by a person is never recorded as the bot's, and the bot's own change stays on record even if a person has since reversed it. An intent that cannot be reconciled is kept with status `abandoned` and a warning, never guessed at. A notice is posted only after the issue has been searched for its hidden marker, and by the one worker that holds its row. A failed notice is retried on later scans, up to 5 attempts; after that its status becomes `notice_failed`, an error is logged, and `IssueManagementWorkflow.failed_notices()` lists it and `retry_failed_notices()` makes it eligible again. A failed notice never resets the inactivity countdown or loses the audit record. The close period is counted from the stale label's own event, not from when its notice happened to be delivered. A database index allows at most one pending intent per issue and action type (a stale and an unassign intent can exist together); coordination between workers rests on the row leases, not on that index. Issues with a comment or timeline history long enough to have been cut off by the API client's page limit are skipped with an error rather than acted on. Each scan reads every open issue's comments and timeline, which costs API calls proportional to the number of open issues.
 
 ### Environment variables
 

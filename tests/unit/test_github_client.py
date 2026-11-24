@@ -160,6 +160,54 @@ async def test_list_issue_comments_paginates():
 
 
 @pytest.mark.asyncio
+async def test_list_issue_timeline_paginates():
+    client = GitHubClient()
+
+    first_page = [
+        {"id": i, "event": "labeled"}
+        for i in range(100)
+    ]
+    second_page = [
+        {
+            "id": 12345,
+            "event": "labeled",
+            "created_at": "2026-11-23T12:00:00Z",
+            "actor": {"login": "contributor", "type": "User"},
+        }
+    ]
+
+    with patch.object(
+        client,
+        "get",
+        new=AsyncMock(side_effect=[first_page, second_page]),
+    ) as mock_get:
+        events = await client.list_issue_timeline(
+            "hiero",
+            "sdk-js",
+            1,
+            123,
+        )
+
+    assert len(events) == 101
+    assert events[-1]["id"] == 12345
+    assert events[-1]["event"] == "labeled"
+
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/issues/1/timeline",
+        123,
+        params={"per_page": 100, "page": 1},
+    )
+    mock_get.assert_any_await(
+        "/repos/hiero/sdk-js/issues/1/timeline",
+        123,
+        params={"per_page": 100, "page": 2},
+    )
+    assert mock_get.await_count == 2
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_list_pr_files_paginates():
     client = GitHubClient()
 

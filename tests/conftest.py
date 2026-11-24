@@ -2,7 +2,8 @@
 
 import logging
 import types
-from unittest.mock import AsyncMock
+from datetime import UTC, datetime
+from unittest.mock import DEFAULT, AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.auth.sync import clear_sync_cache
 from app.config.schema import RepoConfig
 from app.db.database import Base
+from app.utils.settings import settings
 
 
 @pytest_asyncio.fixture
@@ -33,11 +35,35 @@ def mock_gh():
     gh.request_reviewers = AsyncMock()
     gh.list_issue_comments = AsyncMock(return_value=[])
     gh.update_comment = AsyncMock()
-    gh.add_label = AsyncMock()
+    own_events: dict[int, list[dict]] = {}
+
+    def own_event(number, kind, **extra):
+        own_events.setdefault(number, []).append({
+            "event": kind,
+            "created_at": datetime.now(UTC).isoformat(),
+            "actor": {"login": "hiero-bot[bot]", "type": "Bot"},
+            "performed_via_github_app": {"id": settings.github_app_id},
+            **extra,
+        })
+
+    async def add_label(owner, repo, number, label, installation_id):
+        own_event(number, "labeled", label={"name": label})
+
+    async def remove_assignees(owner, repo, number, logins, installation_id):
+        for login in logins:
+            own_event(number, "unassigned", assignee={"login": login})
+
+    async def timeline(owner, repo, number, installation_id):
+        if number not in own_events:
+            return DEFAULT  # fall back to whatever the test configured
+        return [*gh.list_issue_timeline.return_value, *own_events[number]]
+
+    gh.list_issue_timeline = AsyncMock(return_value=[], side_effect=timeline)
+    gh.add_label = AsyncMock(side_effect=add_label)
     gh.remove_label = AsyncMock()
     gh.add_assignees = AsyncMock()
     gh.count_assigned_open_issues = AsyncMock(return_value=0)
-    gh.remove_assignees = AsyncMock()
+    gh.remove_assignees = AsyncMock(side_effect=remove_assignees)
     gh.close_issue = AsyncMock()
     gh.list_issues = AsyncMock(return_value=[])
     gh.list_labels = AsyncMock(return_value=[])
@@ -55,6 +81,15 @@ def mock_gh():
     gh.list_team_members = AsyncMock(return_value=[{"login": "mentor1"}])
     gh.get_file_content = AsyncMock(return_value=None)
     gh.get = AsyncMock(return_value=[])
+
+    async def get_issue(owner, repo, number, installation_id):
+        # By default an issue is whatever the (possibly re-stubbed) listing says.
+        for issue in await gh.list_issues(owner, repo, installation_id):
+            if issue.get("number") == number:
+                return issue
+        return {"number": number}
+
+    gh.get_issue = AsyncMock(side_effect=get_issue)
     
     return gh
 
@@ -98,6 +133,7 @@ def base_config():
                 "stale_label": "stale",
                 "exempt_labels": ["pinned", "security"],
                 "auto_unassign_inactive_days": 14,
+                "count_bot_comments_as_activity": False,
                 "label_escalation_rules": [],
             },
             "pr_health": {"enabled": True},
