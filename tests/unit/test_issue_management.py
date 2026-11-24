@@ -320,7 +320,7 @@ async def _logged_issue_numbers(db) -> list[int]:
 
 @pytest.mark.asyncio
 async def test_failing_issue_does_not_abort_the_scan(mock_gh, ctx, db):
-    async def post_comment(owner, repo, number, body, inst):
+    async def add_label(owner, repo, number, label, inst):
         if number == 1:
             raise _http_error(403)
 
@@ -329,7 +329,7 @@ async def test_failing_issue_does_not_abort_the_scan(mock_gh, ctx, db):
         make_issue(number=2, updated_days_ago=300),
         make_issue(number=3, updated_days_ago=250),
     ])
-    mock_gh.post_comment = AsyncMock(side_effect=post_comment)
+    mock_gh.add_label = AsyncMock(side_effect=add_label)
 
     counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
 
@@ -372,7 +372,7 @@ async def test_timeline_failure_skips_issue_without_lifecycle_actions(
 
 @pytest.mark.asyncio
 async def test_earlier_audit_rows_survive_a_later_failure(mock_gh, ctx, db):
-    async def post_comment(owner, repo, number, body, inst):
+    async def add_label(owner, repo, number, label, inst):
         if number == 3:
             raise _http_error(403)
 
@@ -381,7 +381,7 @@ async def test_earlier_audit_rows_survive_a_later_failure(mock_gh, ctx, db):
         make_issue(number=2, updated_days_ago=300),
         make_issue(number=3, updated_days_ago=250),
     ])
-    mock_gh.post_comment = AsyncMock(side_effect=post_comment)
+    mock_gh.add_label = AsyncMock(side_effect=add_label)
 
     counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
 
@@ -928,11 +928,11 @@ async def test_transient_failure_of_the_unassign_notice_keeps_the_original_count
 
 
 @pytest.mark.asyncio
-async def test_persistent_failure_of_the_unassign_notice_never_makes_marking_earlier(
+async def test_persistent_failure_of_the_unassign_notice_keeps_the_original_countdown(
     mock_gh, ctx
 ):
-    # Without the marker the removal's own bump counts as activity: marking is
-    # delayed, never brought forward and never skipped.
+    # The action is recorded before its notice, so the issue's real activity is
+    # kept even when no notice ever reaches GitHub, and retries stop at the cap.
     _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
     clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
     issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
@@ -944,7 +944,106 @@ async def test_persistent_failure_of_the_unassign_notice_never_makes_marking_ear
     )
 
     assert issue.assignees == []
-    assert marked is None or marked >= 9
+    assert marked == 9
+    assert mock_gh.post_comment.await_count < 40  # retries are capped
+
+
+@pytest.mark.asyncio
+async def test_failed_unassign_notice_is_delivered_on_a_later_scan(mock_gh, ctx):
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    real_post_comment = mock_gh.post_comment.side_effect
+    attempts = {"count": 0}
+
+    async def down_for_three_posts(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] <= 3:
+            raise RuntimeError("GitHub returned 503")
+        return await real_post_comment(*args, **kwargs)
+
+    mock_gh.post_comment.side_effect = down_for_three_posts
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=12
+    )
+
+    notices = [c for c in issue.comments if "auto-unassigned" in c["body"]]
+    assert len(notices) == 1
+    assert marked == 9
+
+
+@pytest.mark.asyncio
+async def test_failed_stale_notice_is_logged_and_delivered_later(mock_gh, ctx, db):
+    _configure(ctx, stale_issue_days=20, close_stale_after_days=30, auto_unassign_inactive_days=9)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=25)
+    _wire(mock_gh, issue)
+
+    real_post_comment = mock_gh.post_comment.side_effect
+    attempts = {"count": 0}
+
+    async def down_for_two_posts(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] <= 2:
+            raise RuntimeError("GitHub returned 502")
+        return await real_post_comment(*args, **kwargs)
+
+    mock_gh.post_comment.side_effect = down_for_two_posts
+    wf = IssueManagementWorkflow(mock_gh)
+
+    counts = await wf.run_stale_scan(ctx, now=clock["now"])
+
+    # The label landed and the action is recorded, although no notice got out.
+    assert counts["stale_marked"] == 1
+    assert counts["errors"] == 0
+    assert "stale" in issue.labels
+    assert await _logged_issue_numbers(db) == [1]
+    assert [c for c in issue.comments if "marked **stale**" in c["body"]] == []
+
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    assert len([c for c in issue.comments if "marked **stale**" in c["body"]]) == 1
+
+
+@pytest.mark.asyncio
+async def test_accepted_notice_is_not_posted_twice_by_a_later_scan(mock_gh, ctx):
+    # The POST lands but the client never hears back, and the duplicate check
+    # fails too. The next scan must find the notice by its marker.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+
+    real_post_comment = mock_gh.post_comment.side_effect
+    real_list_comments = mock_gh.list_issue_comments.side_effect
+    state = {"posts": 0, "lists_failed": False}
+
+    async def accepted_then_timeout(*args, **kwargs):
+        state["posts"] += 1
+        await real_post_comment(*args, **kwargs)
+        if state["posts"] == 1:
+            raise httpx.ReadTimeout("timed out")
+
+    async def list_fails_once_after_the_post(*args, **kwargs):
+        if state["posts"] == 1 and not state["lists_failed"]:
+            state["lists_failed"] = True
+            raise httpx.ReadTimeout("timed out")
+        return await real_list_comments(*args, **kwargs)
+
+    mock_gh.post_comment.side_effect = accepted_then_timeout
+    mock_gh.list_issue_comments.side_effect = list_fails_once_after_the_post
+    wf = IssueManagementWorkflow(mock_gh)
+
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    clock["now"] += timedelta(days=1)
+    await wf.run_stale_scan(ctx, now=clock["now"])
+
+    notices = [c for c in issue.comments if "auto-unassigned" in c["body"]]
+    assert len(notices) == 1
 
 
 @pytest.mark.parametrize(("count_bots", "expected_marked"), [(False, 1), (True, 0)])
@@ -1000,13 +1099,13 @@ async def test_retry_does_not_duplicate_a_comment_github_already_accepted(mock_g
     assert attempts["count"] == 1
 
 
-@pytest.mark.parametrize(("seconds", "expected"), [(30, 8), (90, 21)])
+@pytest.mark.parametrize("seconds", [1, 10, 30, 59, 90])
 @pytest.mark.asyncio
-async def test_issue_edit_is_attributed_by_the_60_second_window(
-    mock_gh, ctx, seconds, expected
+async def test_issue_edit_right_after_a_bot_action_counts_exactly(
+    mock_gh, ctx, seconds
 ):
-    # Documents the deliberate limit: an edit leaves no event, so one within a
-    # minute of the bot's comment is taken for the bot's own update.
+    # The bot's own update time is recorded, so no edit is mistaken for it, however
+    # soon it follows.
     _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
     clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
     issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
@@ -1021,7 +1120,7 @@ async def test_issue_edit_is_attributed_by_the_60_second_window(
 
     marked, _ = await _run_daily(wf, ctx, clock, issue, days=40)
 
-    assert marked == expected
+    assert marked == 21  # 20 full days after the edit
 
 
 @pytest.mark.asyncio

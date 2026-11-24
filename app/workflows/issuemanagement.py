@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.schema import IssueManagementConfig
-from app.db.models import PendingIssueCloseNotice, StaleActionLog
+from app.db.models import LifecycleAction, PendingIssueCloseNotice, StaleActionLog
 from app.github.client import GitHubClient
 from app.utils import audit
 from app.utils.logger import get_logger
@@ -44,6 +44,9 @@ _LEGACY_PHRASES = {
 # to the bot's last comment is its own; anything later is somebody else's.
 _BOT_ACTION_TOLERANCE = timedelta(seconds=60)
 
+# A notice that keeps failing is given up on after this many delivery attempts.
+_MAX_NOTICE_ATTEMPTS = 5
+
 
 def _parse_timestamp(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
@@ -74,6 +77,10 @@ def _is_own_comment(comment: dict) -> bool:
         return False
 
     return str(app["id"]) == configured_app_id
+
+
+def _notice_marker(record_id: int) -> str:
+    return f"<!-- hiero-bot:notice:{record_id} -->"
 
 
 def _marker(action: str, last_activity: datetime | None) -> str:
@@ -125,6 +132,17 @@ class IssueManagementWorkflow:
             )
             await db.rollback()
 
+        # Deliver unassignment and stale notices that failed on an earlier scan.
+        try:
+            await self._recover_pending_notices(ctx)
+        except Exception as exc:
+            counts["errors"] += 1
+            log.warning(
+                "Stale scan %s/%s: pending notice recovery failed: %s",
+                owner, repo, exc,
+            )
+            await db.rollback()
+
         issues = await self._gh.list_issues(
             owner, repo, inst, state="open", sort="updated", direction="asc"
         )
@@ -172,6 +190,16 @@ class IssueManagementWorkflow:
         timeline_events = await self._gh.list_issue_timeline(
             ctx["owner"], ctx["repo"], issue["number"], ctx["installation_id"]
         )
+        result = await ctx["db"].execute(
+            select(LifecycleAction)
+            .where(
+                LifecycleAction.owner == ctx["owner"],
+                LifecycleAction.repo == ctx["repo"],
+                LifecycleAction.issue_number == issue["number"],
+            )
+            .order_by(LifecycleAction.created_at, LifecycleAction.id)
+        )
+        records = list(result.scalars().all())
 
         human_last: datetime | None = None
         bot_last: datetime | None = None
@@ -180,10 +208,13 @@ class IssueManagementWorkflow:
         bot_stale_marked_at: datetime | None = None
         stale_marked_at: datetime | None = None
         ignored_bot_activity = False
-        # Latest moment any bot (ours or another) touched the issue. GitHub bumps
-        # ``updated_at`` for each of those, so only an ``updated_at`` clearly later
-        # than this can be a person's edit, which leaves no comment or event.
-        bot_activity_last: datetime | None = None
+        # GitHub bumps ``updated_at`` for every bot action, so only an
+        # ``updated_at`` clearly later than all of them can be a person's edit,
+        # which leaves no comment or event. Our own actions are recorded with the
+        # exact time GitHub stamped (``own_floor``); other bots' are not, so they
+        # get a short tolerance window instead.
+        own_bot_last: datetime | None = None
+        other_bot_last: datetime | None = None
 
         cfg = ctx["config"].workflows.issue_management
 
@@ -204,8 +235,8 @@ class IssueManagementWorkflow:
 
                 if is_bot and not cfg.count_bot_comments_as_activity:
                     ignored_bot_activity = True
-                    if bot_activity_last is None or timestamp > bot_activity_last:
-                        bot_activity_last = timestamp
+                    if other_bot_last is None or timestamp > other_bot_last:
+                        other_bot_last = timestamp
                     continue
 
                 if human_last is None or timestamp > human_last:
@@ -216,8 +247,8 @@ class IssueManagementWorkflow:
             if baseline is not None:
                 baseline = min(baseline, timestamp)
 
-            if bot_activity_last is None or timestamp > bot_activity_last:
-                bot_activity_last = timestamp
+            if own_bot_last is None or timestamp > own_bot_last:
+                own_bot_last = timestamp
 
             if bot_last is None or timestamp >= bot_last:
                 bot_last, bot_baseline = timestamp, baseline
@@ -259,9 +290,6 @@ class IssueManagementWorkflow:
                     human_last = timestamp
                 continue
 
-            if bot_activity_last is None or timestamp > bot_activity_last:
-                bot_activity_last = timestamp
-
             app = event.get("performed_via_github_app")
             is_own_app_event = (
                 bool(configured_app_id)
@@ -272,6 +300,9 @@ class IssueManagementWorkflow:
             )
 
             if is_own_app_event:
+                if own_bot_last is None or timestamp > own_bot_last:
+                    own_bot_last = timestamp
+
                 if event_name == "unassigned":
                     # If the unassignment notice failed, retain the
                     # attributable lifecycle event as a safe fallback.
@@ -309,10 +340,35 @@ class IssueManagementWorkflow:
 
             elif actor and _is_bot(actor):
                 ignored_bot_activity = True
+                if other_bot_last is None or timestamp > other_bot_last:
+                    other_bot_last = timestamp
 
-        # A lifecycle comment is the strongest record because its marker
-        # carries the pre-action activity baseline. If its comment failed,
-        # use the attributable bot timeline event instead.
+        # Our own recorded actions are stored before their notices go out, so
+        # they carry the pre-action activity baseline even when the notice (and
+        # its marker) never made it to GitHub, and the exact update time GitHub
+        # stamped for them.
+        own_floor: datetime | None = None
+        for record in records:
+            if record.settled_updated_at is not None and (
+                own_floor is None or record.settled_updated_at > own_floor
+            ):
+                own_floor = record.settled_updated_at
+            record_time = _parse_timestamp(record.created_at.isoformat())
+            if bot_last is None or record_time > bot_last:
+                bot_last = record_time
+                bot_baseline = (
+                    _parse_timestamp(record.last_activity.isoformat())
+                    if record.last_activity
+                    else None
+                )
+            if record.action == "stale" and (
+                stale_marked_at is None or record_time > stale_marked_at
+            ):
+                stale_marked_at = record_time
+
+        # A lifecycle comment or record is the strongest evidence because it
+        # carries the pre-action activity baseline. Without either, use the
+        # attributable bot timeline event.
         if bot_last is not None:
             candidates = [human_last, bot_baseline or bot_last]
         elif bot_event_last is not None:
@@ -333,7 +389,14 @@ class IssueManagementWorkflow:
 
         # An edit leaves neither a comment nor a timeline event; its only trace is
         # ``updated_at``. Count it once it is clearly later than every bot action.
-        if bot_activity_last is not None and updated > bot_activity_last + _BOT_ACTION_TOLERANCE:
+        boundaries: list[datetime] = []
+        if own_floor is not None:
+            boundaries.append(own_floor)  # exact: no guessing for our own actions
+        if own_bot_last is not None and (own_floor is None or own_bot_last > own_floor):
+            boundaries.append(own_bot_last + _BOT_ACTION_TOLERANCE)
+        if other_bot_last is not None:
+            boundaries.append(other_bot_last + _BOT_ACTION_TOLERANCE)
+        if boundaries and updated > max(boundaries):
             candidates.append(updated)
 
         valid_candidates = [candidate for candidate in candidates if candidate]
@@ -418,7 +481,7 @@ class IssueManagementWorkflow:
         if assignees and last_activity < unassign_cutoff:
             try:
                 await self._unassign_inactive(
-                    ctx, issue, assignees, days_inactive, last_activity
+                    ctx, issue, assignees, days_inactive, last_activity, now
                 )
                 counts["unassigned"] += len(assignees)
             except Exception as exc:
@@ -444,7 +507,7 @@ class IssueManagementWorkflow:
         # both thresholds gets both actions in the same scan)
         if last_activity < stale_cutoff:
             await self._mark_stale(
-                ctx, issue, cfg.stale_label, days_inactive, last_activity
+                ctx, issue, cfg.stale_label, days_inactive, last_activity, now
             )
             counts["stale_marked"] += 1
 
@@ -515,31 +578,122 @@ class IssueManagementWorkflow:
 
     async def _mark_stale(
         self, ctx: dict, issue: dict, stale_label: str, days_inactive: int = 0,
-        last_activity: datetime | None = None,
+        last_activity: datetime | None = None, now: datetime | None = None,
     ) -> None:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
 
-        # The comment goes last: GitHub stamps updated_at when it lands, so the
-        # bump that follows is the comment's own and the marker explains it. If
-        # the comment fails the error is counted and the scan moves on: the label
-        # stays, so the issue is stale from the next scan (its close period runs
-        # from the label event) and the missing notice is not retried.
         await self._gh.add_label(owner, repo, number, stale_label, inst)
-        await self._post_lifecycle_comment(
-            owner, repo, number,
-            f"⚠️ This issue has been marked **stale** due to inactivity.\n\n"
-            f"If it's still relevant please comment to keep it open. "
-            f"Remove the `{stale_label}` label to exempt it permanently."
-            + _marker("stale", last_activity),
-            inst,
+        # The action is recorded before its notice goes out, so a failed notice
+        # neither loses the issue's real activity nor goes undelivered: it is
+        # retried on later scans.
+        record = await self._record_action(
+            ctx, number, "stale", stale_label, last_activity, now
         )
+        await self._deliver_notice(ctx, record)
 
         await self._log_stale(ctx, number, "marked_stale", days_inactive)
         await audit.record(
             ctx["db"], action="issue.stale_marked", owner=owner, repo=repo,
             target_number=number, reason="No activity within stale period",
         )
+
+    async def _record_action(
+        self, ctx: dict, number: int, action: str, detail: str,
+        last_activity: datetime | None, now: datetime | None = None,
+    ) -> LifecycleAction:
+        """Store a bot action durably, before its notice is attempted."""
+        record = LifecycleAction(
+            owner=ctx["owner"],
+            repo=ctx["repo"],
+            issue_number=number,
+            action=action,
+            detail=detail,
+            last_activity=last_activity,
+            created_at=now or datetime.now(UTC),
+        )
+        ctx["db"].add(record)
+        await ctx["db"].commit()
+        return record
+
+    @staticmethod
+    def _notice_body(record: LifecycleAction) -> str:
+        if record.action == "unassigned":
+            text = (
+                f"⏰ {record.detail} — auto-unassigned due to inactivity. "
+                f"Re-assign yourself with `/assign` if you're still working on this!"
+            )
+        else:
+            text = (
+                f"⚠️ This issue has been marked **stale** due to inactivity.\n\n"
+                f"If it's still relevant please comment to keep it open. "
+                f"Remove the `{record.detail}` label to exempt it permanently."
+            )
+        return (
+            text
+            + f"\n\n{_notice_marker(record.id)}"
+            + _marker(record.action, record.last_activity)
+        )
+
+    async def _deliver_notice(self, ctx: dict, record: LifecycleAction) -> None:
+        """Post a recorded action's notice once; never raise, never duplicate.
+
+        A failure leaves the record pending for the next scan. Before any retry
+        the issue is searched for the notice's marker, because a timed-out POST
+        may have been accepted.
+        """
+        owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
+        db: AsyncSession = ctx["db"]
+        number = record.issue_number
+
+        record.notice_attempts += 1
+        try:
+            if record.notice_attempts > 1:
+                existing = await self._gh.list_issue_comments(owner, repo, number, inst)
+                marker = _notice_marker(record.id)
+                if any(
+                    marker in (comment.get("body") or "") and _is_own_comment(comment)
+                    for comment in existing
+                ):
+                    record.notice_delivered_at = datetime.now(UTC)
+            if record.notice_delivered_at is None:
+                await self._post_lifecycle_comment(
+                    owner, repo, number, self._notice_body(record), inst
+                )
+                record.notice_delivered_at = datetime.now(UTC)
+        except Exception as exc:
+            log.warning(
+                "Notice for %s on %s/%s#%s not delivered (attempt %s): %s",
+                record.action, owner, repo, number, record.notice_attempts, exc,
+            )
+
+        # Remember the update time GitHub stamped for our own changes, so a later
+        # edit can be told apart from them exactly.
+        try:
+            current = await self._gh.get_issue(owner, repo, number, inst)
+            record.settled_updated_at = _parse_timestamp(current["updated_at"])
+        except Exception as exc:
+            log.warning(
+                "Could not read the update time of %s/%s#%s: %s",
+                owner, repo, number, exc,
+            )
+        await db.commit()
+
+    async def _recover_pending_notices(self, ctx: dict) -> None:
+        """Retry notices that failed on an earlier scan."""
+        db: AsyncSession = ctx["db"]
+        result = await db.execute(
+            select(LifecycleAction.id).where(
+                LifecycleAction.owner == ctx["owner"],
+                LifecycleAction.repo == ctx["repo"],
+                LifecycleAction.notice_delivered_at.is_(None),
+                LifecycleAction.notice_attempts < _MAX_NOTICE_ATTEMPTS,
+            )
+        )
+        for record_id in list(result.scalars().all()):
+            record = await db.get(LifecycleAction, record_id)
+            if record is not None:
+                await self._deliver_notice(ctx, record)
 
     async def _recover_pending_close_notices(
         self,
@@ -830,30 +984,20 @@ class IssueManagementWorkflow:
 
     async def _unassign_inactive(
         self, ctx: dict, issue: dict, assignees: list[str], days_inactive: int = 0,
-        last_activity: datetime | None = None,
+        last_activity: datetime | None = None, now: datetime | None = None,
     ) -> None:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         number = issue["number"]
         mentions = " ".join(f"@{a}" for a in assignees)
 
-        # Remove first, comment last (see _mark_stale). A failed removal posts
-        # nothing, so retries on later scans cannot pile up duplicate notices.
+        # Remove first. A failed removal changes nothing and posts nothing; once
+        # it succeeds the action is recorded and its notice delivered or retried.
         await self._gh.remove_assignees(owner, repo, number, assignees, inst)
-        try:
-            await self._post_lifecycle_comment(
-                owner, repo, number,
-                f"⏰ {mentions} — auto-unassigned due to inactivity. "
-                f"Re-assign yourself with `/assign` if you're still working on this!"
-                + _marker("unassigned", last_activity),
-                inst,
-            )
-        except Exception as exc:
-            # The unassignment happened and must be recorded; only the notice is
-            # lost. Do not retry: the issue has no assignee left to scan again.
-            log.warning(
-                "Unassigned %s on %s/%s#%s but the notice failed: %s",
-                mentions, owner, repo, number, exc,
-            )
+        record = await self._record_action(
+            ctx, number, "unassigned", mentions, last_activity, now
+        )
+        await self._deliver_notice(ctx, record)
+
         await self._log_stale(ctx, number, "unassigned", days_inactive)
         for login in assignees:
             await audit.record(

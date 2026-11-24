@@ -129,6 +129,24 @@ class StaleActionLog(Base):
     )
 
 
+class LifecycleAction(Base):
+    __tablename__ = "lifecycle_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
+    owner: Mapped[str] = mapped_column(String(128))
+    repo: Mapped[str] = mapped_column(String(128))
+    issue_number: Mapped[int] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(String(16))  # unassigned | stale
+    detail: Mapped[str] = mapped_column(Text)  # @mentions, or the stale label
+    last_activity: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    notice_delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    notice_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    settled_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+    __table_args__ = (Index("ix_lifecycle_action_issue", "owner", "repo", "issue_number"),)
+
+
 class PendingIssueCloseNotice(Base):
     __tablename__ = "pending_issue_close_notices"
 
