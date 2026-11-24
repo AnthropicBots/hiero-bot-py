@@ -492,6 +492,24 @@ class IssueManagementWorkflow:
 
     # ── Private helpers ───────────────────────────────────────
 
+    async def _post_lifecycle_comment(
+        self, owner: str, repo: str, number: int, body: str, inst: int
+    ) -> None:
+        """Post a lifecycle comment, trying once more after a transient failure.
+
+        The GitHub client does not retry POSTs, and these comments carry the
+        marker that preserves an issue's real activity, so one retry is worth it.
+        """
+        try:
+            await self._gh.post_comment(owner, repo, number, body, inst)
+        except Exception as exc:
+            log.warning(
+                "Posting a lifecycle comment on %s/%s#%s failed, retrying once: %s",
+                owner, repo, number, exc,
+            )
+            await self._gh.post_comment(owner, repo, number, body, inst)
+
+
     async def _mark_stale(
         self, ctx: dict, issue: dict, stale_label: str, days_inactive: int = 0,
         last_activity: datetime | None = None,
@@ -505,7 +523,7 @@ class IssueManagementWorkflow:
         # stays, so the issue is stale from the next scan (its close period runs
         # from the label event) and the missing notice is not retried.
         await self._gh.add_label(owner, repo, number, stale_label, inst)
-        await self._gh.post_comment(
+        await self._post_lifecycle_comment(
             owner, repo, number,
             f"⚠️ This issue has been marked **stale** due to inactivity.\n\n"
             f"If it's still relevant please comment to keep it open. "
@@ -819,7 +837,7 @@ class IssueManagementWorkflow:
         # nothing, so retries on later scans cannot pile up duplicate notices.
         await self._gh.remove_assignees(owner, repo, number, assignees, inst)
         try:
-            await self._gh.post_comment(
+            await self._post_lifecycle_comment(
                 owner, repo, number,
                 f"⏰ {mentions} — auto-unassigned due to inactivity. "
                 f"Re-assign yourself with `/assign` if you're still working on this!"

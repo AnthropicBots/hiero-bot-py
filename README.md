@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./.github/assets/mark2_orbit_ring.jpg" width="120" height="120" alt="hydra-maintainer logo" />
 
-# hydra-maintainer
+  # hydra-maintainer
 
   **A self-hostable, open-source automation platform for open-source maintainers.**
 

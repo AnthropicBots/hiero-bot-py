@@ -898,10 +898,11 @@ async def test_marker_forged_by_a_contributor_is_ignored(mock_gh, ctx):
 
 
 @pytest.mark.asyncio
-async def test_failed_unassignment_comment_never_makes_marking_earlier(mock_gh, ctx):
-    # The comment is the last write of an action. If it fails, the removal's bump
-    # has no marker to explain it and counts as activity: marking is delayed,
-    # never brought forward and never skipped.
+async def test_transient_failure_of_the_unassign_notice_keeps_the_original_countdown(
+    mock_gh, ctx
+):
+    # One retry rescues a transient failure, so the marker is written and the
+    # countdown is exactly what it would have been without the failure.
     _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
     clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
     issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
@@ -923,7 +924,51 @@ async def test_failed_unassignment_comment_never_makes_marking_earlier(mock_gh, 
     )
 
     assert issue.assignees == []
-    assert marked is not None and marked >= 9
+    assert marked == 9
+
+
+@pytest.mark.asyncio
+async def test_persistent_failure_of_the_unassign_notice_never_makes_marking_earlier(
+    mock_gh, ctx
+):
+    # Without the marker the removal's own bump counts as activity: marking is
+    # delayed, never brought forward and never skipped.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+    mock_gh.post_comment.side_effect = RuntimeError("GitHub returned 503")
+
+    marked, _ = await _run_daily(
+        IssueManagementWorkflow(mock_gh), ctx, clock, issue, days=40
+    )
+
+    assert issue.assignees == []
+    assert marked is None or marked >= 9
+
+
+@pytest.mark.parametrize(("seconds", "expected"), [(30, 8), (90, 21)])
+@pytest.mark.asyncio
+async def test_issue_edit_is_attributed_by_the_60_second_window(
+    mock_gh, ctx, seconds, expected
+):
+    # Documents the deliberate limit: an edit leaves no event, so one within a
+    # minute of the bot's comment is taken for the bot's own update.
+    _configure(ctx, auto_unassign_inactive_days=9, stale_issue_days=20)
+    clock = {"now": datetime(2026, 1, 1, tzinfo=UTC)}
+    issue = _FakeGitHubIssue(clock, idle_days=12, assignees=["sleepy-dev"])
+    _wire(mock_gh, issue)
+    wf = IssueManagementWorkflow(mock_gh)
+
+    await wf.run_stale_scan(ctx, now=clock["now"])
+    assert issue.assignees == []
+
+    clock["now"] += timedelta(seconds=seconds)
+    issue.updated = clock["now"]  # the edit
+
+    marked, _ = await _run_daily(wf, ctx, clock, issue, days=40)
+
+    assert marked == expected
 
 
 @pytest.mark.asyncio
