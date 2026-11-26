@@ -7,11 +7,25 @@
 
 repo: "hiero/your-repo"
 
-difficulty_labels:
-  intermediate: "intermediate"
+branding:
+  name: "Hiero"
 
-teams:
-  mentors: "mentors"
+# Create the labels in GitHub before enabling the workflows that use them.
+labels:
+  health_healthy: "health: 💚 healthy"
+  health_needs_work: "health: 🔧 needs work"
+  quality_passed: "quality: ✅ passed"
+  quality_failed: "quality: ❌ needs work"
+  size_s: "size: S"
+  size_m: "size: M"
+  size_l: "size: L"
+  size_xl: "size: XL"
+  conflict: "conflict"
+  stale: "stale"
+  difficulty_beginner: "beginner"
+  difficulty_intermediate: "intermediate"
+  difficulty_advanced: "advanced"
+  mentor_team: "mentors"
 
 workflows:
 

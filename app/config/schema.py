@@ -213,6 +213,27 @@ class ReviewerAssignmentConfig(BaseModel):
 
 
 # Teams and Labels
+class BrandingConfig(BaseModel):
+    name: str = "Hiero"
+
+
+class LabelsConfig(BaseModel):
+    health_healthy: str = "health: 💚 healthy"
+    health_needs_work: str = "health: 🔧 needs work"
+    quality_passed: str = "quality: ✅ passed"
+    quality_failed: str = "quality: ❌ needs work"
+    size_s: str = "size: S"
+    size_m: str = "size: M"
+    size_l: str = "size: L"
+    size_xl: str = "size: XL"
+    conflict: str = "conflict"
+    stale: str = "stale"
+    difficulty_beginner: str = "beginner"
+    difficulty_intermediate: str = "intermediate"
+    difficulty_advanced: str = "advanced"
+    mentor_team: str = "mentors"
+
+
 class TeamsConfig(BaseModel):
     mentors: str = "mentors"
 
@@ -238,6 +259,26 @@ class RepoConfig(BaseModel):
     workflows: WorkflowsConfig = Field(default_factory=WorkflowsConfig)
     difficulty_labels: DifficultyLabels = Field(default_factory=DifficultyLabels)
     teams: TeamsConfig = Field(default_factory=TeamsConfig)
+    branding: BrandingConfig = Field(default_factory=BrandingConfig)
+    labels: LabelsConfig = Field(default_factory=LabelsConfig)
+
+    @property
+    def stale_label(self) -> str:
+        if "stale" in self.labels.model_fields_set:
+            return self.labels.stale
+        return self.workflows.issue_management.stale_label
+
+    @property
+    def intermediate_label(self) -> str:
+        if "difficulty_intermediate" in self.labels.model_fields_set:
+            return self.labels.difficulty_intermediate
+        return self.difficulty_labels.intermediate
+
+    @property
+    def mentor_team(self) -> str:
+        if "mentor_team" in self.labels.model_fields_set:
+            return self.labels.mentor_team
+        return self.teams.mentors
 
 
 # Unknown-Key Detection

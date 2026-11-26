@@ -53,7 +53,15 @@ class PRHealthWorkflow:
         signals = self._compute_signals(pr, files, reviews, status_data, commits)
         score = self._compute_score(signals, cfg.score_weights)
 
-        label = LABEL_HEALTHY if score >= cfg.label_healthy_above else LABEL_NEEDS_WORK
+        labels = ctx["config"].labels
+        healthy = score >= cfg.label_healthy_above
+        label = labels.health_healthy if healthy else labels.health_needs_work
+        stale_label = labels.health_needs_work if healthy else labels.health_healthy
+        applied = await self._gh.add_label(
+            owner, repo, pr_number, label, inst,
+        )
+        if applied and stale_label.casefold() != label.casefold():
+            await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
 
         fields = {
             "pr_author": author,
@@ -64,16 +72,10 @@ class PRHealthWorkflow:
             "dco_signed": signals["dco_signed"],
             "review_count": signals["review_count"],
             "files_changed": len(files),
-            "label_applied": label,
+            "label_applied": label if applied else None,
             "created_at": datetime.now(UTC),
         }
         await self._upsert_score(db, owner, repo, pr_number, fields)
-
-        # Label the PR — clear the opposite status label first so a PR never
-        # carries both "healthy" and "needs work" at once (issue #64).
-        stale_label = LABEL_NEEDS_WORK if label == LABEL_HEALTHY else LABEL_HEALTHY
-        await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
-        await self._gh.add_label(owner, repo, pr_number, label, inst)
 
         # Comment when below the comment threshold. Labels are governed
         # separately by label_healthy_above so the two knobs stay independent.

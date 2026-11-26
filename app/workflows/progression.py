@@ -584,7 +584,7 @@ class ProgressionWorkflow:
         self, ctx: dict, pr_number: int, login: str, count: int
     ) -> None:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
-        label = ctx["config"].difficulty_labels.intermediate
+        label = ctx["config"].intermediate_label
         try:
             issues = await self._gh.list_issues(
                 owner, repo, inst,

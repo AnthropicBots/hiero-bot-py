@@ -104,13 +104,15 @@ class PullRequestWorkflow:
         # No gates enabled -> nothing was evaluated, so don't claim "passed":
         # skip the label and the audit row entirely (issue #123).
         if checks:
-            # Label — clear the opposite status label first so a PR never carries
-            # both "passed" and "needs work" at once (issue #64).
             if cfg.auto_label:
-                label = LABEL_PASS if all_passed else LABEL_FAIL
-                stale_label = LABEL_FAIL if label == LABEL_PASS else LABEL_PASS
-                await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
-                await self._gh.add_label(owner, repo, pr_number, label, inst)
+                labels = ctx["config"].labels
+                label = labels.quality_passed if all_passed else labels.quality_failed
+                stale_label = labels.quality_failed if all_passed else labels.quality_passed
+                applied = await self._gh.add_label(
+                    owner, repo, pr_number, label, inst,
+                )
+                if applied and stale_label.casefold() != label.casefold():
+                    await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
 
             await audit.record(
                 db,

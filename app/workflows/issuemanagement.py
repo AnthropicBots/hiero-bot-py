@@ -372,7 +372,7 @@ class IssueManagementWorkflow:
 
                     if (
                         isinstance(label_name, str)
-                        and label_name.casefold() == cfg.stale_label.casefold()
+                        and label_name.casefold() == ctx["config"].stale_label.casefold()
                     ):
                         if bot_event_last is None or timestamp > bot_event_last:
                             bot_event_last = timestamp
@@ -530,7 +530,7 @@ class IssueManagementWorkflow:
             return None
 
         updated = _parse_timestamp(issue["updated_at"])
-        is_stale = cfg.stale_label.casefold() in labels
+        is_stale = ctx["config"].stale_label.casefold() in labels
 
         # Decide from the activity before this scan acts, so one action's comment
         # cannot influence the next decision.
@@ -627,7 +627,7 @@ class IssueManagementWorkflow:
         if decision["stale"]:
             try:
                 confirmed = await self._mark_stale(
-                    ctx, issue, cfg.stale_label, days_inactive, last_activity, now,
+                    ctx, issue, ctx["config"].stale_label, days_inactive, last_activity, now,
                     recheck,
                 )
             except _AlreadyClaimed:
@@ -717,7 +717,9 @@ class IssueManagementWorkflow:
         if not await self._still_due(ctx, issue, "stale", recheck):
             await self._withdraw(ctx, record)
             raise _AlreadyClaimed
-        await self._gh.add_label(owner, repo, number, stale_label, inst)
+        if await self._gh.add_label(owner, repo, number, stale_label, inst) is False:
+            await self._withdraw(ctx, record)
+            return False
         return await self._finish_action(ctx, record, days_inactive, False)
 
     # ── Ownership of rows ────────────────────────────────────
@@ -971,7 +973,7 @@ class IssueManagementWorkflow:
         waiting = not foreign and self._now(ctx) - created < _ATTRIBUTION_GRACE
 
         if action == "stale":
-            label = cfg.stale_label.casefold()
+            label = ctx["config"].stale_label.casefold()
             present = label in {
                 (lb["name"] if isinstance(lb, dict) else lb).casefold()
                 for lb in issue.get("labels", [])
@@ -1026,11 +1028,11 @@ class IssueManagementWorkflow:
             if e.get("created_at") and _parse_timestamp(e["created_at"]) >= since
         ]
         if record.action == "stale":
-            label = cfg.stale_label.casefold()
+            label = ctx["config"].stale_label.casefold()
 
             def names(own: bool) -> list[str]:
                 return [
-                    cfg.stale_label
+                    ctx["config"].stale_label
                     for e in recent
                     if _is_own_event(e) is own
                     and e.get("event") == "labeled"
@@ -1525,7 +1527,7 @@ class IssueManagementWorkflow:
         }
         return (
             (issue.get("state") or "open").casefold() == "open"
-            and cfg.stale_label.casefold() in labels
+            and ctx["config"].stale_label.casefold() in labels
             and not labels & {name.casefold() for name in cfg.exempt_labels}
         )
 

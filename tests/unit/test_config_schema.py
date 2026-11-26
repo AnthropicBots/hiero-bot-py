@@ -528,6 +528,21 @@ def test_every_schema_field_has_a_runtime_reader():
     schema_paths = collect_field_paths(RepoConfig)
 
     indirect_reader_contracts = {
+        "labels.stale": [
+            ("app/config/schema.py", "RepoConfig", "stale_label", "self.labels.stale"),
+        ],
+        "labels.difficulty_intermediate": [
+            ("app/config/schema.py", "RepoConfig", "intermediate_label", "self.labels.difficulty_intermediate"),
+        ],
+        "labels.mentor_team": [
+            ("app/config/schema.py", "RepoConfig", "mentor_team", "self.labels.mentor_team"),
+        ],
+        "difficulty_labels.intermediate": [
+            ("app/config/schema.py", "RepoConfig", "intermediate_label", "self.difficulty_labels.intermediate"),
+        ],
+        "teams.mentors": [
+            ("app/config/schema.py", "RepoConfig", "mentor_team", "self.teams.mentors"),
+        ],
         "workflows.issue_management.close_stale_after_days": [
             ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.close_stale_after_days"),
         ],
@@ -535,7 +550,7 @@ def test_every_schema_field_has_a_runtime_reader():
             ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.exempt_labels"),
         ],
         "workflows.issue_management.stale_label": [
-            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", "cfg.stale_label"),
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_decide", 'ctx["config"].stale_label' ),
         ],
         "workflows.issue_management.label_escalation_rules.label": [
             ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "handle_label_escalation", "r.label"),
@@ -617,7 +632,11 @@ def test_every_schema_field_has_a_runtime_reader():
         ],
     }
 
-    schema_only_fields = {"repo"}
+    # These configuration keys reserve names for workflows that do not yet apply them.
+    schema_only_fields = {
+        "repo", "labels.size_s", "labels.size_m", "labels.size_l", "labels.size_xl",
+        "labels.conflict", "labels.difficulty_beginner", "labels.difficulty_advanced",
+    }
     source_trees = {}
 
     def find_method(tree, class_name, method_name):
@@ -742,6 +761,7 @@ def test_every_schema_field_has_a_runtime_reader():
         schema_paths
         - runtime_paths
         - set(indirect_reader_contracts)
+        - {"teams", "difficulty_labels"}
         - schema_only_fields
     )
 
@@ -785,3 +805,32 @@ def test_config_without_lifecycle_settings_keeps_the_documented_defaults():
     assert (im.enabled, im.stale_issue_days, im.close_stale_after_days) == (False, 60, 7)
     assert im.auto_unassign_inactive_days == 14
     assert im.count_bot_comments_as_activity is False
+
+
+def test_configured_labels_take_precedence_over_legacy_settings():
+    old = {
+        "repo": "hiero/x",
+        "teams": {"mentors": "old-mentors"},
+        "difficulty_labels": {"intermediate": "old-level"},
+        "workflows": {"issue_management": {"stale_label": "old-stale"}},
+    }
+    legacy = RepoConfig.model_validate(old)
+    assert (legacy.mentor_team, legacy.intermediate_label, legacy.stale_label) == (
+        "old-mentors", "old-level", "old-stale",
+    )
+
+    config = RepoConfig.model_validate({
+        **old,
+        "branding": {"name": "Example"},
+        "labels": {
+            "mentor_team": "new-mentors",
+            "difficulty_intermediate": "new-level",
+            "stale": "stale",
+            "quality_passed": "checks-ready",
+        },
+    })
+    assert config.branding.name == "Example"
+    assert config.labels.quality_passed == "checks-ready"
+    assert (config.mentor_team, config.intermediate_label, config.stale_label) == (
+        "new-mentors", "new-level", "stale",
+    )
