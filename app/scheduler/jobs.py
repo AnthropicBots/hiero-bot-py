@@ -12,6 +12,7 @@ from app.config.loader import ConfigLoader
 from app.db.database import AsyncSessionLocal
 from app.github.client import GitHubClient
 from app.utils.logger import get_logger
+from app.workflows.contribution_backfill import backfill_contribution_counts
 from app.workflows.issuemanagement import IssueManagementWorkflow
 
 log = get_logger("scheduler")
@@ -84,6 +85,17 @@ class BotScheduler:
             CronTrigger(hour=3, minute=0, timezone="UTC"),
             id="session_gc",
             name="Daily expired session garbage collection",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        self._scheduler.add_job(
+            backfill_contribution_counts,
+            "interval",
+            minutes=5,
+            args=[self._gh, AsyncSessionLocal],
+            id="contribution_backfill",
+            name="Resume installed repository contribution backfills",
             replace_existing=True,
             coalesce=True,
             max_instances=1,

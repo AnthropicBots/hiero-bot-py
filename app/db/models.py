@@ -322,8 +322,31 @@ class AccountRepo(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     repo_name: Mapped[str] = mapped_column(String(128), index=True)
+    contribution_backfill_page: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(UTC))
 
     __table_args__ = (
         UniqueConstraint("account_id", "repo_name", name="uq_account_repo"),
     )
+
+
+class CountedMerge(Base):
+    __tablename__ = "counted_merges"
+
+    owner: Mapped[str] = mapped_column(String(128), primary_key=True)
+    repo: Mapped[str] = mapped_column(String(128), primary_key=True)
+    pr_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    author: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    __table_args__ = (Index("ix_counted_merge_author", "owner", "repo", "author"),)
+
+
+class CountedReview(Base):
+    __tablename__ = "counted_reviews"
+
+    owner: Mapped[str] = mapped_column(String(128), primary_key=True)
+    repo: Mapped[str] = mapped_column(String(128), primary_key=True)
+    pr_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reviewer: Mapped[str] = mapped_column(String(128), primary_key=True)
+
+    __table_args__ = (Index("ix_counted_review_reviewer", "owner", "repo", "reviewer"),)

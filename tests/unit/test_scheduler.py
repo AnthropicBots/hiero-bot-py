@@ -176,12 +176,13 @@ def test_start_registers_scheduler_jobs():
     ):
         scheduler.start()
 
-    assert mock_add_job.call_count == 3
+    assert mock_add_job.call_count == 4
     mock_start.assert_called_once()
 
     stale_job = mock_add_job.call_args_list[0].kwargs
     cache_job = mock_add_job.call_args_list[1].kwargs
     session_gc_job = mock_add_job.call_args_list[2].kwargs
+    contribution_backfill_job = mock_add_job.call_args_list[3].kwargs
 
     assert stale_job["id"] == "stale_scan"
     assert stale_job["coalesce"] is True
@@ -194,6 +195,9 @@ def test_start_registers_scheduler_jobs():
 
     assert session_gc_job["id"] == "session_gc"
     assert session_gc_job["coalesce"] is True
+    assert contribution_backfill_job["id"] == "contribution_backfill"
+    assert contribution_backfill_job["coalesce"] is True
+    assert contribution_backfill_job["max_instances"] == 1
     assert session_gc_job["max_instances"] == 1
 
     session_gc_call = mock_add_job.call_args_list[2]
