@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.db.models import Account, AccountRepo
 from app.github.webhooks import WebhookRouter
+from app.workflows.counters import contribution_counts
 
 
 def make_request(headers: dict, json_body: dict, body: bytes = b""):
@@ -93,6 +94,26 @@ async def test_unparseable_date_header_does_not_fail_the_request(db):
 
 
 # ── Top-level routing via handle() ──────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_review_webhook_counts_once_without_requiring_repository_config(db):
+    router, _, loader = make_router(config=None)
+    body = {
+        "action": "submitted",
+        "repository": {"owner": {"login": "Hiero"}, "name": "SDK"},
+        "installation": {"id": 7},
+        "pull_request": {"number": 42},
+        "review": {"user": {"login": "Alice"}},
+    }
+    for delivery_id in ("review-one", "review-two"):
+        request = make_request({
+            "X-GitHub-Event": "pull_request_review", "X-GitHub-Delivery": delivery_id,
+        }, body)
+        assert await router.handle(request, db) == {"ok": True}
+
+    loader.load.assert_not_awaited()
+    assert await contribution_counts(db, "hiero", "sdk", "alice") == (0, 1)
+
 
 @pytest.mark.asyncio
 async def test_installation_event_is_routed_before_repo_check(db):

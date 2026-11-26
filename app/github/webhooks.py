@@ -23,6 +23,7 @@ from app.github.client import GitHubClient
 from app.github.replay_guard import is_replay, release_delivery
 from app.utils.logger import get_logger
 from app.utils.settings import settings
+from app.workflows.counters import record_contribution_event
 from app.workflows.issuemanagement import IssueManagementWorkflow
 from app.workflows.onboarding import OnboardingWorkflow
 from app.workflows.prhealth import PRHealthWorkflow
@@ -134,6 +135,21 @@ class WebhookRouter:
         owner = repo_data["owner"]["login"]
         repo = repo_data["name"]
         installation_id = installation_data["id"]
+
+        if event in {"pull_request", "pull_request_review"}:
+            try:
+                if await record_contribution_event(db, owner, repo, event, payload):
+                    await db.commit()
+            except Exception:
+                await db.rollback()
+                if delivery_id:
+                    try:
+                        await release_delivery(db, delivery_id)
+                    except Exception:
+                        log.exception("Failed to release webhook delivery %s", delivery_id)
+                raise
+            if event == "pull_request_review":
+                return {"ok": True}
 
         # Invalidate config cache before loading so config changes are
         # discovered even when a negative-cache entry exists.

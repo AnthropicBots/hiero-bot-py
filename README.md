@@ -152,6 +152,19 @@ uvicorn app.main:app --reload
 open http://localhost:8000
 ```
 
+### Contribution counters
+
+In the GitHub App settings, grant the app read access to pull requests and
+subscribe to both **Pull request** and **Pull request review** events. The
+review subscription is configured on the GitHub App by its owner.
+
+After the database migration, the scheduler starts backfilling each installed
+repository from its oldest pull requests. It processes one page per repository
+per pass and resumes from the last committed page after a restart or API
+failure. Submitted reviews count once per reviewer and pull request. Open
+and closed pull requests can both count toward a reviewer's total. Counts
+may be incomplete until the historical import finishes.
+
 ### Docker
 
 ```bash
