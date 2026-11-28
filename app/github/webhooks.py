@@ -81,12 +81,11 @@ class WebhookRouter:
         if settings.github_webhook_secret or settings.github_webhook_secret_old or settings.is_production:
             self._verify_signature(request, await request.body())
 
-        delivery_id = request.headers.get("X-GitHub-Delivery", "")
-        if delivery_id and await is_replay(db, delivery_id):
-            log.warning("Rejected replayed delivery %s", delivery_id)
-            raise HTTPException(status_code=409, detail="Duplicate delivery")
+        delivery_id = request.headers.get("X-GitHub-Delivery", "").strip()
+        if not delivery_id:
+            raise HTTPException(status_code=400, detail="Missing X-GitHub-Delivery header")
 
-        # #5 — skew check, defense-in-depth (secondary to signature + replay ID)
+        # #5 — skew check, defense-in-depth alongside signature and replay checks
         date_header = request.headers.get("Date")
         if date_header:
             try:
@@ -107,6 +106,10 @@ class WebhookRouter:
                 pass  # unparseable Date header — skip, don't fail the request
 
         event = request.headers.get("X-GitHub-Event", "")
+        if await is_replay(db, delivery_id, event):
+            log.debug("Skipped duplicate webhook delivery")
+            return {"status": "duplicate"}
+
         payload: dict[str, Any] = await request.json()
 
         # Handle installation lifecycle events (which do not require repository payload)

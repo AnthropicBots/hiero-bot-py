@@ -130,6 +130,17 @@ The bot will remain **inactive** until this configuration file exists.
 
 ## 7. Run the Bot
 
+For an existing database managed by Alembic, run `alembic upgrade head`
+before starting the updated bot. This adds the webhook event column while
+preserving existing delivery IDs and timestamps.
+
+If your existing database was initialized at app startup without Alembic, run
+this one-time SQL statement against it before starting the updated bot:
+
+```sql
+ALTER TABLE webhook_deliveries ADD COLUMN event TEXT;
+```
+
 Start the development server:
 
 ```bash

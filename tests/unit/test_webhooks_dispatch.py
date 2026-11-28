@@ -100,7 +100,7 @@ async def test_installation_event_is_routed_before_repo_check(db):
     router._handle_installation = AsyncMock(return_value={"ok": True, "action": "created"})
 
     request = make_request(
-        {"X-GitHub-Event": "installation"},
+        {"X-GitHub-Event": "installation", "X-GitHub-Delivery": "installation-route"},
         {"action": "created", "installation": {"id": 1}},
     )
 
@@ -117,7 +117,7 @@ async def test_installation_repositories_event_is_routed_before_repo_check(db):
     )
 
     request = make_request(
-        {"X-GitHub-Event": "installation_repositories"},
+        {"X-GitHub-Event": "installation_repositories", "X-GitHub-Delivery": "installation-repos-route"},
         {"action": "added", "installation": {"id": 1}},
     )
 
@@ -134,7 +134,7 @@ async def test_missing_config_is_skipped(db):
         "repository": {"owner": {"login": "hiero"}, "name": "sdk-js"},
         "installation": {"id": 42},
     }
-    request = make_request({"X-GitHub-Event": "ping"}, payload)
+    request = make_request({"X-GitHub-Event": "ping", "X-GitHub-Delivery": "no-config"}, payload)
 
     result = await router.handle(request, db)
     assert result == {"ok": True, "skipped": "no config"}
