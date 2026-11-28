@@ -384,6 +384,21 @@ async def test_slash_check_eligibility_calls_progression(ctx):
 
 
 @pytest.mark.asyncio
+async def test_slash_check_eligibility_silently_ignored_on_free_tier(ctx):
+    router, gh, _ = make_router()
+    gh.post_comment = AsyncMock()
+    ctx["account"] = types.SimpleNamespace(plan_tier="free")
+
+    with patch("app.github.webhooks.ProgressionWorkflow") as mock_cls:
+        mock_cls.return_value.check_and_report = AsyncMock()
+        await router._handle_slash_command(
+            "/check-eligibility", slash_payload("/check-eligibility", issue_number=10), ctx
+        )
+        mock_cls.return_value.check_and_report.assert_not_awaited()
+        gh.post_comment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_slash_help_posts_help_text(ctx):
     router, gh, _ = make_router()
     gh.post_comment = AsyncMock()
@@ -392,6 +407,52 @@ async def test_slash_help_posts_help_text(ctx):
 
     gh.post_comment.assert_awaited_once()
     assert "Hiero Bot Help" in gh.post_comment.call_args[0][3]
+
+
+@pytest.mark.asyncio
+async def test_slash_help_hides_premium_commands_on_free_account(ctx):
+    router, gh, _ = make_router()
+    gh.post_comment = AsyncMock()
+    ctx["account"] = types.SimpleNamespace(plan_tier="free")
+
+    await router._handle_slash_command("/help", slash_payload("/help", issue_number=9), ctx)
+
+    gh.post_comment.assert_awaited_once()
+    help_body = gh.post_comment.call_args[0][3]
+    assert "/check-eligibility" not in help_body
+    assert "/assign" in help_body
+    assert "/unassign" in help_body
+    assert "/label" in help_body
+    assert "/help" in help_body
+
+
+@pytest.mark.asyncio
+async def test_slash_help_includes_check_eligibility_on_premium_account(ctx):
+    router, gh, _ = make_router()
+    gh.post_comment = AsyncMock()
+    ctx["account"] = types.SimpleNamespace(plan_tier="premium")
+
+    await router._handle_slash_command("/help", slash_payload("/help", issue_number=9), ctx)
+
+    gh.post_comment.assert_awaited_once()
+    help_body = gh.post_comment.call_args[0][3]
+    assert "/check-eligibility" in help_body
+    assert "/assign" in help_body
+
+
+@pytest.mark.asyncio
+async def test_slash_help_hides_disabled_workflow_commands(ctx):
+    router, gh, _ = make_router()
+    gh.post_comment = AsyncMock()
+    ctx["config"].workflows.onboarding.enabled = False
+
+    await router._handle_slash_command("/help", slash_payload("/help", issue_number=9), ctx)
+
+    gh.post_comment.assert_awaited_once()
+    help_body = gh.post_comment.call_args[0][3]
+    assert "/assign" not in help_body
+    assert "/unassign" not in help_body
+    assert "/help" in help_body
 
 
 @pytest.mark.asyncio

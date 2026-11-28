@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.billing.gating import is_premium
 from app.db.models import AuditLog, ContributorSnapshot
 from app.github.client import GitHubClient
 from app.utils import audit
@@ -165,6 +166,11 @@ class ProgressionWorkflow:
             await db.commit()
 
     async def check_and_report(self, ctx: dict, payload: dict) -> None:
+        account = ctx.get("account")
+        if not is_premium(account):
+            log.info("Silently ignoring /check-eligibility: account is not premium")
+            return
+
         cfg = ctx["config"].workflows.progression
         if not cfg.enabled:
             return
@@ -519,14 +525,28 @@ class ProgressionWorkflow:
     @staticmethod
     def _check_eligibility(stats: dict, cfg) -> str | None:
         """Return the highest role the contributor is eligible for, or None."""
-        for role, reqs in [
-            ("maintainer", cfg.requirements_for_maintainer),
-            ("committer", cfg.requirements_for_committer),
-            ("junior-committer", cfg.requirements_for_junior_committer),
-        ]:
-            if (stats["merged_prs"] >= reqs.min_merged_prs
-                    and stats["reviews_given"] >= reqs.min_reviews_given
-                    and stats["months_active"] >= reqs.min_months_active):
+        roles = []
+        for role_name in ("maintainer", "admin", "committer", "junior-committer", "triager"):
+            attr = f"requirements_for_{role_name.replace('-', '_')}"
+            reqs = getattr(cfg, attr, None)
+            if reqs is not None:
+                roles.append((role_name, reqs))
+
+        for role, reqs in roles:
+            reviews = stats.get("reviews_given", stats.get("reviews", 0))
+            req_reviews = getattr(reqs, "min_reviews_given", getattr(reqs, "min_reviews", 0))
+
+            active_met = True
+            if hasattr(reqs, "min_active_days") and "active_days" in stats:
+                active_met = stats["active_days"] >= reqs.min_active_days
+            elif hasattr(reqs, "min_months_active") and "months_active" in stats:
+                active_met = stats["months_active"] >= reqs.min_months_active
+
+            if (
+                stats.get("merged_prs", 0) >= reqs.min_merged_prs
+                and reviews >= req_reviews
+                and active_met
+            ):
                 return role
         return None
 
@@ -543,21 +563,34 @@ class ProgressionWorkflow:
     def _build_full_report(login: str, stats: dict, cfg) -> str:
         def row(role: str, reqs) -> str:
             missing = []
-            if stats["merged_prs"] < reqs.min_merged_prs:
-                missing.append(f"{reqs.min_merged_prs - stats['merged_prs']} more PRs")
-            if stats["reviews_given"] < reqs.min_reviews_given:
-                missing.append(f"{reqs.min_reviews_given - stats['reviews_given']} more reviews")
-            if stats["months_active"] < reqs.min_months_active:
-                missing.append(f"{reqs.min_months_active - stats['months_active']} more months")
+            merged = stats.get("merged_prs", 0)
+            if merged < reqs.min_merged_prs:
+                missing.append(f"{reqs.min_merged_prs - merged} more PRs")
+
+            reviews = stats.get("reviews_given", stats.get("reviews", 0))
+            req_reviews = getattr(reqs, "min_reviews_given", getattr(reqs, "min_reviews", 0))
+            if reviews < req_reviews:
+                missing.append(f"{req_reviews - reviews} more reviews")
+
+            if hasattr(reqs, "min_active_days") and "active_days" in stats:
+                if stats["active_days"] < reqs.min_active_days:
+                    missing.append(f"{reqs.min_active_days - stats['active_days']} more active days")
+            elif hasattr(reqs, "min_months_active") and "months_active" in stats:
+                if stats["months_active"] < reqs.min_months_active:
+                    missing.append(f"{reqs.min_months_active - stats['months_active']} more months")
+
             eligible = len(missing) == 0
             detail = "Meets all requirements!" if eligible else "; ".join(missing)
             return f"| **{role}** | {'✅ Eligible' if eligible else '⏳ Not yet'} | {detail} |"
 
-        rows = "\n".join([
-            row("junior-committer", cfg.requirements_for_junior_committer),
-            row("committer", cfg.requirements_for_committer),
-            row("maintainer", cfg.requirements_for_maintainer),
-        ])
+        roles = []
+        for role_name in ("junior-committer", "committer", "maintainer", "triager", "admin"):
+            attr = f"requirements_for_{role_name.replace('-', '_')}"
+            reqs = getattr(cfg, attr, None)
+            if reqs is not None:
+                roles.append((role_name, reqs))
+
+        rows = "\n".join([row(role, reqs) for role, reqs in roles])
 
         partial_note = (
             "\n\n> ℹ️ Your history is large, so only part of it was inspected — "
@@ -565,12 +598,16 @@ class ProgressionWorkflow:
             if stats.get("partial") else ""
         )
 
+        active_label = "Active days" if "active_days" in stats else "Months active"
+        active_val = stats.get("active_days", stats.get("months_active", 0))
+        reviews_val = stats.get("reviews_given", stats.get("reviews", 0))
+
         return f"""## 📊 Progression Report for @{login}
 
 **Your stats in this repo:**
-- 📦 Merged PRs: **{stats['merged_prs']}**
-- 👀 Reviews given: **{stats['reviews_given']}**
-- 📅 Months active: **{stats['months_active']}**
+- 📦 Merged PRs: **{stats.get('merged_prs', 0)}**
+- 👀 Reviews given: **{reviews_val}**
+- 📅 {active_label}: **{active_val}**
 
 **Role eligibility:**
 
