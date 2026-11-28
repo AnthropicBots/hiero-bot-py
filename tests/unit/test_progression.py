@@ -157,6 +157,29 @@ async def test_check_and_report_records_workflow_skipped_when_not_eligible(mock_
 
 
 @pytest.mark.asyncio
+async def test_check_and_report_silently_ignored_on_free_tier(mock_gh, ctx):
+    ctx["account"] = types.SimpleNamespace(plan_tier="free")
+    wf = ProgressionWorkflow(mock_gh)
+    payload = {"issue": {"number": 5}, "comment": {"user": {"login": "alice"}}}
+    await wf.check_and_report(ctx, payload)
+
+    mock_gh.post_comment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_check_and_report_active_days_metric(mock_gh, ctx):
+    stats = {"merged_prs": 10, "reviews_given": 5, "active_days": 42, "login": "alice"}
+    wf = ProgressionWorkflow(mock_gh)
+    payload = {"issue": {"number": 6}, "comment": {"user": {"login": "alice"}}}
+    with patch.object(wf, "_collect_stats", AsyncMock(return_value=stats)):
+        await wf.check_and_report(ctx, payload)
+
+    mock_gh.post_comment.assert_awaited_once()
+    body = mock_gh.post_comment.call_args[0][3]
+    assert "Active days: **42**" in body
+
+
+@pytest.mark.asyncio
 async def test_eligible_role_announced_after_merge(mock_gh, ctx):
     stats = {"merged_prs": 5, "reviews_given": 3, "months_active": 3, "login": "alice"}
     mock_gh.list_issues = AsyncMock(return_value=[])

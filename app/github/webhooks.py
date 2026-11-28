@@ -32,6 +32,8 @@ from app.workflows.reviewerassignment import ReviewerAssignmentWorkflow
 
 log = get_logger("github.webhooks")
 
+HELP_INTRO = "## 🤖 Hiero Bot Help"
+
 HELP_TEXT = """## 🤖 Hiero Bot Help
 
 | Command | Description |
@@ -41,6 +43,51 @@ HELP_TEXT = """## 🤖 Hiero Bot Help
 | `/check-eligibility` | View your role progression status |
 | `/label <name>` | Add a label to this issue (maintainers only) |
 | `/help` | Show this message |
+
+_Powered by [hiero-maintainer-bot](https://github.com/AnthropicBots)_"""
+
+
+def build_help_message(ctx: dict, intro_template: str = HELP_INTRO) -> str:
+    """
+    Dynamically generate the command list for /help:
+    - Include only commands that are enabled in config.
+    - Include only commands allowed for the account's tier (premium commands hidden on free accounts).
+    - Use the help_intro template for the surrounding text.
+    """
+    account = ctx.get("account")
+    premium = is_premium(account)
+    cfg = ctx.get("config")
+
+    commands: list[tuple[str, str]] = []
+
+    # Onboarding workflow commands (/assign, /unassign)
+    onboarding_enabled = True
+    if cfg and hasattr(cfg, "workflows") and hasattr(cfg.workflows, "onboarding"):
+        onboarding_enabled = cfg.workflows.onboarding.enabled
+
+    if onboarding_enabled:
+        commands.append(("/assign", "Self-assign this issue (eligibility checked)"))
+        commands.append(("/unassign", "Remove yourself from this issue"))
+
+    # Progression workflow command (/check-eligibility) - premium gate
+    progression_enabled = True
+    if cfg and hasattr(cfg, "workflows") and hasattr(cfg.workflows, "progression"):
+        progression_enabled = cfg.workflows.progression.enabled
+
+    if premium and progression_enabled:
+        commands.append(("/check-eligibility", "View your role progression status"))
+
+    # General commands available across tiers
+    commands.append(("/label <name>", "Add a label to this issue (maintainers only)"))
+    commands.append(("/help", "Show this message"))
+
+    rows = "\n".join(f"| `{cmd}` | {desc} |" for cmd, desc in commands)
+
+    return f"""{intro_template}
+
+| Command | Description |
+|---------|-------------|
+{rows}
 
 _Powered by [hiero-maintainer-bot](https://github.com/AnthropicBots)_"""
 
@@ -314,15 +361,24 @@ class WebhookRouter:
                 )
 
         elif command == "/check-eligibility":
+            account = ctx.get("account")
+            if not is_premium(account):
+                log.info(
+                    "Silently ignoring /check-eligibility for %s/%s — account is not premium",
+                    ctx.get("owner"),
+                    ctx.get("repo"),
+                )
+                return
             await wf_prog.check_and_report(ctx, payload)
 
         elif command == "/help":
             if issue_number:
+                help_text = build_help_message(ctx)
                 await gh.post_comment(
                     ctx["owner"],
                     ctx["repo"],
                     issue_number,
-                    HELP_TEXT,
+                    help_text,
                     ctx["installation_id"],
                 )
 
