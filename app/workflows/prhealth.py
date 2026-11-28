@@ -18,8 +18,6 @@ from app.utils.pr_checks import commits_have_signoff, has_linked_issue, is_test_
 
 log = get_logger("workflow.prhealth")
 
-LABEL_HEALTHY = "health: 💚 healthy"
-LABEL_NEEDS_WORK = "health: 🔧 needs work"
 HEALTH_MARKER = "<!-- hiero-bot:pr-health -->"
 
 
@@ -58,7 +56,7 @@ class PRHealthWorkflow:
         label = labels.health_healthy if healthy else labels.health_needs_work
         stale_label = labels.health_needs_work if healthy else labels.health_healthy
         applied = await self._gh.add_label(
-            owner, repo, pr_number, label, inst,
+            owner, repo, pr_number, label, inst, create_if_missing=False,
         )
         if applied and stale_label.casefold() != label.casefold():
             await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
@@ -92,7 +90,7 @@ class PRHealthWorkflow:
             metadata={"score": round(score, 1), "signals": signals},
         )
         await db.commit()
-        log.info("PR #%d health score: %.0f/100 (%s)", pr_number, score, label)
+        log.info("PR #%d health score: %.0f/100 (%s)", pr_number, score, fields["label_applied"])
 
     async def _sync_health_comment(
         self, ctx: dict, pr_number: int, score: float, signals: dict, cfg, *, due: bool

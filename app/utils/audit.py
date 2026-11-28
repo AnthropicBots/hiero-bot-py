@@ -22,6 +22,7 @@ VALID_ACTIONS = {
     "pr.review_failed",
     "pr.health_scored",
     "pr.labeled",
+    "pr.quality_evaluated",
     "pr.closed_stale",
     "pr.reviewer_recommended",
     "pr.reviewer_assigned",

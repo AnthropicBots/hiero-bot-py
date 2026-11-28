@@ -1,8 +1,11 @@
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from sqlalchemy import select
 
-from app.workflows.pullrequest import LABEL_FAIL, LABEL_PASS, PullRequestWorkflow
+from app.db.models import AuditLog
+from app.workflows.pullrequest import PullRequestWorkflow
 
 
 def make_pr():
@@ -311,13 +314,28 @@ async def test_changelog_gate_matches_supported_paths(
 # ── Issue #64: stale opposite quality-gate label must be removed ───────────
 
 @pytest.mark.asyncio
+async def test_missing_quality_label_preserves_opposite_label_and_audits_evaluation(mock_gh, ctx, db):
+    labels = ctx["config"].labels
+    labels.quality_failed = "configured quality failure"
+    mock_gh.add_label = AsyncMock(return_value=False)
+
+    await PullRequestWorkflow(mock_gh).handle_pr_opened(ctx, make_payload(), "synchronize")
+
+    mock_gh.add_label.assert_awaited_once_with(
+        "hiero", "sdk-js", 1, labels.quality_failed, 42, create_if_missing=False,
+    )
+    mock_gh.remove_label.assert_not_awaited()
+    assert (await db.scalars(select(AuditLog.action))).all() == ["pr.quality_evaluated"]
+
+
+@pytest.mark.asyncio
 async def test_fail_to_pass_removes_stale_fail_label(mock_gh, ctx):
     """A PR that fails quality gates on open and then passes on a later push
-    must end up with exactly the LABEL_PASS label — the stale LABEL_FAIL
+    must end up with the passing label — the stale failing label
     must be removed."""
     wf = PullRequestWorkflow(mock_gh)
 
-    # First pass: no tests, no DCO status -> gates fail -> LABEL_FAIL
+    # First pass: no tests, no DCO status -> gates fail -> failing label
     mock_gh.list_pr_files = AsyncMock(return_value=[
         {"filename": "src/example.py", "patch": "+x"}
     ])
@@ -325,15 +343,15 @@ async def test_fail_to_pass_removes_stale_fail_label(mock_gh, ctx):
 
     await wf.handle_pr_opened(ctx, make_payload(), "opened")
 
-    assert mock_gh.add_label.call_args[0][3] == LABEL_FAIL
+    assert mock_gh.add_label.call_args[0][3] == ctx["config"].labels.quality_failed
     mock_gh.remove_label.assert_awaited_with(
-        "hiero", "sdk-js", 1, LABEL_PASS, 42
+        "hiero", "sdk-js", 1, ctx["config"].labels.quality_passed, 42
     )
 
     mock_gh.add_label.reset_mock()
     mock_gh.remove_label.reset_mock()
 
-    # Second pass: author adds tests and signs off -> gates pass -> LABEL_PASS
+    # Second pass: author adds tests and signs off -> gates pass -> passing label
     mock_gh.list_pr_files = AsyncMock(return_value=[
         {"filename": "src/example.py", "patch": "+x"},
         {"filename": "tests/test_example.py", "patch": "+def test_x(): pass"},
@@ -344,16 +362,16 @@ async def test_fail_to_pass_removes_stale_fail_label(mock_gh, ctx):
 
     await wf.handle_pr_opened(ctx, make_payload(), "synchronize")
 
-    assert mock_gh.add_label.call_args[0][3] == LABEL_PASS
+    assert mock_gh.add_label.call_args[0][3] == ctx["config"].labels.quality_passed
     mock_gh.remove_label.assert_awaited_once_with(
-        "hiero", "sdk-js", 1, LABEL_FAIL, 42
+        "hiero", "sdk-js", 1, ctx["config"].labels.quality_failed, 42
     )
 
 
 @pytest.mark.asyncio
 async def test_pass_to_fail_removes_stale_pass_label(mock_gh, ctx):
     """The reverse direction: a regression from passing to failing gates must
-    also clear the stale LABEL_PASS."""
+    also clear the stale passing label."""
     wf = PullRequestWorkflow(mock_gh)
 
     mock_gh.list_pr_files = AsyncMock(return_value=[
@@ -365,7 +383,7 @@ async def test_pass_to_fail_removes_stale_pass_label(mock_gh, ctx):
     })
 
     await wf.handle_pr_opened(ctx, make_payload(), "opened")
-    assert mock_gh.add_label.call_args[0][3] == LABEL_PASS
+    assert mock_gh.add_label.call_args[0][3] == ctx["config"].labels.quality_passed
 
     mock_gh.add_label.reset_mock()
     mock_gh.remove_label.reset_mock()
@@ -378,9 +396,9 @@ async def test_pass_to_fail_removes_stale_pass_label(mock_gh, ctx):
 
     await wf.handle_pr_opened(ctx, make_payload(), "synchronize")
 
-    assert mock_gh.add_label.call_args[0][3] == LABEL_FAIL
+    assert mock_gh.add_label.call_args[0][3] == ctx["config"].labels.quality_failed
     mock_gh.remove_label.assert_awaited_once_with(
-        "hiero", "sdk-js", 1, LABEL_PASS, 42
+        "hiero", "sdk-js", 1, ctx["config"].labels.quality_passed, 42
     )
 
 
@@ -439,11 +457,6 @@ async def test_catastrophic_branch_pattern_cannot_stall_the_gate(mock_gh, ctx):
 
 
 # ── AI review failure handling (issue #124) ───────────────────
-
-import httpx
-from sqlalchemy import select
-
-from app.db.models import AuditLog
 
 
 def _http_status_error(code):

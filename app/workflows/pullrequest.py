@@ -20,9 +20,6 @@ from app.utils.safe_regex import bounded_match
 
 log = get_logger("workflow.pullrequest")
 
-LABEL_PASS = "quality: ✅ passed"
-LABEL_FAIL = "quality: ❌ needs work"
-
 # Reviewer recommendation budget. A PR spreading across more than a handful of
 # directories has no sharp ownership signal, so querying more of them buys
 # noise rather than accuracy — and every extra directory is another API call.
@@ -104,19 +101,20 @@ class PullRequestWorkflow:
         # No gates enabled -> nothing was evaluated, so don't claim "passed":
         # skip the label and the audit row entirely (issue #123).
         if checks:
+            applied = False
             if cfg.auto_label:
                 labels = ctx["config"].labels
                 label = labels.quality_passed if all_passed else labels.quality_failed
                 stale_label = labels.quality_failed if all_passed else labels.quality_passed
                 applied = await self._gh.add_label(
-                    owner, repo, pr_number, label, inst,
+                    owner, repo, pr_number, label, inst, create_if_missing=False,
                 )
                 if applied and stale_label.casefold() != label.casefold():
                     await self._gh.remove_label(owner, repo, pr_number, stale_label, inst)
 
             await audit.record(
                 db,
-                action="pr.labeled",
+                action="pr.labeled" if applied else "pr.quality_evaluated",
                 owner=owner,
                 repo=repo,
                 target_number=pr_number,

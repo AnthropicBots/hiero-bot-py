@@ -184,7 +184,6 @@ workflows:
     enabled: true              # off by default: this workflow closes issues and unassigns people. false disables all of it (unassigning, stale marking, closing and their comments)
     stale_issue_days: 60       # days without activity before an issue is marked stale
     close_stale_after_days: 7  # additional days after an issue is marked stale (with no further activity) before it is closed; independent of stale_issue_days
-    stale_label: "stale"
     exempt_labels:             # issues with any of these labels are never touched
       - pinned
       - security

@@ -717,7 +717,9 @@ class IssueManagementWorkflow:
         if not await self._still_due(ctx, issue, "stale", recheck):
             await self._withdraw(ctx, record)
             raise _AlreadyClaimed
-        if await self._gh.add_label(owner, repo, number, stale_label, inst) is False:
+        if await self._gh.add_label(
+            owner, repo, number, stale_label, inst, create_if_missing=False,
+        ) is False:
             await self._withdraw(ctx, record)
             return False
         return await self._finish_action(ctx, record, days_inactive, False)
