@@ -179,7 +179,7 @@ class OnboardingWorkflow:
                 )
                 return
 
-        msg = self._build_welcome(login, cfg)
+        msg = self._build_welcome(login, cfg, ctx["config"].branding.name)
         await self._gh.post_comment(owner, repo, issue_number, msg, inst)
 
         await audit.record(
@@ -194,7 +194,7 @@ class OnboardingWorkflow:
         await db.commit()
 
         # Assign mentor
-        if cfg.auto_assign_mentor and ctx["config"].teams.mentors:
+        if cfg.auto_assign_mentor and ctx["config"].mentor_team:
             await self._assign_mentor(ctx, issue_number, login)
 
     async def handle_self_assign(self, ctx: dict, payload: dict) -> None:
@@ -478,7 +478,7 @@ class OnboardingWorkflow:
         self, ctx: dict, issue_number: int, contributor: str
     ) -> None:
         org = ctx["owner"]
-        team_slug = ctx["config"].teams.mentors
+        team_slug = ctx["config"].mentor_team
         inst = ctx["installation_id"]
         db = ctx["db"]
 
@@ -561,7 +561,7 @@ class OnboardingWorkflow:
         return min(logins, key=lambda login: (counts.get(login.lower(), 0), login.lower()))
 
     @staticmethod
-    def _build_welcome(login: str, cfg) -> str:
+    def _build_welcome(login: str, cfg, brand_name: str = "Hiero") -> str:
         checklist = ""
         if cfg.onboarding_checklist:
             items = "\n".join(f"- [ ] {item}" for item in cfg.onboarding_checklist)
@@ -569,7 +569,7 @@ class OnboardingWorkflow:
 
         custom = f"\n\n{cfg.welcome_message}" if cfg.welcome_message else ""
 
-        return f"""## 👋 Welcome to Hiero, @{login}!
+        return f"""## 👋 Welcome to {brand_name}, @{login}!
 
 Thanks for your first contribution — we're thrilled to have you here.{custom}{checklist}
 

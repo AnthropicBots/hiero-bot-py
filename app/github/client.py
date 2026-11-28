@@ -7,7 +7,7 @@ import time
 import urllib.parse
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import jwt
@@ -80,21 +80,6 @@ def _normalize_private_key(raw: str) -> str:
         "- RSA PRIVATE KEY\n"
         "- PRIVATE KEY\n"
         "- EC PRIVATE KEY"
-    )
-
-
-def _is_label_already_exists(exc: httpx.HTTPStatusError) -> bool:
-    """Return whether GitHub rejected label creation because it already exists."""
-    if exc.response.status_code != 422:
-        return False
-    try:
-        payload = exc.response.json()
-    except (ValueError, TypeError):
-        return False
-    errors = payload.get("errors", []) if isinstance(payload, dict) else []
-    return any(
-        isinstance(error, dict) and error.get("code") == "already_exists"
-        for error in errors
     )
 
 
@@ -683,33 +668,23 @@ class GitHubClient:
         number: int,
         label: str,
         installation_id: int,
-        create_if_missing: bool = True,
-    ) -> None:
-        if create_if_missing:
-            encoded_label = urllib.parse.quote(label, safe="")
-            # Ensure label exists
-            try:
-                await self.get(
-                    f"/repos/{owner}/{repo}/labels/{encoded_label}", installation_id
-                )
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    try:
-                        await self.post(
-                            f"/repos/{owner}/{repo}/labels",
-                            installation_id,
-                            json={"name": label, "color": "ededed"},
-                        )
-                    except httpx.HTTPStatusError as create_exc:
-                        if not _is_label_already_exists(create_exc):
-                            raise
-                else:
-                    raise
+        create_if_missing: Literal[False] = False,
+    ) -> bool:
+        """Apply an existing repository label and report whether it was applied."""
+        encoded_label = urllib.parse.quote(label, safe="")
+        try:
+            await self.get(f"/repos/{owner}/{repo}/labels/{encoded_label}", installation_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            log.warning("Skipping missing repository label %r on %s/%s", label, owner, repo)
+            return False
         await self.post(
             f"/repos/{owner}/{repo}/issues/{number}/labels",
             installation_id,
             json={"labels": [label]},
         )
+        return True
 
     async def remove_label(
         self, owner: str, repo: str, number: int, label: str, installation_id: int

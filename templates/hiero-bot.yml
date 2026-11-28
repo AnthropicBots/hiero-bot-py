@@ -7,11 +7,25 @@
 
 repo: "hiero/your-repo"
 
-difficulty_labels:
-  intermediate: "intermediate"
+branding:
+  name: "Hiero"
 
-teams:
-  mentors: "mentors"
+# Create the labels in GitHub before enabling the workflows that use them.
+labels:
+  health_healthy: "health: 💚 healthy"
+  health_needs_work: "health: 🔧 needs work"
+  quality_passed: "quality: ✅ passed"
+  quality_failed: "quality: ❌ needs work"
+  size_s: "size: S"
+  size_m: "size: M"
+  size_l: "size: L"
+  size_xl: "size: XL"
+  conflict: "conflict"
+  stale: "stale"
+  difficulty_beginner: "beginner"
+  difficulty_intermediate: "intermediate"
+  difficulty_advanced: "advanced"
+  mentor_team: "mentors"
 
 workflows:
 
@@ -170,7 +184,6 @@ workflows:
     enabled: true              # off by default: this workflow closes issues and unassigns people. false disables all of it (unassigning, stale marking, closing and their comments)
     stale_issue_days: 60       # days without activity before an issue is marked stale
     close_stale_after_days: 7  # additional days after an issue is marked stale (with no further activity) before it is closed; independent of stale_issue_days
-    stale_label: "stale"
     exempt_labels:             # issues with any of these labels are never touched
       - pinned
       - security

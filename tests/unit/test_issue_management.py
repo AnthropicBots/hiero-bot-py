@@ -329,13 +329,33 @@ async def _logged_issue_numbers(db) -> list[int]:
 
 
 @pytest.mark.asyncio
+async def test_missing_stale_label_leaves_no_successful_action_or_notice(mock_gh, ctx, db):
+    stale_label = "configured stale label"
+    ctx["config"].labels.stale = stale_label
+    mock_gh.list_issues = AsyncMock(return_value=[make_issue(number=1, updated_days_ago=100)])
+    mock_gh.add_label = AsyncMock(return_value=False)
+
+    counts = await IssueManagementWorkflow(mock_gh).run_stale_scan(ctx)
+
+    mock_gh.add_label.assert_awaited_once_with(
+        "hiero", "sdk-js", 1, stale_label, 42, create_if_missing=False,
+    )
+    mock_gh.remove_label.assert_not_awaited()
+    mock_gh.post_comment.assert_not_awaited()
+    assert counts["stale_marked"] == 0
+    assert await _logged_issue_numbers(db) == []
+    assert (await db.scalars(select(LifecycleAction))).all() == []
+    assert (await db.scalars(select(AuditLog))).all() == []
+
+
+@pytest.mark.asyncio
 async def test_failing_issue_does_not_abort_the_scan(mock_gh, ctx, db):
     default_add_label = mock_gh.add_label.side_effect
 
-    async def add_label(owner, repo, number, label, inst):
+    async def add_label(owner, repo, number, label, inst, *, create_if_missing):
         if number == 1:
             raise _http_error(403)
-        await default_add_label(owner, repo, number, label, inst)
+        await default_add_label(owner, repo, number, label, inst, create_if_missing=create_if_missing)
 
     mock_gh.list_issues = AsyncMock(return_value=[
         make_issue(number=1, updated_days_ago=400),
@@ -390,10 +410,10 @@ async def test_timeline_failure_skips_issue_without_lifecycle_actions(
 async def test_earlier_audit_rows_survive_a_later_failure(mock_gh, ctx, db):
     default_add_label = mock_gh.add_label.side_effect
 
-    async def add_label(owner, repo, number, label, inst):
+    async def add_label(owner, repo, number, label, inst, *, create_if_missing):
         if number == 3:
             raise _http_error(403)
-        await default_add_label(owner, repo, number, label, inst)
+        await default_add_label(owner, repo, number, label, inst, create_if_missing=create_if_missing)
 
     mock_gh.list_issues = AsyncMock(return_value=[
         make_issue(number=1, updated_days_ago=400),
@@ -513,7 +533,7 @@ def _wire(mock_gh, issue: _FakeGitHubIssue):
 
         return []
 
-    async def add_label(owner, repo, number, label, inst):
+    async def add_label(owner, repo, number, label, inst, *, create_if_missing):
         issue.labels.append(label)
         issue.add_timeline_event(
             "labeled",
@@ -2750,7 +2770,7 @@ async def test_a_label_a_person_added_first_is_not_credited_to_the_bot(
 ):
     clock, issue = _crash_setup(mock_gh, ctx)
 
-    async def person_wins(owner, repo, number, label, inst):
+    async def person_wins(owner, repo, number, label, inst, *, create_if_missing):
         issue.labels.append(label)
         issue.add_timeline_event("labeled", _PERSON, label=label)
         issue.touch()
@@ -3060,7 +3080,7 @@ async def test_a_label_with_no_visible_event_is_not_credited_to_the_bot(
 ):
     clock, issue = _crash_setup(mock_gh, ctx)
 
-    async def lands_without_an_event(owner, repo, number, label, inst):
+    async def lands_without_an_event(owner, repo, number, label, inst, *, create_if_missing):
         issue.labels.append(label)  # the timeline has not caught up
         issue.touch()
 

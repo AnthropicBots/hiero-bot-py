@@ -1,11 +1,6 @@
 import pytest
 
-from app.workflows.prhealth import (
-    HEALTH_MARKER,
-    LABEL_HEALTHY,
-    LABEL_NEEDS_WORK,
-    PRHealthWorkflow,
-)
+from app.workflows.prhealth import HEALTH_MARKER, PRHealthWorkflow
 
 
 def make_payload():
@@ -40,7 +35,7 @@ async def test_healthy_label_can_coexist_with_comment_when_comment_threshold_is_
     wf = PRHealthWorkflow(mock_gh)
     await wf.score_pr(ctx, make_payload())
 
-    assert mock_gh.add_label.call_args.args[3] == LABEL_HEALTHY
+    assert mock_gh.add_label.call_args.args[3] == ctx["config"].labels.health_healthy
     mock_gh.post_comment.assert_awaited_once()
 
     comment_body = mock_gh.post_comment.call_args.args[3]
@@ -67,7 +62,7 @@ async def test_score_equal_to_comment_threshold_does_not_post_comment(
     wf = PRHealthWorkflow(mock_gh)
     await wf.score_pr(ctx, make_payload())
 
-    assert mock_gh.add_label.call_args.args[3] == LABEL_NEEDS_WORK
+    assert mock_gh.add_label.call_args.args[3] == ctx["config"].labels.health_needs_work
     mock_gh.post_comment.assert_not_awaited()
 
 
@@ -108,7 +103,7 @@ async def test_recovery_updates_existing_health_comment_without_duplicate(
     # should remain needs-work.
     await wf.score_pr(ctx, make_payload())
 
-    assert mock_gh.add_label.call_args.args[3] == LABEL_NEEDS_WORK
+    assert mock_gh.add_label.call_args.args[3] == ctx["config"].labels.health_needs_work
 
     mock_gh.update_comment.assert_awaited_once()
     update_args = mock_gh.update_comment.call_args.args

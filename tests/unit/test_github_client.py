@@ -899,7 +899,7 @@ async def test_list_labels_paginates():
 
 
 @pytest.mark.asyncio
-async def test_add_label_creates_missing_label_on_404():
+async def test_add_label_skips_missing_label_on_404():
     client = GitHubClient()
 
     not_found_err = httpx.HTTPStatusError(
@@ -910,22 +910,13 @@ async def test_add_label_creates_missing_label_on_404():
         patch.object(client, "get", new=AsyncMock(side_effect=not_found_err)) as mock_get,
         patch.object(client, "post", new=AsyncMock(return_value={})) as mock_post,
     ):
-        await client.add_label("hiero", "sdk-js", 7, "action: merge", 123)
+        applied = await client.add_label("hiero", "sdk-js", 7, "action: merge", 123)
 
+    assert applied is False
     mock_get.assert_awaited_once_with(
         "/repos/hiero/sdk-js/labels/action%3A%20merge", 123
     )
-    mock_post.assert_any_await(
-        "/repos/hiero/sdk-js/labels",
-        123,
-        json={"name": "action: merge", "color": "ededed"},
-    )
-    mock_post.assert_any_await(
-        "/repos/hiero/sdk-js/issues/7/labels",
-        123,
-        json={"labels": ["action: merge"]},
-    )
-    assert mock_post.await_count == 2
+    mock_post.assert_not_awaited()
 
     await client.close()
 
@@ -984,7 +975,7 @@ async def test_add_label_create_if_missing_false_never_creates():
             "hiero", "sdk-js", 7, "action: merge", 123, create_if_missing=False
         )
 
-    mock_get.assert_not_called()
+    mock_get.assert_awaited_once_with("/repos/hiero/sdk-js/labels/action%3A%20merge", 123)
     mock_post.assert_awaited_once_with(
         "/repos/hiero/sdk-js/issues/7/labels",
         123,
@@ -1002,45 +993,6 @@ async def test_remove_label_url_encodes_slashes():
     mock_delete.assert_awaited_once_with(
         "/repos/hiero/sdk-js/issues/7/labels/kind%2Fbug", 123
     )
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_add_label_treats_already_exists_as_success():
-    client = GitHubClient()
-    exists_error = httpx.HTTPStatusError(
-        "Unprocessable Entity",
-        request=Mock(),
-        response=httpx.Response(
-            422,
-            json={
-                "message": "Validation Failed",
-                "errors": [{"code": "already_exists"}],
-            },
-            request=httpx.Request(
-                "POST", "https://api.github.com/repos/hiero/sdk-js/labels"
-            ),
-        ),
-    )
-    with (
-        patch.object(
-            client,
-            "get",
-            new=AsyncMock(
-                side_effect=httpx.HTTPStatusError(
-                    "Not found", request=Mock(), response=Mock(status_code=404)
-                )
-            ),
-        ) as mock_get,
-        patch.object(
-            client, "post", new=AsyncMock(side_effect=[exists_error, {}])
-        ) as mock_post,
-    ):
-        await client.add_label("hiero", "sdk-js", 7, "kind/bug", 123)
-    mock_get.assert_awaited_once_with(
-        "/repos/hiero/sdk-js/labels/kind%2Fbug", 123
-    )
-    assert mock_post.await_count == 2
     await client.close()
 
 

@@ -3,8 +3,10 @@
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 
-from app.workflows.prhealth import LABEL_HEALTHY, LABEL_NEEDS_WORK, PRHealthWorkflow
+from app.db.models import PRHealthScore
+from app.workflows.prhealth import PRHealthWorkflow
 
 
 def make_pr(number=1, author="alice", additions=100, deletions=50, body="Closes #1"):
@@ -25,6 +27,21 @@ def make_payload(pr=None):
 
 
 @pytest.mark.asyncio
+async def test_missing_health_label_preserves_opposite_label_and_saves_no_applied_label(mock_gh, ctx, db):
+    labels = ctx["config"].labels
+    labels.health_needs_work = "configured health warning"
+    mock_gh.add_label = AsyncMock(return_value=False)
+
+    await PRHealthWorkflow(mock_gh).score_pr(ctx, make_payload())
+
+    mock_gh.add_label.assert_awaited_once_with(
+        "hiero", "sdk-js", 1, labels.health_needs_work, 42, create_if_missing=False,
+    )
+    mock_gh.remove_label.assert_not_awaited()
+    assert (await db.scalars(select(PRHealthScore))).one().label_applied is None
+
+
+@pytest.mark.asyncio
 async def test_score_persisted_to_db(mock_gh, ctx):
     mock_gh.list_pr_files = AsyncMock(return_value=[
         {"filename": "src/foo.ts", "patch": "+const x = 1;"},
@@ -40,9 +57,6 @@ async def test_score_persisted_to_db(mock_gh, ctx):
     wf = PRHealthWorkflow(mock_gh)
     await wf.score_pr(ctx, make_payload())
 
-    from sqlalchemy import select
-
-    from app.db.models import PRHealthScore
     result = await ctx["db"].execute(select(PRHealthScore))
     rows = result.scalars().all()
     assert len(rows) == 1
@@ -113,7 +127,7 @@ async def test_needs_work_label_without_comment_between_thresholds(mock_gh, ctx)
     """
     Boundary behavior after decoupling comment and label thresholds: a PR
     scoring between comment_threshold and label_healthy_above gets the
-    LABEL_NEEDS_WORK label without a comment. Comments follow
+    needs-work label without a comment. Comments follow
     comment_threshold only so operators can quiet them independently.
     """
     files = [
@@ -147,7 +161,7 @@ async def test_needs_work_label_without_comment_between_thresholds(mock_gh, ctx)
     )
 
     label = mock_gh.add_label.call_args[0][3]
-    assert label == LABEL_NEEDS_WORK
+    assert label == ctx["config"].labels.health_needs_work
     mock_gh.post_comment.assert_not_awaited()
 
 
@@ -356,7 +370,7 @@ async def test_upsert_helper_updates_fields_in_place(db):
 @pytest.mark.asyncio
 async def test_needs_work_to_healthy_removes_stale_needs_work_label(mock_gh, ctx):
     """A PR that flips from needs-work to healthy must end up with exactly
-    one health label — the stale LABEL_NEEDS_WORK must be removed."""
+    one health label — the stale needs-work label must be removed."""
     low_signal_files = [{"filename": "src/foo.ts", "patch": "+x"}]
     mock_gh.list_pr_files = AsyncMock(return_value=low_signal_files)
     mock_gh.get_combined_status = AsyncMock(return_value={"statuses": []})
@@ -366,10 +380,10 @@ async def test_needs_work_to_healthy_removes_stale_needs_work_label(mock_gh, ctx
     pr = make_pr(number=99, body="fix stuff")
     await wf.score_pr(ctx, make_payload(pr))
 
-    # First pass should have scored low and applied LABEL_NEEDS_WORK
-    assert mock_gh.add_label.call_args[0][3] == LABEL_NEEDS_WORK
+    # First pass should score low and apply the needs-work label.
+    assert mock_gh.add_label.call_args[0][3] == ctx["config"].labels.health_needs_work
     mock_gh.remove_label.assert_awaited_with(
-        "hiero", "sdk-js", 99, LABEL_HEALTHY, 42
+        "hiero", "sdk-js", 99, ctx["config"].labels.health_healthy, 42
     )
 
     mock_gh.add_label.reset_mock()
@@ -393,17 +407,17 @@ async def test_needs_work_to_healthy_removes_stale_needs_work_label(mock_gh, ctx
     pr2 = make_pr(number=99, body="Closes #10 " + "x" * 50)
     await wf.score_pr(ctx, make_payload(pr2))
 
-    assert mock_gh.add_label.call_args[0][3] == LABEL_HEALTHY
+    assert mock_gh.add_label.call_args[0][3] == ctx["config"].labels.health_healthy
     # The stale "needs work" label from the first pass must be removed.
     mock_gh.remove_label.assert_awaited_once_with(
-        "hiero", "sdk-js", 99, LABEL_NEEDS_WORK, 42
+        "hiero", "sdk-js", 99, ctx["config"].labels.health_needs_work, 42
     )
 
 
 @pytest.mark.asyncio
 async def test_healthy_to_needs_work_removes_stale_healthy_label(mock_gh, ctx):
     """The reverse direction: a regression from healthy to needs-work must
-    also clear the stale LABEL_HEALTHY."""
+    also clear the stale healthy label."""
     mock_gh.list_pr_files = AsyncMock(return_value=[
         {"filename": "src/foo.ts", "patch": "+x"},
         {"filename": "tests/foo.test.ts", "patch": "+it()"},
@@ -419,7 +433,7 @@ async def test_healthy_to_needs_work_removes_stale_healthy_label(mock_gh, ctx):
     wf = PRHealthWorkflow(mock_gh)
     pr = make_pr(number=100, body="Closes #10 " + "x" * 50)
     await wf.score_pr(ctx, make_payload(pr))
-    assert mock_gh.add_label.call_args[0][3] == LABEL_HEALTHY
+    assert mock_gh.add_label.call_args[0][3] == ctx["config"].labels.health_healthy
 
     mock_gh.add_label.reset_mock()
     mock_gh.remove_label.reset_mock()
@@ -434,9 +448,9 @@ async def test_healthy_to_needs_work_removes_stale_healthy_label(mock_gh, ctx):
     pr2 = make_pr(number=100, body="fix stuff")
     await wf.score_pr(ctx, make_payload(pr2))
 
-    assert mock_gh.add_label.call_args[0][3] == LABEL_NEEDS_WORK
+    assert mock_gh.add_label.call_args[0][3] == ctx["config"].labels.health_needs_work
     mock_gh.remove_label.assert_awaited_once_with(
-        "hiero", "sdk-js", 100, LABEL_HEALTHY, 42
+        "hiero", "sdk-js", 100, ctx["config"].labels.health_healthy, 42
     )
 
 

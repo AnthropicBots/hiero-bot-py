@@ -46,8 +46,10 @@ def mock_gh():
             **extra,
         })
 
-    async def add_label(owner, repo, number, label, installation_id):
+    async def add_label(owner, repo, number, label, installation_id, *, create_if_missing=False):
+        assert not create_if_missing
         own_event(number, "labeled", label={"name": label})
+        return True
 
     async def remove_assignees(owner, repo, number, logins, installation_id):
         for login in logins:
